@@ -113,16 +113,13 @@ const 盘大小MB = (() => {
   return Number.isInteger(v) && v >= 1 ? v : 64;
 })();
 const 种子偏移 = 4608;
-const 总扇区 = 盘大小MB * 2048;        // 1 MB 是 2048 个扇区
-const 盘内容 = Buffer.alloc(总扇区 * 512);
-引导.copy(盘内容, 0);
-二段.copy(盘内容, 512);
-种子内容.copy(盘内容, 种子偏移);
-if (种子偏移 + 种子内容.length > 盘内容.length) 失败("种子比盘还大，装不下");
+const 盘字节数 = 盘大小MB * 1024 * 1024;
+if (种子偏移 + 种子内容.length > 盘字节数) 失败("种子比盘还大，装不下");
 
 // 把种子的真实字节数写进第二段里那一格。第二段自己只知道读了多少扇区，而扇区是向上
 // 取整的 —— 74594 与 74752 差的那 158 字节正是末尾的补零。这个数只有这一侧见过，
 // 所以由这一侧写进去；写的位置从 nasm 的清单里按符号名找，不靠人记偏移。
+// 这一步必须在写盘之前 —— 它改的是内存里的那份第二段，改完才跟着一起落盘。
 if (种子内容.length) {
   const 格 = 找符号(清单, "seed_bytes");
   if (格 === null) 失败("清单里没有 seed_bytes 这个符号 —— 第二段里那一格改名了吗");
@@ -131,12 +128,22 @@ if (种子内容.length) {
   const 段内 = 格 >= 0x7e00 ? 格 - 0x7e00 : 格;
   if (段内 < 0 || 段内 + 4 > 4096) 失败("seed_bytes 落在第二段外面：偏移 " + 段内);
   二段.writeUInt32LE(种子内容.length, 段内);
-  二段.copy(盘内容, 512);
   console.log("字节数    " + 种子内容.length + " 写进第二段偏移 " + 段内);
 }
 
-fs.writeFileSync(盘像, 盘内容);
-console.log("盘映像    " + 盘内容.length + " 字节（" + 总扇区 + " 个扇区）");
+// 盘用稀疏文件建，不在内存里放一份整盘副本 —— Node 的 Buffer 上限是 2 GB，而这块盘
+// 将来会要 4 GB。ftruncate 造出来的空洞不占磁盘也不占内存，三段各自写在它该在的
+// 偏移上就够了。VDI 那一层同样对全零区域稀疏，所以两处都不必为「名义尺寸」付账。
+const fd = fs.openSync(盘像, "w");
+try {
+  fs.ftruncateSync(fd, 盘字节数);
+  fs.writeSync(fd, 引导, 0, 引导.length, 0);
+  fs.writeSync(fd, 二段, 0, 二段.length, 512);
+  fs.writeSync(fd, 种子内容, 0, 种子内容.length, 种子偏移);
+} finally {
+  fs.closeSync(fd);
+}
+console.log("盘映像    " + 盘大小MB + " MB（" + 盘字节数 / 512 + " 个扇区）");
 
 // ---- 四、转成 vdi ----
 const VBox = 找VBox();
