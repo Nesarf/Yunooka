@@ -11,31 +11,52 @@ HMYR 要跑在上面的那个系统。名字取自小一孁こはね所属学寮
 
 ```
 boot/boot.asm      512 字节的引导扇区：初始化 COM1、打印一行、读第二扇区、跳过去
-boot/stage2.asm    第二扇区：被读进 0x7E00，打印第二行，停机
-tools/build.mjs    编两段、各查形状、拼成一块盘、转成 vdi
-tools/run.mjs      挂盘、引导、读串口、比对两行
+boot/stage2.asm    第二扇区：打印第二行、读第 3 扇区、认种子魔数、停机
+tools/build.mjs    编两段、各查形状、拼成一块盘、转成 vdi（`--seed <路径>` 带种子）
+tools/run.mjs      挂盘、引导、读串口、比对
 ```
 
 跑：
 
 ```
-node tools/build.mjs
+node tools/build.mjs                                  # 不带宽种子
+node tools/build.mjs --seed D:\himeyuri\bootstrap\pack.hmtn
 node tools/run.mjs
 ```
 
 ## 判据
 
-**串口里出现两行：`Yunooka: boot ok` 与 `Yunooka: stage2 ok`。**
+**串口里出现两行：`Yunooka: boot ok` 与 `Yunooka: stage2 ok`；第三行视有没有种子而定。**
 
-两行都要在。只看到第二行，说明第一段没跑；只看到第一行，说明读盘或跳转断了。判据分两行
-写，正是为了让失败停在能分辨的位置上 —— 一句「全对」看不出一段还是两段。
+前两行是成败线，第三行是信息：
+
+```
+Yunooka: seed ok          读到第 3 扇区，前五字节是 HMYRB
+Yunooka: seed bad         读到了，但前五字节不是 HMYRB（没给 --seed 时就是这一种）
+Yunooka: seed unreadable 第 3 个扇区读不出来
+```
+
+第三行不写进成败线，是因为没有种子的那一趟也该算通 —— Yunooka 不欠 HMYR 仓库任何东西。
+把第三行写成「必有」会让那一趟假红；完全不查又会漏掉读盘失败。所以它单独报。
+
+两行前判据的用意：只看到第二行，说明第一段没跑；只看到第一行，说明读盘或跳转断了。
+判据分两行写，正是为了让失败停在能分辨的位置上 —— 一句「全对」看不出一段还是两段。
 
 走串口而不是屏幕，因为 VBoxManage 能把 COM1 的字节写进主机的一个文件 —— 于是「它说得出
 话吗」变成「文件里有没有那段字节」。这件事可以自动比对，不依赖截图、OCR 或者人的眼睛。
 屏幕输出照样留着，用来看，不用来判。
 
-`tools/run.mjs` 的退出码：0 两行都在，1 缺至少一行，2 这一台做不了（没有 VirtualBox、
+`tools/run.mjs` 的退出码：0 前两行都在，1 缺至少一行，2 这一台做不了（没有 VirtualBox、
 没有盘）。
+
+## 它与 HMYR 的第一次接触
+
+第 3 个扇区放种子的第一个扇区（`--seed` 给的那份，只取前 512 字节 —— 第二段只认魔数，
+不需要整份种子）。第二段读它、比前五字节。
+
+这是 Yunooka 第一次去认 HMYR 的东西。它现在还读不懂种子，只认得它开头的 `HMYRB`；而
+「认得」这个词在 HMYR 仓库的 `design/FILETYPE.txt` 里有一层更重的意思 —— 那个系统认得
+那些扩展名。今天只做到第一层。
 
 ## 两段是怎么分的
 

@@ -19,9 +19,11 @@ const 盘 = path.join(建, "disk.vdi");
 const 串口 = path.join(建, "serial.log");
 const 截屏 = path.join(建, "screen.png");
 const 机名 = "Yunooka";
-// 两行都要在。只看到第二行说明第一段没跑；只看到第一行说明读盘或跳转断了 ——
-// 判据分两行写，正是为了让失败停在能分辨的位置上。
+// 三行里前两行必有，第三行视有没有给种子而定 —— 所以这里只查前两行，
+// 第三行落在下面三种之一：seed ok、seed bad、seed unreadable。
+// 把它写进「必有」会让没有种子的那一趟假红；完全不查又会漏掉读盘失败。
 const 该有 = ["Yunooka: boot ok", "Yunooka: stage2 ok"];
+const 种子三种 = ["Yunooka: seed ok", "Yunooka: seed bad", "Yunooka: seed unreadable"];
 const 留机 = process.argv.includes("--keep");
 
 const 做不了 = (为什么) => {
@@ -109,9 +111,18 @@ vbox(["controlvm", 机名, "screenshotpng", 截屏]);
 // ---- 四、报 ----
 const 缺 = 该有.filter((s) => !读到.includes(s));
 const 成了 = 缺.length === 0;
+// 第三行不是必有的：没有种子的那一趟，第二段会说 seed bad 或者 seed unreadable。
+// 所以这里只把「它说了哪一种」报出来，不把它算进成败 —— 成败由前两行决定。
+const 种子行 = 种子三种.find((s) => 读到.includes(s)) || "(没有第三行)";
+const 种子意 = {
+  "Yunooka: seed ok": "读到种子，魔数 HMYRB 对",
+  "Yunooka: seed bad": "读到了，但前五字节不是 HMYRB",
+  "Yunooka: seed unreadable": "第 3 个扇区读不出来",
+};
 console.log("");
 console.log("机器      " + 机名 + "（32 MiB，BIOS 引导，串口写文件）");
 console.log("串口读到  " + (读到 ? JSON.stringify(读到.replace(/\r/g, "\\r").replace(/\n/g, "\\n")) : "(空)"));
+console.log("种子那一行 " + 种子行 + " —— " + (种子意[种子行] || "第三行没出现"));
 console.log("截屏      " + 截屏);
 console.log("");
 console.log(成了
