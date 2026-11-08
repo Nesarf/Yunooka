@@ -500,13 +500,104 @@ fn_probe:
     ; 第一条指令的操作码单独占一行：它要拿 src/code-file.mjs 那张表来核对，
     ; 而这张表的权威在那一侧，所以这里只报号，翻译留给读的人。
     mov rsi, r12
-    movzx eax, byte [rsi]
+    xor rbx, rbx
+.instr_loop:
+    cmp rbx, r13
+    jae .instr_done
+    movzx eax, byte [rsi]          ; 操作码
     mov r14, rax
+    push rsi
+    push rbx
     mov rsi, line_op
     call puts64
     mov rax, r14
     call put_num64
-    jmp put_nl64
+    call put_nl64
+    pop rbx
+    pop rsi
+    inc rsi                        ; 跳过操作码那一个字节
+    movzx eax, byte [imm_shape + r14]
+    call skip_imm                  ; 按立即数形状把这一条的其余部分跳过
+    inc rbx
+    jmp .instr_loop
+.instr_done:
+    ret
+
+; 按立即数形状跳过一条指令剩余的部分。形状编号沿用 src/code-file.mjs 的十种，
+; 这里只用到八种能算出长度的（tuple 与 value 里的元组/记录走不到，遇到就停）。
+;   0 none  1 u16  2 u32  3 name  4 store  5 record  6 call  7 value  8 tuple
+skip_imm:
+    cmp al, 0
+    je .done
+    cmp al, 1
+    je .u16
+    cmp al, 2
+    je .u32
+    cmp al, 3
+    je .name
+    cmp al, 4
+    je .store
+    cmp al, 5
+    je .record
+    cmp al, 6
+    je .call
+    cmp al, 7
+    je .value
+    ; 8 tuple：一个 u16 长度，后面跟的是槽号不是数据，所以只跳过长度
+    add rsi, 2
+    ret
+.u16:
+    add rsi, 2
+    ret
+.u32:
+    add rsi, 4
+    ret
+.name:
+    movzx eax, word [rsi]
+    lea rsi, [rsi + 2 + rax * 2]
+    ret
+.store:
+    add rsi, 3                     ; u16 槽号 + u8 是否声明
+    ret
+.record:
+    movzx ecx, word [rsi]
+    add rsi, 2
+.rec_loop:
+    test ecx, ecx
+    jz .done
+    movzx eax, word [rsi]
+    lea rsi, [rsi + 2 + rax * 2]
+    dec ecx
+    jmp .rec_loop
+.call:
+    movzx eax, word [rsi]          ; 名字在前
+    lea rsi, [rsi + 2 + rax * 2]
+    add rsi, 2                     ; 再跟一个 u16
+    ret
+.value:
+    movzx eax, byte [rsi]          ; 值编码的首字节就是种类
+    inc rsi
+    test eax, eax
+    jz .done                       ; 0 空
+    cmp eax, 1
+    je .v_num
+    cmp eax, 2
+    je .v_str
+    cmp eax, 3
+    je .v_bool
+    ; 4 元组 / 5 记录：这一块不展开，遇到就停 —— 第一个函数的四条指令用不到它们
+    ret
+.v_num:
+    add rsi, 8                     ; f64
+    ret
+.v_str:
+    movzx eax, word [rsi]
+    lea rsi, [rsi + 2 + rax * 2]
+    ret
+.v_bool:
+    add rsi, 1
+.done:
+    ret
 
 ; 把 rax 里的地址打成一整行：前缀、十六位十六进制、换行。
 show_alloc:
@@ -652,6 +743,14 @@ line_fn_mid: db " slots ", 0
 line_fn_instrs: db " instrs ", 0
 line_op: db "Yunooka: op ", 0
 line_nl:   db 13, 10, 0
+
+; 操作码 → 立即数形状，按号排（0 到 33），与 src/code-file.mjs 的立即数形状表一致。
+; 形状编号：0 none · 1 u16 · 2 u32 · 3 name · 4 store · 5 record · 6 call ·
+;          7 value · 8 tuple
+; 这张表是走完指令流的前提：不知道一条指令占多少字节，就只能读第一条。
+imm_shape:
+    db 0, 1, 0, 6, 6, 7, 0, 0, 3, 0, 3, 0, 0, 2, 2, 2, 2, 2, 0, 1
+    db 0, 0, 0, 0, 0, 0, 0, 5, 0, 4, 0, 1, 6, 3
 
 ; 分配器的游标。从 4 MB 起 —— 前 4 MB 已经被引导扇区、第二段、页表占着，种子在
 ; 0x20000，而 4 MB 往上是干净且被页表映着的一片。dq 在 16 位段里只是数据定义，
