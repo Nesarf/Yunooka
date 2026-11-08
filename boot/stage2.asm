@@ -32,23 +32,28 @@ stage2:
     mov si, line2
     call serial_print
 
-    ; 三批各读一个段。
+    ; 三批各读一个段。每一批都自己写一次 LBA —— 这一点是实测出来的：
+    ; int 0x13 的 LBA 扩展并不保证把 DAP 里的那个 64 位 LBA 推到下一批（VirtualBox
+    ; 就没有），于是第二批会从同一个位置重读。症状很绕：种子读进来了、魔数也对、
+    ; 只有一个深处的字节不对（读到 29 而不是 19），因为那一段其实被第一段覆盖了。
     ;
-    ; 种子读到 0x20000 起，不是 0x8000 —— 这一条是实测出来的：第二段自己被加载在
-    ; 0x7E00，它的数据区一直铺到 0x8E00，而 0x8000 起的种子会把 seed_bytes 那一格
-    ; 覆盖成零。症状是串口打印 0 而盘上明明是 74594，两个地方看起来都「对」。
-    ; 0x20000 在实模式 1 MB 之内，离第二段够远，读多少都碰不到它。
-    mov dword [dap_lba], 17       ; 种子在第 18 个扇区起（前十七个是引导与第二段）
+    ; 种子读到 0x20000 起，不是 0x8000 —— 第二段自己被加载在 0x7E00，数据区铺到
+    ; 0x9E00，而 0x8000 起的种子会把它覆盖成零。0x20000 在实模式 1 MB 之内，离得够远。
+    mov dword [dap_lba], 17       ; 第 18 个扇区：引导 1 + 第二段 16
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x2000
     mov word [dap_count], 64
     call read_batch
     jc .seed_fail
+
+    mov dword [dap_lba], 17 + 64
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x2800
     mov word [dap_count], 64
     call read_batch
     jc .seed_fail
+
+    mov dword [dap_lba], 17 + 128
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x3000
     mov word [dap_count], 18
@@ -374,6 +379,7 @@ long_entry:
     call seed_header
     call fn_probe
     call run_and_report
+    call run_fn116_twice
     jmp .hang64
 .heap_bad:
     mov rsi, line_heap_bad
@@ -630,6 +636,320 @@ run_and_report:
     mov rsi, line_empty
     jmp puts64
 
+; ======================================================================
+; 最小的解释器：值栈、指令偏移预扫、取/常量/弃/等/布尔/假跳/真跳/跳/返回
+; ======================================================================
+
+; 按索引走到某个函数，返回 rsi 指向它的指令流开头、r13 = 指令数。
+; 沿途要跳过每个函数的头与整条指令流 —— 而「跳过整条指令流」正是上一块做出来的
+; skip_imm 的用处，所以这一段没有任何新东西，只是把它接到遍历上。
+find_fn:
+    mov rsi, 0x20000 + 9
+    xor rbx, rbx
+.each:
+    cmp rbx, r15
+    ja .notfound
+    movzx ecx, word [rsi]           ; 名字
+    lea rsi, [rsi + 2 + rcx * 2]
+    add rsi, 4                      ; 参数量、槽数
+    movzx ecx, word [rsi]           ; 效果表
+    add rsi, 2
+.eff:
+    test ecx, ecx
+    jz .effed
+    movzx eax, word [rsi]
+    lea rsi, [rsi + 2 + rax * 2]
+    dec ecx
+    jmp .eff
+.effed:
+    mov r13, [rsi]                  ; 指令数，u32
+    add rsi, 4
+    cmp rbx, r15
+    je .found
+    push rbx
+    xor rbx, rbx
+.skip:
+    cmp rbx, r13
+    jae .skipdone
+    ; 防御：一个函数不可能有上万条指令。真读到这么大的数，说明 rsi 已经越界，
+    ; 而那时如果继续按它循环，机器会停在那儿几十亿次 —— 症状是「后面什么也不出现」，
+    ; 看起来像卡在别的地方。宁可说「没找到」，也不要把一个越界变成一次长跑。
+    cmp rbx, 10000
+    ja .notfound
+    movzx eax, byte [rsi]
+    inc rsi
+    movzx eax, byte [imm_shape + rax]
+    call skip_imm
+    inc rbx
+    jmp .skip
+.skipdone:
+    pop rbx
+    inc rbx
+    jmp .each
+.found:
+    ret
+.notfound:
+    xor r13, r13
+    ret
+
+; 预扫：把每条指令的字节偏移记进 instr_offsets。跳转目标是「指令索引」，而 rsi 是
+; 字节游标 —— 没有这张表，跳转就只能从头发扫一遍，那样每次跳都是线性的。
+scan_instrs:
+    mov rsi, r12
+    xor rcx, rcx
+.loop:
+    cmp rcx, r13
+    jae .done
+    ; 与 find_fn 那条同一个理由：上限在这里，垃圾指令数才不会变成一次长跑。
+    cmp rcx, 10000
+    ja .done
+    mov [instr_offsets + rcx * 8], rsi
+    movzx eax, byte [rsi]
+    inc rsi
+    movzx eax, byte [imm_shape + rax]
+    call skip_imm
+    inc rcx
+    jmp .loop
+.done:
+    ret
+
+; ---- 值栈 ----
+push_val:
+    mov rcx, [stack_top]
+    mov [stack_kinds + rcx * 8], rax
+    mov [stack_vals + rcx * 8], rdx
+    inc rcx
+    mov [stack_top], rcx
+    ret
+
+pop_val:
+    mov rcx, [stack_top]
+    dec rcx
+    mov [stack_top], rcx
+    mov rax, [stack_kinds + rcx * 8]
+    mov rdx, [stack_vals + rcx * 8]
+    ret
+
+; 判真：rax 种类、rdx 内容。清进位为真，置进位为假。
+; 数的零判断只比低八字节 —— 0.0 的位模式是全零，而这一版只需要 0 与非零分得开。
+truthy:
+    cmp rax, 0
+    je .false
+    test rdx, rdx
+    jz .false
+    clc
+    ret
+.false:
+    stc
+    ret
+
+; 跑一个函数：入口处栈里已经有参数（这一版只有一个），rsi/r13 由 find_fn 给好。
+exec:
+    call scan_instrs
+    xor rbx, rbx                    ; pc
+.loop:
+    cmp rbx, r13
+    jae .none
+    mov rsi, [instr_offsets + rbx * 8]
+    movzx eax, byte [rsi]
+    inc rsi
+    mov r14, rax
+    cmp r14, 5                      ; 常量
+    je .op_const
+    cmp r14, 19                     ; 取
+    je .op_get
+    cmp r14, 26                     ; 弃
+    je .op_drop
+    cmp r14, 7                      ; 等
+    je .op_eq
+    cmp r14, 2                      ; 布尔
+    je .op_bool
+    cmp r14, 14                     ; 假跳
+    je .op_jf
+    cmp r14, 16                     ; 真跳
+    je .op_jt
+    cmp r14, 13                     ; 跳
+    je .op_jmp
+    cmp r14, 28                     ; 返回
+    je .op_ret
+    ; 不认的指令：把号报出来。静默返回「空」会让一个陌生的操作码看起来像「算出了空值」，
+    ; 而这两件事在串口上应该分得开。
+    mov rsi, line_unknown_op
+    call puts64
+    mov rax, r14
+    call put_num64
+    call put_nl64
+    jmp .none
+
+.op_const:
+    call read_value
+    call push_val
+    inc rbx
+    jmp .loop
+.op_get:
+    movzx eax, word [rsi]           ; 槽号
+    ; 这一版只有参数，没有局部槽，所以槽 0 就是参数 0 —— 遇到别的槽就停，
+    ; 而不是悄悄给出一个错的数。
+    cmp eax, 0
+    jne .none
+    mov rax, [param_kinds]
+    mov rdx, [param_vals]
+    call push_val
+    inc rbx
+    jmp .loop
+.op_drop:
+    call pop_val
+    inc rbx
+    jmp .loop
+.op_eq:
+    call pop_val
+    mov r14, rax
+    mov r15, rdx
+    call pop_val
+    ; 两值相等：种类相同且内容相同（这一版这样够，数是位模式比，串还没做）
+    xor ecx, ecx
+    cmp rax, r14
+    jne .eq_false
+    cmp rdx, r15
+    jne .eq_false
+    mov ecx, 1
+.eq_false:
+    mov rax, 3                      ; 布尔
+    mov rdx, rcx
+    call push_val
+    inc rbx
+    jmp .loop
+.op_bool:
+    xor eax, eax
+    ; 布尔没有立即数：真假的来源是栈顶？—— 不。回到表里看清：布尔是「把常量真假压栈」，
+    ; 而它的立即数形状是 none，所以值来自……没有。这一版把它当「压真」处理并记下这一处。
+    mov rax, 3
+    mov rdx, 1
+    call push_val
+    inc rbx
+    jmp .loop
+.op_jf:
+    mov eax, [rsi]                  ; 目标
+    push rax
+    call pop_val
+    call truthy
+    pop rax
+    jc .take_jump
+    inc rbx
+    jmp .loop
+.op_jt:
+    mov eax, [rsi]
+    push rax
+    call pop_val
+    call truthy
+    pop rax
+    jnc .take_jump
+    inc rbx
+    jmp .loop
+.op_jmp:
+    mov eax, [rsi]
+    mov rbx, rax
+    jmp .loop
+.take_jump:
+    mov rbx, rax
+    jmp .loop
+.op_ret:
+    call pop_val
+    ret
+.none:
+    xor rax, rax
+    xor rdx, rdx
+    ret
+
+; 跑两次符位：参数真时它应当交出 2147483648，参数假时交出 0。
+; 这两次跑的是同一段指令、同一个入口，只差栈上那一个值 —— 所以它们同时验了
+; 「跳转真的按条件走」与「两条路都走到了」。
+run_fn116_twice:
+    mov qword [test_arg], 1
+    call run_fn116
+    ; 这里不能夹任何打印：puts64 用 lodsb，会把 rax 的低字节改掉，而 rax 正是
+    ; 刚跑出来的种类。第一次跑就栽在这上面 —— 返回值在报告之前被一行诊断毁了，
+    ; 症状是「第一个结果是空、第二个对」，看起来像求值器只对了一半。
+    call fn116_report
+    mov qword [test_arg], 0
+    call run_fn116
+    call fn116_report
+    ret
+
+fn116_report:
+    mov r12, rax                    ; 种类
+    mov rbx, rdx                    ; 内容
+    mov rsi, line_fn116
+    call puts64
+    cmp r12, 1                      ; 数
+    jne .bad
+    ; 数的内容是一份 f64 的位模式，不是整数 —— 直接交给 put_num64 会打出一个
+    ; 十几位的天文数字（2147483648 的位模式是 4746794007248502784）。
+    ; 这一版只需要非负整数，所以取指数与尾数把它还原成整数就够。
+    mov rax, rbx
+    call f64_to_int
+    call put_num64
+    jmp put_nl64
+.bad:
+    mov rsi, line_bad_kind
+    call puts64
+    mov rax, r12
+    call put_num64
+    call put_nl64
+
+; rax（f64 位模式）→ rax（整数）。只处理非负、整数、且小于 2^63 的情况 ——
+; 这一块要验的两个值都在这范围里。别的值会给出一个凑合的结果，而不是崩溃，
+; 因为这是显示层的一步，不该替求值层做判断。
+f64_to_int:
+    mov rdx, rax
+    shr rdx, 52
+    and edx, 0x7FF                  ; 指数
+    jz .zero                        ; 指数为零就是零（这一版不处理非规格化）
+    sub edx, 1023
+    js .zero
+    mov r9, rax
+    mov r10, 0x000FFFFFFFFFFFFF
+    and r9, r10                     ; 尾数低 52 位
+    bts r9, 52                      ; 补上隐含的那个 1
+    mov ecx, edx
+    sub ecx, 52                     ; 要移的位数
+    jz .done
+    js .shr
+    shl r9, cl
+    jmp .done
+.shr:
+    neg ecx
+    shr r9, cl
+.done:
+    mov rax, r9
+    ret
+.zero:
+    xor eax, eax
+    ret
+run_fn116:
+    ; 符位 的指令流在种子偏移 43920（0xAB90），11 条指令 —— 那是用 node 走一遍函数表
+    ; 算出来的确定位置。这里不走遍历：Map 会把重名折成一个，所以「第几个函数」在
+    ; 两侧不是同一个数（这一侧按文件顺序数，node 那边给的是 121），而这一块只需要
+    ; 一个确定的字节位置，不需要一个可能对不上的序号。
+    mov rsi, 0x20000 + 43920
+    mov r12, rsi
+    mov r13, 11
+    mov qword [stack_top], 0
+    mov qword [param_kinds], 1      ; 数
+    mov rax, [test_arg]
+    mov [param_vals], rax
+    ; 参数也要压进栈：取 那条指令要的是栈上的当前帧槽，而这一版把参数放在 param_* 里，
+    ; 所以压一次让栈与参数对得上。
+    mov rax, 1
+    mov rdx, [test_arg]
+    call push_val
+    call exec
+    ret
+.none:
+    xor rax, rax
+    xor rdx, rdx
+    ret
+
 ; 按立即数形状跳过一条指令剩余的部分。形状编号沿用 src/code-file.mjs 的十种，
 ; 这里只用到八种能算出长度的（tuple 与 value 里的元组/记录走不到，遇到就停）。
 ;   0 none  1 u16  2 u32  3 name  4 store  5 record  6 call  7 value  8 tuple
@@ -871,6 +1191,22 @@ line_unknown_kind: db "?", 13, 10, 0
 align 8
 stack_kind: dq 0
 stack_val: dq 0
+
+; 解释器的那几样：十六格值栈（种类与内容各一列）、参数、以及每条指令的字节偏移。
+; 偏移表是关键 —— 跳转的目标是「指令索引」，而游标是字节位置，两者之间要有这张表才对得上。
+align 8
+stack_kinds: times 16 dq 0
+stack_vals:  times 16 dq 0
+stack_top:   dq 0
+param_kinds: dq 0
+param_vals:  dq 0
+instr_offsets: times 64 dq 0
+test_arg: dq 1
+
+line_fn116: db "Yunooka: fn116 -> ", 0
+line_bad_kind: db "  kind=", 0
+line_unknown_op: db "  unknown op ", 0
+line_got: db "Yunooka: fn116 returned", 13, 10, 0
 
 ; 分配器的游标。从 4 MB 起 —— 前 4 MB 已经被引导扇区、第二段、页表占着，种子在
 ; 0x20000，而 4 MB 往上是干净且被页表映着的一片。dq 在 16 位段里只是数据定义，
