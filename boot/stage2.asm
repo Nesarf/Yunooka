@@ -382,6 +382,7 @@ long_entry:
     call run_fn116_twice
     call call_test
     call call_report
+    call run_by_name_twice
     jmp .hang64
 .heap_bad:
     mov rsi, line_heap_bad
@@ -664,7 +665,11 @@ find_fn:
     dec ecx
     jmp .eff
 .effed:
-    mov r13, [rsi]                  ; 指令数，u32
+    ; 指令数是 u32，所以要按 32 位读。mov r13, [rsi] 会连下一条指令的 opcode
+    ; 一起读进高 32 位，循环上限就变成两万多亿 —— 而「跳过指令流」那一段于是
+    ; 一路跑到 rbx 撞上 10000 才停，看起来只是「找得慢」，实际上一个函数都没跳过。
+    ; 这个错 find_fn 里也有，但它从不跳过任何指令流（第 0 个就找到了），所以没露。
+    mov r13d, [rsi]
     add rsi, 4
     cmp rbx, r15
     je .found
@@ -907,6 +912,172 @@ call_report:
     mov rax, r12
     call put_num64
     call put_nl64
+
+; ======================================================================
+; 按名字找函数，然后真的调它
+; ======================================================================
+;
+; 上一块的 call_test 是硬编码偏移：它证明「帧能换、能回来」，但绕过了一件事 ——
+; 一条真实的「调函数」指令拿到的是一个名字，不是一个偏移。
+;
+; 这个种子里重名是常态：main 七次，块长与 is_punct 各两次。而 HMYR 的读程序把函数
+; 折进 Map 时后写覆盖前写，所以「按名字找」在这一侧必须等于「最后一个同名定义」。
+; 第一处匹配就收手会拿到另一个函数的返回值 —— 而两个数都漂亮，谁也不报错。
+;
+; 所以判据要两个数：byname 给出 512（后者），byname first 给出 256（前者）。
+; 一行读数分不开两种语义，两行可以。
+
+; rdi = 名字的 UTF-16 码元，r8 = 码元数，r15 = 模式（0 走完整张表 / 1 第一个就停）
+; 回来 rax = 1 找到 / 0 没有，rsi = 指令流起点，r13 = 指令数。
+find_fn_by_name:
+    mov rsi, 0x20000 + 9
+    xor rbx, rbx
+    xor r11, r11                   ; 还没找到
+.each:
+    cmp rbx, 400                   ; 函数数不会超过这个数；越界就说没找到，不长跑
+    ja .done
+    mov rbp, rsi                   ; 本函数头的起点 —— 稍后回头比名字
+    movzx ecx, word [rsi]
+    lea rsi, [rsi + 2 + rcx * 2]   ; 跳过名字
+    add rsi, 4                     ; 参数量、槽数
+    movzx ecx, word [rsi]          ; 效果表
+    add rsi, 2
+.eff:
+    test ecx, ecx
+    jz .effed
+    movzx eax, word [rsi]
+    lea rsi, [rsi + 2 + rax * 2]
+    dec ecx
+    jmp .eff
+.effed:
+    mov r13d, [rsi]                ; 32 位读：8 位读会把后面那个 opcode 也带进来
+    add rsi, 4                     ; 现在 rsi 就是指令流起点
+    ; 名字：先比长度，再逐个码元比
+    movzx ecx, word [rbp]
+    cmp rcx, r8
+    jne .nomatch
+    xor rdx, rdx
+.cmp:
+    cmp rdx, r8
+    jae .match
+    movzx eax, word [rbp + 2 + rdx * 2]
+    movzx ecx, word [rdi + rdx * 2]
+    cmp eax, ecx
+    jne .nomatch
+    inc rdx
+    jmp .cmp
+.match:
+    mov r9, rsi                    ; 记住这一次的位置
+    mov r10, r13
+    mov r11, 1
+    test r15, r15
+    jnz .done                      ; 第一个模式：立刻收手
+.nomatch:
+    push rbx
+    xor rbx, rbx
+.skip:
+    cmp rbx, r13
+    jae .skipdone
+    cmp rbx, 10000
+    ja .skipout
+    movzx eax, byte [rsi]
+    inc rsi
+    movzx eax, byte [imm_shape + rax]
+    call skip_imm
+    inc rbx
+    jmp .skip
+.skipout:
+    pop rbx
+    jmp .done
+.skipdone:
+    pop rbx
+    inc rbx
+    jmp .each
+.done:
+    mov rax, r11
+    mov rsi, r9
+    mov r13, r10
+    test rax, rax
+    jz .miss
+    ret
+.miss:
+    xor r13, r13
+    ret
+
+; 按名字调一次块长。两个模式合在一起跑，因为只跑后者的话，一个「取最后一个函数」
+; 的实现与一个「走完整张表、留最后那个匹配」的实现看起来一模一样 —— 而前者是错的。
+run_by_name_twice:
+    mov rdi, name_kuaichang
+    mov r8, 2
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz byname_missing
+    mov r12, rsi
+    mov qword [stack_top], 0
+    xor rbx, rbx
+    call exec
+    call byname_report
+
+    mov rdi, name_kuaichang
+    mov r8, 2
+    mov r15, 1
+    call find_fn_by_name
+    test rax, rax
+    jz byname_missing
+    mov r12, rsi
+    mov qword [stack_top], 0
+    xor rbx, rbx
+    call exec
+    call byname_first_report
+    ret
+
+byname_missing:
+    ; 三个数一次给全：走了几个函数、名字指针、码元数。打印本身会用掉寄存器，
+    ; 所以先入栈；第一次只打 rbx，读出来是 0 —— 那是 puts64 把 rbx 用掉了，
+    ; 不是循环没跑。
+    push r8
+    push rdi
+    push rbx
+    mov rsi, line_byname_missing
+    call puts64
+    pop rax
+    call put_num64
+    mov rsi, line_seed_mid
+    call puts64
+    pop rax
+    call put_hex64
+    mov rsi, line_seed_mid
+    call puts64
+    pop rax
+    call put_num64
+    call put_nl64
+    ret
+
+byname_report:
+    mov rsi, line_byname
+    jmp byname_report_common
+byname_first_report:
+    mov rsi, line_byname_first
+byname_report_common:
+    push rdx
+    push rax
+    call puts64
+    pop rax
+    pop rdx
+    cmp rax, 1
+    jne byname_report_bad
+    mov rax, rdx
+    call f64_to_int
+    call put_num64
+    jmp put_nl64
+byname_report_bad:
+    push rax
+    mov rsi, line_bad_kind
+    call puts64
+    pop rax
+    call put_num64
+    jmp put_nl64
 
 ; 跑两次符位：参数真时它应当交出 2147483648，参数假时交出 0。
 ; 这两次跑的是同一段指令、同一个入口，只差栈上那一个值 —— 所以它们同时验了
@@ -1252,6 +1423,13 @@ test_arg: dq 1
 
 line_fn116: db "Yunooka: fn116 -> ", 0
 line_call: db "Yunooka: call -> ", 0
+line_byname: db "Yunooka: byname -> ", 0
+line_byname_first: db "Yunooka: byname first -> ", 0
+line_byname_missing: db "Yunooka: byname missing after ", 0
+
+; 「块长」两个字的 UTF-16 码元。按名字找函数时，名字是拿这份字节去比，
+; 而不是拿一个编译期算出来的偏移 —— 偏移只在种子不变时才对，名字才属于语言。
+name_kuaichang: dw 0x5757, 0x957F
 line_bad_kind: db "  kind=", 0
 line_unknown_op: db "  unknown op ", 0
 line_got: db "Yunooka: fn116 returned", 13, 10, 0
