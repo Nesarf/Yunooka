@@ -329,10 +329,89 @@ long_entry:
     mov rsi, line5
     call puts64
 
+    ; ---- 三块分配 ----
+    ; 每一块分配到的地址都打到串口上，因为「分配器能不能用」这件事没有别的观测点：
+    ; 不打印地址，就只能知道它没崩，而不知道它给了什么。
+    mov rax, 16
+    call alloc64
+    call show_alloc
+
+    mov rax, 48
+    call alloc64
+    call show_alloc
+
+    mov rax, 100
+    call alloc64
+    call show_alloc
+
 .hang64:
     cli
     hlt
     jmp .hang64
+
+; 把 rax 里的地址打成一整行：前缀、十六位十六进制、换行。
+show_alloc:
+    push rax
+    mov rsi, line_alloc
+    call puts64
+    pop rax
+    push rax
+    call put_hex64
+    call put_nl64
+    pop rax
+    ret
+
+; bump 分配：游标从 heap_next 起往上走，返回移走之前的位置。
+; 按 16 字节对齐 —— 那够大多数结构用，而对齐要从第一个分配器就有，
+; 不然后面每个调用点都得自己补一次。
+alloc64:
+    add rax, 15
+    and rax, -16
+    mov rdx, [heap_next]
+    add [heap_next], rax
+    mov rax, rdx
+    ret
+
+; 打印 rax 的十六位十六进制（大写）。用 rol 从最高四位开始取 —— 十六个字符正好是
+; 一个 64 位地址的宽度，前面补零比省略更能看出对齐。
+put_hex64:
+    push rax
+    push rcx
+    push rdx
+    mov rcx, 16
+.loop:
+    rol rax, 4
+    mov edx, eax
+    and edx, 0x0F
+    cmp edx, 10
+    jb .digit
+    add edx, 'A' - 10
+    jmp .emit
+.digit:
+    add edx, '0'
+.emit:
+    ; 这里必须把 rax 存一下：putc64 吃的是 al，而 al 就是 rax 的低字节 ——
+    ; 不保存的话，下一次 rol 会在一份被改过的值上转，十六个字符里只有第一个是对的。
+    ; 症状是地址看起来「总差那么几个」，而不是完全错，很容易被当成对齐算错了。
+    push rax
+    mov al, dl
+    call putc64
+    pop rax
+    dec rcx
+    jnz .loop
+    pop rdx
+    pop rcx
+    pop rax
+    ret
+
+put_nl64:
+    push rax
+    mov al, 13
+    call putc64
+    mov al, 10
+    call putc64
+    pop rax
+    ret
 
 puts64:
     lodsb
@@ -403,7 +482,14 @@ line3bad:  db "Yunooka: seed bad", 13, 10, 0
 line3fail: db "Yunooka: seed unreadable", 13, 10, 0
 line4:     db "Yunooka: protected mode ok", 13, 10, 0
 line5:     db "Yunooka: long mode ok", 13, 10, 0
+line_alloc: db "Yunooka: alloc ", 0
 line_nl:   db 13, 10, 0
+
+; 分配器的游标。从 4 MB 起 —— 前 4 MB 已经被引导扇区、第二段、页表占着，种子在
+; 0x20000，而 4 MB 往上是干净且被页表映着的一片。dq 在 16 位段里只是数据定义，
+; 与指令位宽无关。
+align 8
+heap_next: dq 0x400000
 
 ; 种子的真实字节数，由 tools/build.mjs 编译之后按符号写进来。用 32 位是因为种子
 ; 七万多字节，十六位装不下。放在数据区末尾，好让构建那一侧按符号表找到它。

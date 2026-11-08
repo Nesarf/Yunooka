@@ -124,7 +124,14 @@ vbox(["controlvm", 机名, "screenshotpng", 截屏]);
 
 // ---- 四、报 ----
 const 缺 = 该有.filter((s) => !读到.includes(s));
-const 成了 = 缺.length === 0;
+// 三条分配地址。分配器给了什么是这一块砖的主要内容，而它只有地址能证明：
+// 第一条必须是起点 0x400000，每条末位是 0（按 16 对齐），并且逐块递增。
+const 地址批 = [...读到.matchAll(/Yunooka: alloc ([0-9A-F]{16})/g)].map((m) => m[1]);
+const 首块对 = 地址批[0] === "0000000000400000";
+const 都对齐 = 地址批.length > 0 && 地址批.every((a) => a.endsWith("0"));
+const 递升 = 地址批.every((a, i) => i === 0 || Number.parseInt(a, 16) > Number.parseInt(地址批[i - 1], 16));
+const 分配成 = 地址批.length === 3 && 首块对 && 都对齐 && 递升;
+const 成了 = 缺.length === 0 && 分配成;
 // 第三行不是必有的：没有种子的那一趟，第二段会说 seed bad 或者 seed unreadable。
 // 所以这里只把「它说了哪一种」报出来，不把它算进成败 —— 成败由前两行决定。
 const 种子行 = 种子三种.find((s) => 读到.includes(s)) || "(没有第三行)";
@@ -137,6 +144,9 @@ console.log("");
 console.log("机器      " + 机名 + "（32 MiB，BIOS 引导，串口写文件）");
 console.log("串口读到  " + (读到 ? JSON.stringify(读到.replace(/\r/g, "\\r").replace(/\n/g, "\\n")) : "(空)"));
 console.log("种子那一行 " + 种子行 + " —— " + (种子意[种子行] || "第三行没出现"));
+console.log("分配      " + (地址批.length ? 地址批.join("  ") : "(没有)")
+  + (分配成 ? "  —— 三条，从 0x400000 起、按 16 对齐、逐块递增"
+    : "  —— 不对：应当是三条、首条 0000000000400000、末位为零、递增"));
 console.log("截屏      " + 截屏);
 console.log("");
 console.log(成了
