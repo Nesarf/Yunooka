@@ -67,7 +67,7 @@ start:
     mov es, ax
     mov bx, 0x7E00
     mov ah, 0x02            ; 读扇区
-    mov al, 16              ; 读十六个：第二段占十六个扇区（GDT、页表、64 位代码与堆自检）
+    mov al, 32              ; 读三十二个：第二段占 16 KB（GDT、页表、64 位代码与整个解释器）
     mov ch, 0               ; 柱面 0
     mov cl, 2               ; 第 2 个扇区（从 1 数）
     mov dh, 0               ; 磁头 0

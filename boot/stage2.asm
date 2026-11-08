@@ -37,23 +37,24 @@ stage2:
     ; 就没有），于是第二批会从同一个位置重读。症状很绕：种子读进来了、魔数也对、
     ; 只有一个深处的字节不对（读到 29 而不是 19），因为那一段其实被第一段覆盖了。
     ;
-    ; 种子读到 0x20000 起，不是 0x8000 —— 第二段自己被加载在 0x7E00，数据区铺到
-    ; 0x9E00，而 0x8000 起的种子会把它覆盖成零。0x20000 在实模式 1 MB 之内，离得够远。
-    mov dword [dap_lba], 17       ; 第 18 个扇区：引导 1 + 第二段 16
+    ; 种子读到 0x20000 起，不是 0x8000 —— 第二段自己被加载在 0x7E00，32 扇区就是
+    ; 16 KB，铺到 0xBE00，而 0x8000 起的种子会把它覆盖成零。0x20000 在实模式 1 MB
+    ; 之内，离得够远。
+    mov dword [dap_lba], 33       ; 第 34 个扇区：引导 1 + 第二段 32
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x2000
     mov word [dap_count], 64
     call read_batch
     jc .seed_fail
 
-    mov dword [dap_lba], 17 + 64
+    mov dword [dap_lba], 33 + 64
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x2800
     mov word [dap_count], 64
     call read_batch
     jc .seed_fail
 
-    mov dword [dap_lba], 17 + 128
+    mov dword [dap_lba], 33 + 128
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x3000
     mov word [dap_count], 18
@@ -1796,4 +1797,4 @@ heap_next: dq 0x400000
 ; 七万多字节，十六位装不下。放在数据区末尾，好让构建那一侧按符号表找到它。
 seed_bytes: dd 0
 
-times 8192-($-$$) db 0
+times 16384-($-$$) db 0
