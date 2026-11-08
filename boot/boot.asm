@@ -67,7 +67,7 @@ start:
     mov es, ax
     mov bx, 0x7E00
     mov ah, 0x02            ; 读扇区
-    mov al, 2               ; 读两个：第二段现在占两个扇区（它要装得下一个十进制打印）
+    mov al, 8               ; 读八个：第二段占八个扇区（它要装 GDT、页表与 64 位代码）
     mov ch, 0               ; 柱面 0
     mov cl, 2               ; 第 2 个扇区（从 1 数）
     mov dh, 0               ; 磁头 0
