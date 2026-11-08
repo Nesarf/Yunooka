@@ -25,17 +25,32 @@ stage2:
     mov si, line2
     call serial_print
 
-    ; ---- 读第 3 个扇区到 0x8000 ----
-    mov ax, 0x0000
-    mov es, ax
-    mov bx, 0x8000
-    mov ah, 0x02
-    mov al, 1
-    mov ch, 0
-    mov cl, 3               ; 第 3 个扇区（BIOS 从 1 数）
-    mov dh, 0
-    mov dl, [drive]
-    int 0x13
+    ; ---- 把整份种子读进 0x8000 起的连续内存 ----
+    ; 用 BIOS 的 LBA 扩展（ah=0x42）而不是 CHS 读（ah=0x02）：CHS 一次最多 127 个扇区，
+    ; 跨磁道时有些 BIOS 还会失败；LBA 扩展读多扇区是 2000 年以后的机器都有的东西。
+    ;
+    ; 146 个扇区仍然分批，理由不在 BIOS 而在寻址：一批 64 扇区正好 0x8000 字节，
+    ; 等于正好走完一个段。于是三批各落在一个段里，段与偏移都不用做加法。
+    ;   批 1  64 扇区 -> 0000:8000，覆盖物理 0x08000 到 0x10000
+    ;   批 2  64 扇区 -> 1000:0000，覆盖物理 0x10000 到 0x18000
+    ;   批 3  18 扇区 -> 1800:0000，覆盖物理 0x18000 到 0x1A400（种子的末尾）
+    mov dword [dap_lba], 2        ; 从第 3 个扇区（LBA 2）开始
+    mov word [dap_off], 0x8000
+    mov word [dap_seg], 0x0000
+    mov word [dap_count], 64
+    call read_batch
+    jc .readfail
+
+    mov word [dap_off], 0x0000
+    mov word [dap_seg], 0x1000
+    mov word [dap_count], 64
+    call read_batch
+    jc .readfail
+
+    mov word [dap_off], 0x0000
+    mov word [dap_seg], 0x1800
+    mov word [dap_count], 18
+    call read_batch
     jc .readfail
 
     ; ---- 前五字节是不是 HMYRB ----
@@ -87,6 +102,17 @@ same:
     stc
     ret
 
+; 一批读：按 DAP 里的段:偏移与 LBA，读到 Es:Bx 指向的地方。
+; 进位由 int 0x13 给出（成功清、失败置），这里原样交回，不在中间吞掉。
+read_batch:
+    push si
+    mov si, dap
+    mov ah, 0x42
+    mov dl, [drive]
+    int 0x13
+    pop si
+    ret
+
 ; 串口打印：与引导扇区那一份同形，含 LSR 的发送器就绪等待。
 serial_print:
     lodsb
@@ -106,6 +132,23 @@ serial_print:
 
 drive: db 0
 seed_magic: db "HMYRB"
+
+; Disk Address Packet，16 字节，字段必须连续放 —— BIOS 按偏移读它，不按名字。
+; 每次调用前重设 count 与 off/seg：int 0x13 会把 count 改成实际读到的扇区数，
+; 也会把 lba 推进到下一批的位置。那是它的行为，不是我们的意图，所以每批都自己写一遍。
+dap:
+    db 0x10                 ; 结构大小，固定 16
+    db 0                    ; 保留
+dap_count:
+    dw 64
+dap_off:
+    dw 0x8000
+dap_seg:
+    dw 0x0000
+dap_lba:
+    dd 2                    ; 低 32 位
+    dd 0                    ; 高 32 位
+
 line2:      db "Yunooka: stage2 ok", 13, 10, 0
 line3ok:    db "Yunooka: seed ok", 13, 10, 0
 line3bad:   db "Yunooka: seed bad", 13, 10, 0

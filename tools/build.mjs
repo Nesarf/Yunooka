@@ -63,22 +63,23 @@ const 二段 = 编一段("第二段", 源二, 像二);
 console.log("引导扇区  " + 引导.length + " 字节，签名 55 AA 对");
 console.log("第二段    " + 二段.length + " 字节（上限 512）");
 
-// ---- 二、种子那一扇区 ----
+// ---- 二、种子 ----
 // 给不给种子都建得出来，这很重要：Yunooka 不欠 HMYR 仓库任何东西，所以没有种子时
 // 它应当照样能建、能跑，只是判据变成第三种结果（读到扇区，但里面没有种子）。
-// 给了就取它的第一个扇区 —— 第二段只读前五字节认魔数，不需要整份种子。
+// 给了就把整份写进去 —— 第二段现在读的是整份（到 0x1A400），不是开头一扇区。
 const 种子参 = (() => {
   const i = process.argv.indexOf("--seed");
   return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : null;
 })();
-const 种子扇区 = Buffer.alloc(512);
-let 种子说明 = "（没给 --seed，这一扇区是空的）";
+let 种子内容 = Buffer.alloc(0);
+let 种子说明 = "（没给 --seed，第 3 个扇区往后是空的）";
 if (种子参) {
   if (!fs.existsSync(种子参)) 失败("给的种子不在：" + 种子参);
-  const 全 = fs.readFileSync(种子参);
-  全.copy(种子扇区, 0, 0, Math.min(512, 全.length));
-  const 魔数 = 全.subarray(0, 5).toString("latin1");
-  种子说明 = 种子参 + "（" + 全.length + " 字节，魔数 " + JSON.stringify(魔数) + "）";
+  种子内容 = fs.readFileSync(种子参);
+  const 魔数 = 种子内容.subarray(0, 5).toString("latin1");
+  if (魔数 !== "HMYRB") 失败("给的种子魔数不是 HMYRB，是 " + JSON.stringify(魔数));
+  const 扇区数 = Math.ceil(种子内容.length / 512);
+  种子说明 = 种子参 + "（" + 种子内容.length + " 字节，" + 扇区数 + " 个扇区，魔数 HMYRB）";
 }
 console.log("种子      " + 种子说明);
 
@@ -93,7 +94,8 @@ const 总扇区 = 2048;
 const 盘内容 = Buffer.alloc(总扇区 * 512);
 引导.copy(盘内容, 0);
 二段.copy(盘内容, 512);
-种子扇区.copy(盘内容, 1024);
+种子内容.copy(盘内容, 1024);
+if (1024 + 种子内容.length > 盘内容.length) 失败("种子比盘还大，装不下");
 fs.writeFileSync(盘像, 盘内容);
 console.log("盘映像    " + 盘内容.length + " 字节（" + 总扇区 + " 个扇区）");
 
