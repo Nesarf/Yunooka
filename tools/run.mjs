@@ -46,6 +46,7 @@ const 全程 = [
   "Yunooka: letters -> ",
   "Yunooka: call -> ",
   "Yunooka: byname first -> ",
+  "Yunooka: is_digit('a') -> ",
 ];
 const 种子三种 = ["Yunooka: seed ok", "Yunooka: seed bad", "Yunooka: seed unreadable"];
 const 留机 = process.argv.includes("--keep");
@@ -200,6 +201,14 @@ const 按名行 = /Yunooka: byname -> (\d+)/.exec(读到);
 const 先手行 = /Yunooka: byname first -> (\d+)/.exec(读到);
 const 按名成 = 按名行 !== null && 按名行[1] === "512"
   && 先手行 !== null && 先手行[1] === "256";
+// 第一条真的跑起来的程序：is_digit。它要参数落槽（is_digit 一参、in_set 三参）、
+// 调函数、调内置 len、索引、等（串按内容比）、加、大等，以及 in_set 那条十轮的
+// 尾递归 —— 少一样就给不出答案。两个答案都要对：只验一个的话，一个永远返回 true
+// 的实现照样能过。
+const 数字行 = /Yunooka: is_digit\('7'\) -> (true|false)/.exec(读到);
+const 字母行 = /Yunooka: is_digit\('a'\) -> (true|false)/.exec(读到);
+const 数字成 = 数字行 !== null && 数字行[1] === "true"
+  && 字母行 !== null && 字母行[1] === "false";
 console.log("第一个函数 " + (函数行
   ? 函数行[1] + "（参 " + 函数行[2] + "、槽 " + 函数行[3] + "、指令 " + 函数行[4] + "）"
   : "(没读出来)"));
@@ -219,6 +228,10 @@ console.log("按名字    " + (按名行 ? "byname -> " + 按名行[1] : "byname
   + "  " + (先手行 ? "first -> " + 先手行[1] : "first -> (没找到)")
   + (按名成 ? "  —— 走完整张表留最后那个，先撞上的那个是另一个数"
     : "  —— 不对：应当是 byname 512 与 first 256"));
+console.log("内建      " + (数字行 ? "is_digit('7') -> " + 数字行[1] : "is_digit('7') -> (没跑)")
+  + "  " + (字母行 ? "is_digit('a') -> " + 字母行[1] : "is_digit('a') -> (没跑)")
+  + (数字成 ? "  —— 十轮递归、索引、len、加，全对才给得出这两行"
+    : "  —— 不对：应当是 '7' 真、'a' 假"));
 // 结构这一条只在带种子时算：没有种子时机器不读种子头，那是对的，不该因此变红。
 const 有种子 = 读到.includes("Yunooka: seed ok");
 const 求值成 = 结果行 !== null && 结果行[1] === "string" && 结果行[2] === "53";
@@ -232,6 +245,7 @@ const 结构成 = 有种子
     && 跳转成
     && 调用成
     && 按名成
+    && 数字成
   : true;
 // 成败三条合成一条：缺行、分配、结构。放在这里算，因为它要用到上面那个结构成 ——
 // 这也是第一次把它写在前面时的报错原因（Cannot access before initialization）。

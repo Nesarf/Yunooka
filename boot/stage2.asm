@@ -279,6 +279,7 @@ protected:
 
     mov eax, cr4
     or eax, 0x20                  ; PAE
+    or eax, 0x600                 ; OSFXSR | OSXMMEXCPT —— 长模式下 SSE 指令要用这一位
     mov cr4, eax
 
     mov ecx, 0xC0000080           ; EFER
@@ -288,6 +289,7 @@ protected:
 
     mov eax, cr0
     or eax, 0x80000000            ; PG
+    or eax, 0x2                   ; MP，与上面那两位配套
     mov cr0, eax
 
     jmp 0x18:long_entry
@@ -383,6 +385,7 @@ long_entry:
     call call_test
     call call_report
     call run_by_name_twice
+    call run_is_digit
     jmp .hang64
 .heap_bad:
     mov rsi, line_heap_bad
@@ -557,11 +560,13 @@ read_value:
     add rsi, 8
     ret
 .str:
-    movzx edx, word [rsi]
-    add rsi, 2
-    push rdx
-    lea rsi, [rsi + rdx * 2]     ; 把字符数据跳过，好让下一条指令读得对
-    pop rdx
+    ; 串的值是一根指针，指向种子里那个「u16 长度 + 码元」的开头 —— 内容不搬。
+    ; 长度随时能从指针那里读出来，而指针是「索引」与「等」都要的东西。
+    ; 上一版把长度当值，于是两个相同的串只要在种子里位置不同就不相等，
+    ; 而那种不相等看起来和「真的不同」一模一样。
+    mov rdx, rsi
+    movzx ecx, word [rsi]          ; 长度放 ecx：rax 是 read_value 的返回值种类，不能动
+    lea rsi, [rsi + 2 + rcx * 2]   ; 把字符数据跳过，好让下一条指令读得对
     ret
 .bool:
     movzx edx, byte [rsi]
@@ -627,6 +632,7 @@ run_and_report:
     mov rsi, line_string
     call puts64
     mov rax, r15
+    movzx eax, word [rax]          ; 值是指针，长度在它指的地方
     call put_num64
     jmp put_nl64
 .num:
@@ -779,6 +785,16 @@ exec:
     je .op_jmp
     cmp r14, 28                     ; 返回
     je .op_ret
+    cmp r14, 3                      ; 调内置
+    je .op_builtin
+    cmp r14, 4                      ; 调函数
+    je .op_call
+    cmp r14, 9                      ; 大等
+    je .op_ge
+    cmp r14, 12                     ; 索引
+    je .op_index
+    cmp r14, 0                      ; 加（号是 0，不是 30 —— 30 是减）
+    je .op_add
     ; 不认的指令：把号报出来。静默返回「空」会让一个陌生的操作码看起来像「算出了空值」，
     ; 而这两件事在串口上应该分得开。
     mov rsi, line_unknown_op
@@ -794,13 +810,14 @@ exec:
     inc rbx
     jmp .loop
 .op_get:
+    ; 槽号是这一帧的偏移，不是全局偏移：帧 0 的槽 0 在值栈第 0 格，
+    ; 帧 0 的槽 3 在第 3 格，帧 1 的槽 0 在第八格 —— 八格一帧。
     movzx eax, word [rsi]           ; 槽号
-    ; 这一版只有参数，没有局部槽，所以槽 0 就是参数 0 —— 遇到别的槽就停，
-    ; 而不是悄悄给出一个错的数。
-    cmp eax, 0
-    jne .none
-    mov rax, [param_kinds]
-    mov rdx, [param_vals]
+    mov rcx, [frame_sp]
+    mov rcx, [frame_slotbase + rcx * 8]
+    add rcx, rax
+    mov rax, [stack_kinds + rcx * 8]
+    mov rdx, [stack_vals + rcx * 8]
     call push_val
     inc rbx
     jmp .loop
@@ -813,16 +830,42 @@ exec:
     mov r14, rax
     mov r15, rdx
     call pop_val
-    ; 两值相等：种类相同且内容相同（这一版这样够，数是位模式比，串还没做）
-    xor ecx, ecx
+    ; 种类必须相同；数比位模式，串比内容。
     cmp rax, r14
     jne .eq_false
+    cmp rax, 2
+    je .eq_str
     cmp rdx, r15
     jne .eq_false
-    mov ecx, 1
+    jmp .eq_true
+.eq_str:
+    ; 两个指针各自指向「u16 长度 + 码元」。长度先比，再逐码元比。
+    ; 按内容比是必须的：同一个单字符串在种子里可能出现在两处，按指针比会把它们
+    ; 判成不相等 —— 那种错让 in_set 永远交出 false，而 false 看起来是个正常答案。
+    mov rcx, rdx
+    mov rsi, r15
+    movzx r8d, word [rcx]
+    movzx r9d, word [rsi]
+    cmp r8, r9
+    jne .eq_false
+    xor r10, r10
+.eq_str_loop:
+    cmp r10, r8
+    jae .eq_true
+    mov ax, [rcx + 2 + r10 * 2]
+    cmp ax, [rsi + 2 + r10 * 2]
+    jne .eq_false
+    inc r10
+    jmp .eq_str_loop
+.eq_true:
+    mov rax, 3                      ; 布尔
+    mov rdx, 1
+    call push_val
+    inc rbx
+    jmp .loop
 .eq_false:
     mov rax, 3                      ; 布尔
-    mov rdx, rcx
+    xor edx, edx
     call push_val
     inc rbx
     jmp .loop
@@ -862,8 +905,210 @@ exec:
     jmp .loop
 .op_ret:
     call pop_val
+    mov rcx, [frame_sp]
+    test rcx, rcx
+    jz .ret_outer                   ; 帧 0 的返回就是这个 exec 的返回
+    ; 返回值先入机器栈：换帧要重扫指令偏移表，而重扫会把 rax 与 rdx 都用掉。
+    push rax
+    push rdx
+    dec rcx
+    mov [frame_sp], rcx
+    mov rbx, [frame_pc + rcx * 8]
+    mov r12, [frame_instr + rcx * 8]
+    mov r13, [frame_count + rcx * 8]
+    call scan_instrs
+    pop rdx
+    pop rax
+    call push_val
+    inc rbx                         ; 调用者的 pc 指向「调函数」，返回后跨过它
+    jmp .loop
+.ret_outer:
     ret
+
+.op_builtin:
+    ; 立即数与「调函数」同一个形状：名字在前，参数个数在后。这一版只认 len。
+    movzx r8d, word [rsi]
+    lea rdi, [rsi + 2]
+    lea rsi, [rsi + 2 + r8 * 2]
+    movzx r14d, word [rsi]          ; 参数个数
+    cmp r8, 3
+    jne .builtin_unknown
+    cmp word [rdi], 0x006C          ; 'l'
+    jne .builtin_unknown
+    cmp word [rdi + 2], 0x0065      ; 'e'
+    jne .builtin_unknown
+    cmp word [rdi + 4], 0x006E      ; 'n'
+    jne .builtin_unknown
+    cmp r14, 1
+    jne .builtin_unknown
+    call pop_val
+    movzx eax, word [rdx]           ; 串的值是指针，长度在它指的地方
+    cvtsi2sd xmm0, rax
+    movq rdx, xmm0
+    mov rax, 1                      ; 数
+    call push_val
+    inc rbx
+    jmp .loop
+.builtin_unknown:
+    mov rsi, line_unknown_builtin
+    call puts64
+    call put_nl64
+    jmp .none
+
+.op_call:
+    ; 立即数：名字（u16 长度 + 码元）再跟一个 u16 的参数个数。
+    movzx r8d, word [rsi]           ; 名字长度
+    lea rdi, [rsi + 2]              ; 名字的码元
+    lea rsi, [rsi + 2 + r8 * 2]
+    movzx r14d, word [rsi]          ; 参数个数
+    ; 调用者的三样先入机器栈：找函数要用 rbx 数数、还会改写 r13 与 rsi。
+    push rbx
+    push r12
+    push r13
+    push r14
+    xor r15, r15                    ; 后者胜：与 HMYR 的读程序同一条规矩
+    call find_fn_by_name
+    pop r14
+    test rax, rax
+    jz .call_miss_fn
+    ; 还原调用者的 pc。find_fn_by_name 把 rbx 用成了自己的循环计数，收工时是
+    ; 走到的那个 401 —— 直接拿 rbx 当 pc 的话，尾调用判断会去读 instr_offsets[402]，
+    ; 那已经出了表，于是每一处调用都被判成非尾，帧三两下就用完。
+    mov rbx, [rsp + 16]
+    ; 尾调用？下一条是「返回」就复用当前帧 —— in_set 的递归全靠这一条，
+    ; 否则十轮递归就要十帧，而帧深只有四。
+    mov rax, [rsp + 0]              ; 调用者的指令数
+    lea rcx, [rbx + 1]
+    cmp rcx, rax
+    jae .call_notail
+    mov rax, [instr_offsets + rcx * 8]
+    cmp byte [rax], 28              ; 返回
+    je .call_bind                   ; 尾：不压帧，槽基址照旧
+.call_notail:
+    mov rcx, [frame_sp]
+    mov rdx, rcx
+    inc rcx
+    cmp rcx, 4
+    jae .call_miss_frame            ; 帧用完了：宁可停下，也不要盖掉别人的帧
+    mov [frame_sp], rcx
+    mov rax, [frame_slotbase + rdx * 8]
+    add rax, 8                      ; 八格一帧
+    mov [frame_slotbase + rcx * 8], rax
+    mov rax, [rsp + 0]
+    mov [frame_count + rdx * 8], rax
+    mov rax, [rsp + 8]
+    mov [frame_instr + rdx * 8], rax
+    mov [frame_pc + rdx * 8], rbx
+.call_bind:
+    ; 实参从运算栈搬到槽。栈顶是最后一个实参，所以先倒着入机器栈，
+    ; 再正着写槽 —— 槽 0 必须是第一个实参。
+    ;
+    ; 上限放 r9 而不是 rcx：pop_val 自己就用 rcx 当游标，把它一起改掉的话
+    ; 这个循环永远到不了头，而症状是机器卡住、串口停在上一行 —— 看起来像
+    ; 「后面那段没被调到」，而不是「这一圈出不去」。
+    mov r9, r14
+    xor r15, r15
+.pop_args:
+    cmp r15, r9
+    jae .args_done
+    call pop_val
+    push rdx
+    push rax
+    inc r15
+    jmp .pop_args
+.args_done:
+    mov rax, [frame_sp]
+    mov rax, [frame_slotbase + rax * 8]
+    mov r15, rax
+    xor rcx, rcx
+.write_args:
+    cmp rcx, r14
+    jae .write_done
+    pop rax
+    pop rdx
+    mov [stack_kinds + r15 * 8], rax
+    mov [stack_vals + r15 * 8], rdx
+    inc r15
+    inc rcx
+    jmp .write_args
+.write_done:
+    add rsp, 24                     ; 调用者的 r13、r12、rbx：三个都不再需要
+    mov r12, rsi                    ; 被调方的指令流
+    call scan_instrs
+    xor rbx, rbx
+    jmp .loop
+.call_miss_fn:
+    ; 栈上依次是 r13、r12、rbx（r14 已弹掉），三个一起丢掉。
+    add rsp, 24
+    mov rsi, line_miss_fn
+    call puts64
+    jmp .none
+.call_miss_frame:
+    add rsp, 24
+    mov rsi, line_miss_frame
+    call puts64
+    jmp .none
+
+.op_ge:
+    call pop_val                    ; 右
+    mov r14, rdx
+    call pop_val                    ; 左
+    movq xmm0, rdx
+    movq xmm1, r14
+    comisd xmm0, xmm1
+    setae al                        ; 左 >= 右
+    movzx rdx, al
+    mov rax, 3
+    call push_val
+    inc rbx
+    jmp .loop
+
+.op_add:
+    call pop_val                    ; 右
+    movq xmm1, rdx
+    call pop_val                    ; 左
+    movq xmm0, rdx
+    addsd xmm0, xmm1
+    movq rdx, xmm0
+    mov rax, 1
+    call push_val
+    inc rbx
+    jmp .loop
+
+.op_index:
+    call pop_val                    ; 下标
+    mov r14, rdx
+    call pop_val                    ; 目标串
+    push rdx                        ; 串指针：f64_to_int 会用掉 rdx
+    mov rax, r14
+    call f64_to_int
+    mov rcx, rax
+    pop rdx
+    movzx eax, word [rdx + 2 + rcx * 2]   ; 第 i 个码元
+    push rax
+    mov rax, 4                      ; 一个单字符串：u16 长度 + 一个 u16 码元
+    call alloc64
+    mov rdx, rax
+    mov word [rdx], 1
+    pop rax
+    mov [rdx + 2], ax
+    mov rax, 2                      ; 串
+    call push_val
+    inc rbx
+    jmp .loop
+
 .none:
+    ; 没有值可交的时候把 pc 与指令数报出来：卡在哪一条、还是跑过了整条流，
+    ; 这两件事在串口上应当分得开。正常返回不走这里。
+    mov rsi, line_exec_none
+    call puts64
+    mov rax, rbx
+    call put_num64
+    mov rsi, line_seed_mid
+    call puts64
+    mov rax, r13
+    call put_num64
+    call put_nl64
     xor rax, rax
     xor rdx, rdx
     ret
@@ -886,6 +1131,8 @@ call_test:
 
     mov r12, 0x20000 + 65950
     mov r13, 2
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
     call scan_instrs                ; 换一张偏移表：它只对当前这段指令流有意义
     xor rbx, rbx
     call exec
@@ -1014,7 +1261,8 @@ run_by_name_twice:
     test rax, rax
     jz byname_missing
     mov r12, rsi
-    mov qword [stack_top], 0
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
     xor rbx, rbx
     call exec
     call byname_report
@@ -1026,7 +1274,8 @@ run_by_name_twice:
     test rax, rax
     jz byname_missing
     mov r12, rsi
-    mov qword [stack_top], 0
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
     xor rbx, rbx
     call exec
     call byname_first_report
@@ -1072,6 +1321,83 @@ byname_report_common:
     call put_num64
     jmp put_nl64
 byname_report_bad:
+    push rax
+    mov rsi, line_bad_kind
+    call puts64
+    pop rax
+    call put_num64
+    jmp put_nl64
+
+; ======================================================================
+; 判据：is_digit('7') 真，is_digit('a') 假
+; ======================================================================
+;
+; 这一条要的东西很多，少一样就不对：参数落槽（is_digit 一参、in_set 三参）、
+; 调函数、调内置 len、索引、等、加、假跳，以及 in_set 那条十轮的尾递归。
+; 它给出的答案只有两个字，对不上时说不清断在哪 —— 所以它验的是「全都对」，
+; 不是「某一处对」；分开验的那些在上面各节里。
+run_is_digit:
+    mov rdi, name_is_digit
+    mov r8, 8
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz is_digit_missing
+    mov r12, rsi
+    xor rbx, rbx
+    mov qword [frame_sp], 0
+    mov qword [stack_top], 32
+    mov rax, 2                      ; 串
+    mov [stack_kinds], rax
+    mov rax, char7
+    mov [stack_vals], rax
+    call exec
+    call is_digit_report
+
+    mov rdi, name_is_digit
+    mov r8, 8
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz is_digit_missing
+    mov r12, rsi
+    xor rbx, rbx
+    mov qword [frame_sp], 0
+    mov qword [stack_top], 32
+    mov rax, 2
+    mov [stack_kinds], rax
+    mov rax, chara
+    mov [stack_vals], rax
+    call exec
+    call is_digit_report_false
+    ret
+
+is_digit_missing:
+    mov rsi, line_isdigit_missing
+    call puts64
+    ret
+
+is_digit_report:
+    mov rsi, line_isdigit7
+    jmp is_digit_report_common
+is_digit_report_false:
+    mov rsi, line_isdigita
+is_digit_report_common:
+    push rdx
+    push rax
+    call puts64
+    pop rax
+    pop rdx
+    cmp rax, 3                      ; 布尔
+    jne is_digit_report_bad
+    test rdx, rdx
+    jz is_digit_report_no
+    mov rsi, line_true
+    jmp puts64
+is_digit_report_no:
+    mov rsi, line_false
+    jmp puts64
+is_digit_report_bad:
     push rax
     mov rsi, line_bad_kind
     call puts64
@@ -1152,15 +1478,15 @@ run_fn116:
     mov rsi, 0x20000 + 43920
     mov r12, rsi
     mov r13, 11
-    mov qword [stack_top], 0
-    mov qword [param_kinds], 1      ; 数
+    ; 参数进帧 0 的槽 0。「取」读的是槽区，不是运算栈 —— 所以这里直接写槽，
+    ; 而不是压一次栈让两边「对得上」。上一版两条路都写一遍，那正是隐患：
+    ; 一旦它们不同步，读到的参数与算出来的参数就是两个值。
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    mov rax, 1                      ; 数
+    mov [stack_kinds], rax
     mov rax, [test_arg]
-    mov [param_vals], rax
-    ; 参数也要压进栈：取 那条指令要的是栈上的当前帧槽，而这一版把参数放在 param_* 里，
-    ; 所以压一次让栈与参数对得上。
-    mov rax, 1
-    mov rdx, [test_arg]
-    call push_val
+    mov [stack_vals], rax
     call exec
     ret
 .none:
@@ -1410,14 +1736,24 @@ align 8
 stack_kind: dq 0
 stack_val: dq 0
 
-; 解释器的那几样：十六格值栈（种类与内容各一列）、参数、以及每条指令的字节偏移。
-; 偏移表是关键 —— 跳转的目标是「指令索引」，而游标是字节位置，两者之间要有这张表才对得上。
+; 解释器的那几样：值栈、帧、以及每条指令的字节偏移。
+;
+; 值栈分两段用。0 到 31 是槽区：一帧占八格，槽 0 到 7 放参数与局部量；32 往上是
+; 运算区，push_val 从那里往上走。分成两段是因为「取」读的是槽，而槽不能随运算栈的
+; 高低漂移 —— 一压一弹之间，槽的位置必须不动。
+;
+; 帧深四。这个深度是照着非尾调用挑的：in_set 的递归形参里有个下标、每轮加一，十轮
+; 就要十帧，而那条递归是尾调用，所以真正常用的路不吃帧；四帧留给「调完还要接着算」
+; 的那种。
 align 8
-stack_kinds: times 16 dq 0
-stack_vals:  times 16 dq 0
-stack_top:   dq 0
-param_kinds: dq 0
-param_vals:  dq 0
+stack_kinds: times 48 dq 0
+stack_vals:  times 48 dq 0
+stack_top:   dq 32
+frame_sp:      dq 0
+frame_pc:      times 4 dq 0
+frame_instr:   times 4 dq 0
+frame_count:   times 4 dq 0
+frame_slotbase: times 4 dq 0
 instr_offsets: times 64 dq 0
 test_arg: dq 1
 
@@ -1430,6 +1766,22 @@ line_byname_missing: db "Yunooka: byname missing after ", 0
 ; 「块长」两个字的 UTF-16 码元。按名字找函数时，名字是拿这份字节去比，
 ; 而不是拿一个编译期算出来的偏移 —— 偏移只在种子不变时才对，名字才属于语言。
 name_kuaichang: dw 0x5757, 0x957F
+name_is_digit: dw 0x0069, 0x0073, 0x005F, 0x0064, 0x0069, 0x0067, 0x0069, 0x0074
+
+; 两个单字符串，形状与种子里的一样：u16 长度在前，码元在后。「索引」交出来的
+; 也是这个形状 —— 所以这两份既是参数，也是「索引」的对照物。
+char7: dw 1, 0x0037
+chara: dw 1, 0x0061
+line_unknown_builtin: db "Yunooka: unknown builtin", 13, 10, 0
+line_isdigit7: db "Yunooka: is_digit('7') -> ", 0
+line_isdigita: db "Yunooka: is_digit('a') -> ", 0
+line_true: db "true", 13, 10, 0
+line_false: db "false", 13, 10, 0
+line_isdigit_missing: db "Yunooka: is_digit missing", 13, 10, 0
+line_exec_none: db "Yunooka: exec ran out at ", 0
+line_miss_fn: db "Yunooka: no such function", 13, 10, 0
+line_miss_frame: db "Yunooka: frames exhausted", 13, 10, 0
+line_notail: db "Yunooka: notail pc ", 0
 line_bad_kind: db "  kind=", 0
 line_unknown_op: db "  unknown op ", 0
 line_got: db "Yunooka: fn116 returned", 13, 10, 0
