@@ -38,7 +38,7 @@ stage2:
     ; 0x7E00，它的数据区一直铺到 0x8E00，而 0x8000 起的种子会把 seed_bytes 那一格
     ; 覆盖成零。症状是串口打印 0 而盘上明明是 74594，两个地方看起来都「对」。
     ; 0x20000 在实模式 1 MB 之内，离第二段够远，读多少都碰不到它。
-    mov dword [dap_lba], 9        ; 种子在第 10 个扇区起（前九个是引导与第二段）
+    mov dword [dap_lba], 17       ; 种子在第 18 个扇区起（前十七个是引导与第二段）
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x2000
     mov word [dap_count], 64
@@ -364,6 +364,7 @@ long_entry:
 
     mov rsi, line_heap_ok
     call puts64
+    call seed_header
     jmp .hang64
 .heap_bad:
     mov rsi, line_heap_bad
@@ -373,6 +374,53 @@ long_entry:
     cli
     hlt
     jmp .hang64
+
+; 读种子的头并报出来。格式在 HMYR 的 design/C-VM.txt 里：
+;   HMYRB（5 字节）| 版本 u16 | 函数数 u16 | 每个函数：名字、参数量、槽数、效果名、指令数、指令流
+; 这里只碰前九个字节。能报出版本与函数数，就说明它读懂了种子的开头 —— 而那一行数字
+; 是可以拿真实种子核对的（这一份是版本 1、202 个函数）。
+seed_header:
+    mov rsi, 0x20000
+    movzx eax, word [rsi + 5]      ; 版本
+    mov r12, rax
+    movzx eax, word [rsi + 7]      ; 函数数
+    mov r13, rax
+
+    mov rsi, line_seed_hdr
+    call puts64
+    mov rax, r12
+    call put_num64
+    mov rsi, line_seed_mid
+    call puts64
+    mov rax, r13
+    call put_num64
+    jmp put_nl64
+
+; 打印 rax 的十进制值。与 16 位那一份同一个算法，换 64 位寄存器。
+; emit 那一步不用保存 rax：pop 出来的余数用掉就丢，下一个 pop 会覆盖。
+put_num64:
+    push rbx
+    push rcx
+    push rdx
+    mov rbx, 10
+    xor rcx, rcx
+.divide:
+    xor rdx, rdx
+    div rbx
+    push rdx
+    inc rcx
+    test rax, rax
+    jnz .divide
+.emit:
+    pop rax
+    add al, '0'
+    call putc64
+    dec rcx
+    jnz .emit
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
 
 ; 把 rax 里的地址打成一整行：前缀、十六位十六进制、换行。
 show_alloc:
@@ -510,6 +558,8 @@ line5:     db "Yunooka: long mode ok", 13, 10, 0
 line_alloc: db "Yunooka: alloc ", 0
 line_heap_ok: db "Yunooka: heap ok", 13, 10, 0
 line_heap_bad: db "Yunooka: heap bad", 13, 10, 0
+line_seed_hdr: db "Yunooka: seed v", 0
+line_seed_mid: db " ", 0
 line_nl:   db 13, 10, 0
 
 ; 分配器的游标。从 4 MB 起 —— 前 4 MB 已经被引导扇区、第二段、页表占着，种子在
@@ -522,4 +572,4 @@ heap_next: dq 0x400000
 ; 七万多字节，十六位装不下。放在数据区末尾，好让构建那一侧按符号表找到它。
 seed_bytes: dd 0
 
-times 4096-($-$$) db 0
+times 8192-($-$$) db 0
