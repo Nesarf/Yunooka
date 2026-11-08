@@ -103,8 +103,17 @@ console.log("种子      " + 种子说明);
 //   第 10 个扇区起（偏移 4608） 种子的第一个字节
 // stage2.asm 里写的是 dap_lba = 9，也就是第 10 个扇区；引导扇区写的是 al = 8，也就是
 // 读八个扇区。三处数字对得上才建得对，所以它们写在同一段注释里。
+//
+// 盘的大小由 --size 给（单位 MB），默认 64。现在只用了开头四兆出头，所以其余是空的；
+// 那是有意的 —— 装文件系统、放工具链、塞基本库都要空间，而一块盘的尺寸定得早，
+// 后面就不必为了扩大它去搬分区。这块机器 D 盘够用，1 G 到 4 G 都装得下。
+const 盘大小MB = (() => {
+  const i = process.argv.indexOf("--size");
+  const v = i >= 0 && i + 1 < process.argv.length ? Number(process.argv[i + 1]) : 64;
+  return Number.isInteger(v) && v >= 1 ? v : 64;
+})();
 const 种子偏移 = 4608;
-const 总扇区 = 2048;
+const 总扇区 = 盘大小MB * 2048;        // 1 MB 是 2048 个扇区
 const 盘内容 = Buffer.alloc(总扇区 * 512);
 引导.copy(盘内容, 0);
 二段.copy(盘内容, 512);
