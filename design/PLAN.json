@@ -1,0 +1,183 @@
+{
+  "title": "Yunooka：跑 HMYR 所需要的一切",
+  "version": 1,
+  "note": "这一份是 Yunooka 自己的目标网络。上位路线在 HMYR 仓库的 design/FULLSELF.txt 第八节（往返式自举的五步），这一份只记这一侧做到了哪一块、下一步是哪一块。判据一律是 node tools/run.mjs —— 它在 VirtualBox 里真起一台机器，读串口，比对那十九行。没有单元测试：这个仓库的每一个断言都要跨过一次真实的加电。",
+  "goals": [
+    {
+      "id": "boot",
+      "title": "引导扇区：512 字节，读十六扇区的第二段，跳过去",
+      "scope": "stage",
+      "status": "done",
+      "parent": "resident",
+      "after": [],
+      "verifiedBy": ["tools/run.mjs"],
+      "touches": ["boot/boot.asm"],
+      "notes": "串口两行：boot ok 与 stage2 ok。判据只认前两行是成败线，其余各行分别报。"
+    },
+    {
+      "id": "second-stage",
+      "title": "第二段：从 16 位实模式走到 64 位长模式",
+      "scope": "stage",
+      "status": "done",
+      "parent": "resident",
+      "after": ["boot"],
+      "verifiedBy": ["tools/run.mjs"],
+      "touches": ["boot/stage2.asm", "tools/build.mjs"],
+      "notes": "三段位宽各有观测点：protected mode ok 与 long mode ok。代码段必须两个 —— L=1 的段在 EFER.LME 未开时是未定义的，CPU 不报错而是挂住。"
+    },
+    {
+      "id": "paging",
+      "title": "四级页表：前 1 GB 用 2 MB 大页",
+      "scope": "stage",
+      "status": "done",
+      "parent": "resident",
+      "after": ["second-stage"],
+      "verifiedBy": ["tools/run.mjs"],
+      "touches": ["boot/stage2.asm"],
+      "notes": "CR3 指向 PML4 而不是页目录。这个错只出现一次，症状是开分页那一瞬间之后没有任何输出。"
+    },
+    {
+      "id": "heap",
+      "title": "堆：bump 分配，从 0x400000 起，按 16 对齐",
+      "scope": "stage",
+      "status": "done",
+      "parent": "resident",
+      "after": ["paging"],
+      "verifiedBy": ["tools/run.mjs"],
+      "touches": ["boot/stage2.asm"],
+      "notes": "三条 alloc 地址加一行 heap ok。heap ok 才是关键：它分配 64 字节、填 0xA5、读回来比 —— 只验地址说明不了那块内存真能读写。"
+    },
+    {
+      "id": "seed-read",
+      "title": "把整份种子读进 0x20000 并验魔数",
+      "scope": "stage",
+      "status": "done",
+      "parent": "resident",
+      "after": ["boot"],
+      "verifiedBy": ["tools/run.mjs"],
+      "touches": ["boot/stage2.asm", "tools/build.mjs"],
+      "notes": "三批 64 + 64 + 18 扇区。BIOS 的 LBA 扩展不保证推进 DAP 里的 LBA，所以每批自己写一次 —— 否则第二批重读第一批，而魔数与长度都对。"
+    },
+    {
+      "id": "seed-header",
+      "title": "种子的头：版本与函数数",
+      "scope": "stage",
+      "status": "done",
+      "parent": "resident",
+      "after": ["seed-read"],
+      "verifiedBy": ["tools/run.mjs"],
+      "touches": ["boot/stage2.asm"],
+      "notes": "seed v1 202。格式在 HMYR 的 design/C-VM.txt：HMYRB 加版本 u16、函数数 u16。种子不压缩，所以「解出一点」其实是「照格式读」。"
+    },
+    {
+      "id": "fn-table",
+      "title": "函数表：第一个函数的名字、参数、槽、指令数",
+      "scope": "stage",
+      "status": "done",
+      "parent": "resident",
+      "after": ["seed-header"],
+      "verifiedBy": ["tools/run.mjs"],
+      "touches": ["boot/stage2.asm"],
+      "notes": "fn letters params 0 slots 0 instrs 4。没有种子时不读这一块 —— 否则会从零填充里读出一个漂亮的「版本 0、0 个函数」。"
+    },
+    {
+      "id": "instr-stream",
+      "title": "走完整个指令流：按立即数形状算每条指令的长度",
+      "scope": "stage",
+      "status": "done",
+      "parent": "resident",
+      "after": ["fn-table"],
+      "verifiedBy": ["tools/run.mjs"],
+      "touches": ["boot/stage2.asm"],
+      "notes": "三十四项的 imm_shape 表加 skip_imm。没有这张表只能读第一条，而「只读第一条」与「走完四条」在第一条上看起来一样。"
+    },
+    {
+      "id": "eval",
+      "title": "求值：常量与返回，交出真正的值",
+      "scope": "stage",
+      "status": "done",
+      "parent": "resident",
+      "after": ["instr-stream"],
+      "verifiedBy": ["tools/run.mjs"],
+      "touches": ["boot/stage2.asm"],
+      "notes": "letters -> string 53。53 是 26 小写加 26 大写加一个下划线，可以从那一侧独立算出来 —— 所以这一行验的是执行，不是打印。"
+    },
+    {
+      "id": "branch",
+      "title": "条件跳转：假跳、真跳、跳，加十六格值栈",
+      "scope": "stage",
+      "status": "done",
+      "parent": "resident",
+      "after": ["eval"],
+      "verifiedBy": ["tools/run.mjs"],
+      "touches": ["boot/stage2.asm"],
+      "notes": "fn116 两次：2147483648 与 0。两行合起来才说明跳转按条件走 —— 只验一个的话，一个永远不跳的解释器也能过。"
+    },
+    {
+      "id": "call",
+      "title": "调用骨架：保存调用者的 pc 与指令流，切到被调方再回来",
+      "scope": "stage",
+      "status": "done",
+      "parent": "resident",
+      "after": ["branch"],
+      "verifiedBy": ["tools/run.mjs"],
+      "touches": ["boot/stage2.asm"],
+      "notes": "call -> 512。帧是四行 push/pop，往后加参数与局部槽加的是它们之间的内容。不是「调函数」这条指令 —— 那还要按名字找函数。"
+    },
+    {
+      "id": "call-op",
+      "title": "调函数 这条指令本身：按名字找目标、传参、返回值落槽",
+      "scope": "task",
+      "status": "open",
+      "parent": "resident",
+      "after": ["call"],
+      "verifiedBy": ["tools/run.mjs"],
+      "touches": ["boot/stage2.asm"],
+      "notes": "要处理重名：main 在种子里出现七次，读程序折进 Map 只留最后一个。所以「按名字找」与「按索引找」都要说清是哪一种，而 HMYR 那一侧的语义是前者。"
+    },
+    {
+      "id": "builtins",
+      "title": "调内置：先把 len 做出来",
+      "scope": "task",
+      "status": "open",
+      "parent": "resident",
+      "after": ["call-op"],
+      "verifiedBy": ["tools/run.mjs"],
+      "touches": ["boot/stage2.asm"],
+      "notes": "is_digit 只差四样：调内置 len、索引、等、加。这四样合起来就是「跑标准库」的门槛。"
+    },
+    {
+      "id": "filesystem",
+      "title": "文件系统：盘符从 α 起的小写希腊字母",
+      "scope": "stage",
+      "status": "open",
+      "parent": "resident",
+      "after": ["builtins"],
+      "verifiedBy": ["tools/run.mjs"],
+      "touches": ["README.md"],
+      "notes": "盘符方案已经定在 README 里（α β γ …），而路径怎么写还没定 —— 那一件事要等文件系统本身有了形状才说得准。"
+    },
+    {
+      "id": "self-host",
+      "title": "在 Yunooka 里构建 Yunooka",
+      "scope": "stage",
+      "status": "open",
+      "parent": "resident",
+      "after": ["filesystem", "builtins"],
+      "verifiedBy": ["tools/run.mjs"],
+      "touches": ["README.md", "tools/build.mjs"],
+      "notes": "这一条才是「真正的 OS」的门槛：现在构建与验证都还要 Windows（nasm、node、VBoxManage），所以它的「能跑」有一半是借来的。"
+    },
+    {
+      "id": "resident",
+      "title": "Yunooka 住得下 HMYR：从加电到执行一份字节码，再到自己构建自己",
+      "scope": "project",
+      "status": "active",
+      "parent": null,
+      "after": [],
+      "verifiedBy": ["tools/run.mjs"],
+      "touches": ["README.md", "boot/stage2.asm", "boot/boot.asm", "tools/build.mjs", "tools/run.mjs"],
+      "notes": "上位路线在 HMYR 的 design/FULLSELF.txt 第八节：Hiou Rengo 负责写、Yunooka 负责跑。这一条是「跑」的进度条。"
+    }
+  ]
+}
