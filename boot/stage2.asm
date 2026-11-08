@@ -373,6 +373,7 @@ long_entry:
 
     call seed_header
     call fn_probe
+    call run_and_report
     jmp .hang64
 .heap_bad:
     mov rsi, line_heap_bad
@@ -522,6 +523,112 @@ fn_probe:
     jmp .instr_loop
 .instr_done:
     ret
+
+; 读一个值（code-file.mjs 的值编码），返回 rax = 种类、rdx = 内容，rsi 前进到下一个字节：
+;   种类 0 空（rdx 无意义）、1 数（rdx 是 f64 的八字节原样）、
+;   2 串（rdx 是字符数，内容留在原地不搬）、3 布尔（rdx 是 0 或 1）
+; 元组与记录这一版不展开 —— 第一个函数用不到，而展开它们要一层递归。
+read_value:
+    movzx eax, byte [rsi]
+    inc rsi
+    cmp eax, 0
+    je .null
+    cmp eax, 1
+    je .num
+    cmp eax, 2
+    je .str
+    cmp eax, 3
+    je .bool
+    jmp .null
+.null:
+    xor edx, edx
+    ret
+.num:
+    mov rdx, [rsi]
+    add rsi, 8
+    ret
+.str:
+    movzx edx, word [rsi]
+    add rsi, 2
+    push rdx
+    lea rsi, [rsi + rdx * 2]     ; 把字符数据跳过，好让下一条指令读得对
+    pop rdx
+    ret
+.bool:
+    movzx edx, byte [rsi]
+    inc rsi
+    ret
+
+; 最小的求值循环：只认「常量」与「返回」。
+;
+; 这不是解释器，是解释器最小的那副骨架 —— 它证明「读一条指令、按它动一下状态、再读
+; 下一条」这条缝是通的。真正的解释器要在此之上加跳转、算术、调用，而那是后面的砖；
+; 现在这一块要的是「它真的执行了，而不只是读过去了」。
+;
+; 栈只有一格：letters 的四条指令里，「常量」与「返回」各出现两次，而从入口到第一个
+; 「返回」只压过一次 —— 一格够用。不够用的时候会露出来，那时再加深度也不迟。
+run_first:
+    mov rsi, r12                   ; 指令流起点
+    xor rbx, rbx
+.loop:
+    cmp rbx, r13
+    jae .none
+    movzx eax, byte [rsi]
+    inc rsi
+    mov r14, rax
+    cmp r14, 5                     ; 常量
+    je .const
+    cmp r14, 28                    ; 返回
+    je .ret
+    jmp .none                      ; 别的指令这一版不认，直接停下说「没算出来」
+.const:
+    call read_value
+    mov [stack_kind], rax
+    mov [stack_val], rdx
+    inc rbx
+    jmp .loop
+.ret:
+    mov rax, [stack_kind]
+    mov rdx, [stack_val]
+    ret
+.none:
+    xor rax, rax
+    xor rdx, rdx
+    ret
+
+; 跑第一个函数并报出结果。种类先报，内容按种类 —— 第一个函数是串，所以这里只把
+; 串的长度报出来，够与那一侧对账。
+run_and_report:
+    call run_first
+    mov r14, rax                   ; 种类
+    mov r15, rdx                   ; 内容
+    mov rsi, line_letters
+    call puts64
+    cmp r14, 2
+    je .str
+    cmp r14, 1
+    je .num
+    cmp r14, 3
+    je .bool
+    cmp r14, 0
+    je .empty
+    mov rsi, line_unknown_kind
+    jmp puts64
+.str:
+    mov rsi, line_string
+    call puts64
+    mov rax, r15
+    call put_num64
+    jmp put_nl64
+.num:
+    mov rsi, line_number
+    jmp puts64
+.bool:
+    mov rsi, line_bool
+    jmp puts64
+.empty:
+    mov rsi, line_empty
+    jmp puts64
 
 ; 按立即数形状跳过一条指令剩余的部分。形状编号沿用 src/code-file.mjs 的十种，
 ; 这里只用到八种能算出长度的（tuple 与 value 里的元组/记录走不到，遇到就停）。
@@ -751,6 +858,19 @@ line_nl:   db 13, 10, 0
 imm_shape:
     db 0, 1, 0, 6, 6, 7, 0, 0, 3, 0, 3, 0, 0, 2, 2, 2, 2, 2, 0, 1
     db 0, 0, 0, 0, 0, 0, 0, 5, 0, 4, 0, 1, 6, 3
+
+line_letters: db "Yunooka: letters -> ", 0
+line_string: db "string ", 0
+line_number: db "number", 13, 10, 0
+line_bool: db "bool", 13, 10, 0
+line_empty: db "empty", 13, 10, 0
+line_unknown_kind: db "?", 13, 10, 0
+
+; 只有一格的栈。letters 从入口到第一个「返回」只压过一次，所以一格够用；
+; 不够用的时候会以「结果不对」的形式露出来，那时再加深度也不迟。
+align 8
+stack_kind: dq 0
+stack_val: dq 0
 
 ; 分配器的游标。从 4 MB 起 —— 前 4 MB 已经被引导扇区、第二段、页表占着，种子在
 ; 0x20000，而 4 MB 往上是干净且被页表映着的一片。dq 在 16 位段里只是数据定义，

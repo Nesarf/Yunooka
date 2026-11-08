@@ -43,6 +43,7 @@ const 全程 = [
   "Yunooka: heap ok",
   "Yunooka: fn ",
   "Yunooka: op ",
+  "Yunooka: letters -> ",
 ];
 const 种子三种 = ["Yunooka: seed ok", "Yunooka: seed bad", "Yunooka: seed unreadable"];
 const 留机 = process.argv.includes("--keep");
@@ -176,20 +177,28 @@ const 函数行 = /Yunooka: fn (\S+) params (\d+) slots (\d+) instrs (\d+)/.exec
 // 看起来一模一样，而在第四条的缺席上一眼就能分开。
 const 操作码行集 = [...读到.matchAll(/Yunooka: op (\d+)/g)].map((m) => Number(m[1]));
 const 操作码名集 = 操作码行集.map((n) => 操作码表[n] || null);
+// 求值那一条：letters 交出来的应当是一个 53 字符的串（26 小写 + 26 大写 + 一个下划线）。
+// 这个数是能从那一侧独立算出来的，所以它验的是「真的执行了」，而不是「打了一行字」。
+const 结果行 = /Yunooka: letters -> (\w+)(?: (\d+))?/.exec(读到);
 console.log("第一个函数 " + (函数行
   ? 函数行[1] + "（参 " + 函数行[2] + "、槽 " + 函数行[3] + "、指令 " + 函数行[4] + "）"
   : "(没读出来)"));
 console.log("指令流    " + (操作码行集.length
   ? 操作码行集.map((n, i) => n + "=" + (操作码名集[i] || "表里没有这个号")).join("  ")
   : "(没读出来)"));
+console.log("求值结果  " + (结果行
+  ? 结果行[1] + (结果行[2] ? " " + 结果行[2] + " 个字符" : "")
+  : "(没算出来)"));
 // 结构这一条只在带种子时算：没有种子时机器不读种子头，那是对的，不该因此变红。
 const 有种子 = 读到.includes("Yunooka: seed ok");
+const 求值成 = 结果行 !== null && 结果行[1] === "string" && 结果行[2] === "53";
 const 结构成 = 有种子
   ? 函数行 !== null
     && 函数行[1] === "letters"
     && 操作码行集.length === 4
     && 操作码行集.every((n) => n >= 0 && n < 操作码表.length)
     && 操作码行集[0] === 5
+    && 求值成
   : true;
 // 成败三条合成一条：缺行、分配、结构。放在这里算，因为它要用到上面那个结构成 ——
 // 这也是第一次把它写在前面时的报错原因（Cannot access before initialization）。
