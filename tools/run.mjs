@@ -77,8 +77,12 @@ if (!有这台) {
   vbox(["storagectl", 机名, "--name", "SATA", "--add", "sata", "--controller", "IntelAhci", "--portcount", "2"]);
   vbox(["storageattach", 机名, "--storagectl", "SATA", "--port", "0", "--device", "0", "--type", "hdd", "--medium", 盘]);
 } else {
-  vbox(["storageattach", 机名, "--storagectl", "SATA", "--port", "0", "--device", "0", "--medium", "none"]);
-  vbox(["storageattach", 机名, "--storagectl", "SATA", "--port", "0", "--device", "0", "--type", "hdd", "--medium", 盘]);
+  const 卸 = vbox(["storageattach", 机名, "--storagectl", "SATA", "--port", "0", "--device", "0", "--medium", "none"]);
+  const 挂 = vbox(["storageattach", 机名, "--storagectl", "SATA", "--port", "0", "--device", "0", "--type", "hdd", "--medium", 盘]);
+  // 挂载失败要说出来。以前这里不看返回值，于是问题拖到 startvm 才以另一个面目出现
+  // （「UUID 不匹配」），而真正的错在更早的地方。
+  if (挂.status !== 0 && !String(挂.stderr || "").includes("already"))
+    做不了("挂盘失败：" + String(挂.stderr || "").trim().slice(0, 200));
 }
 
 // ---- 二、配置：最小机器，串口写进文件 ----

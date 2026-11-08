@@ -34,7 +34,7 @@ stage2:
     ;   批 1  64 扇区 -> 0000:8000，覆盖物理 0x08000 到 0x10000
     ;   批 2  64 扇区 -> 1000:0000，覆盖物理 0x10000 到 0x18000
     ;   批 3  18 扇区 -> 1800:0000，覆盖物理 0x18000 到 0x1A400（种子的末尾）
-    mov dword [dap_lba], 2        ; 从第 3 个扇区（LBA 2）开始
+    mov dword [dap_lba], 3        ; 从第 4 个扇区（LBA 3）开始 —— 第二段占了两个扇区
     mov word [dap_off], 0x8000
     mov word [dap_seg], 0x0000
     mov word [dap_count], 64
@@ -61,6 +61,13 @@ stage2:
     jc .bad
 
     mov si, line3ok
+    call serial_print
+    ; 报出种子的真实字节数，那个数是构建那一侧写进盘里的 —— 第二段自己只知道读了
+    ; 多少个扇区（146 乘 512 是 74752，比种子多出来的那部分只是末尾的补零）。
+    ; 报真数而不是扇区数乘 512，是因为判据要认的正是 74594 这个数。
+    mov eax, [seed_bytes]
+    call put_num
+    mov si, line_nl
     call serial_print
     jmp .hang
 
@@ -113,6 +120,49 @@ read_batch:
     pop si
     ret
 
+; 打印 eax 的十进制值。先一直除以十把余数压栈，再倒着弹出来 —— 倒序是必须的，
+; 因为除法先给出低位。用 32 位寄存器是因为种子有七万多字节，十六位装不下。
+put_num:
+    push ebx
+    push ecx
+    push edx
+    mov ebx, 10
+    xor ecx, ecx
+.divide:
+    xor edx, edx
+    div ebx
+    push edx
+    inc cx
+    test eax, eax
+    jnz .divide
+.emit:
+    pop eax
+    add al, '0'
+    call put_ch
+    loop .emit
+    pop edx
+    pop ecx
+    pop ebx
+    ret
+
+; 一个字节进串口，带发送器就绪等待。serial_print 内联了同样的等待，这里单独有一份
+; 是因为它吃的是 al 里的值而不是 ds:si 指向的字符串。
+put_ch:
+    push ax
+    push dx
+    mov ah, al
+    mov dx, 0x3FD
+.wait:
+    in al, dx
+    test al, 0x20
+    jz .wait
+    mov al, ah
+    mov dx, 0x3F8
+    out dx, al
+    pop dx
+    pop ax
+    ret
+
 ; 串口打印：与引导扇区那一份同形，含 LSR 的发送器就绪等待。
 serial_print:
     lodsb
@@ -150,7 +200,13 @@ dap_lba:
     dd 0                    ; 高 32 位
 
 line2:      db "Yunooka: stage2 ok", 13, 10, 0
-line3ok:    db "Yunooka: seed ok", 13, 10, 0
+line3ok:    db "Yunooka: seed ok ", 0
+line_nl:    db 13, 10, 0
+
+; 种子的真实字节数。这一格由 tools/build.mjs 在编译之后覆写 —— 第二段自己数不出来，
+; 它只知道读了多少个扇区，而扇区是向上取整的。放在数据区末尾，好让构建那一侧按
+; 符号表找到它。用 32 位是因为种子七万多字节，十六位装不下（写的时候会溢出报错）。
+seed_bytes: dd 0
 line3bad:   db "Yunooka: seed bad", 13, 10, 0
 line3fail:  db "Yunooka: seed unreadable", 13, 10, 0
 

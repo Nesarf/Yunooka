@@ -5,6 +5,26 @@ HMYR 要跑在上面的那个系统。名字取自小一孁こはね所属学寮
 分工写在 HMYR 仓库的 `design/FULLSELF.txt` 第七节：**Hiou Rengo 负责「写」，Yunooka 负责「跑」**。
 宿主口归 OS，其余归 SDK。
 
+## 它现在还不是什么
+
+这一条要说在最前面：**Yunooka 现在还不算一个真正的操作系统**，它仍处于依赖 Windows 运行
+的阶段。
+
+分两层看：
+
+```
+运行那一侧   引导扇区跑在 VirtualBox 的虚拟硬件上，中间没有 Windows。这一层是干净的。
+构建那一侧   编它要 nasm、建盘要 node、跑它要 VBoxManage —— 三样都在 Windows 上。
+             换一台机器、换一个系统，这三样就没有了。
+```
+
+所以它的「能跑」有一半是借来的。真正算数的门槛是**在没有 Windows 的地方也能构建**：
+这套引导代码自己能被它自己编出来。那要等 Yunooka 有编译器、有文件系统、有一套工具链，
+而那是很远的事。
+
+把这一条写在这里，是因为「能引导、能打印」很容易被当成「已经是 OS 了」。它不是。它是一个
+能在虚拟机上说话的最小东西，而它的出生地是一台 Windows。
+
 ## 现在有什么
 
 一块能在 VirtualBox 里引导的盘，和一条判据。
@@ -31,9 +51,9 @@ node tools/run.mjs
 前两行是成败线，第三行是信息：
 
 ```
-Yunooka: seed ok          读到第 3 扇区，前五字节是 HMYRB
+Yunooka: seed ok 74594    读完整份种子，前五字节是 HMYRB；数字是种子的真实长度
 Yunooka: seed bad         读到了，但前五字节不是 HMYRB（没给 --seed 时就是这一种）
-Yunooka: seed unreadable 第 3 个扇区读不出来
+Yunooka: seed unreadable  三批里有一批读不出来
 ```
 
 第三行不写进成败线，是因为没有种子的那一趟也该算通 —— Yunooka 不欠 HMYR 仓库任何东西。
