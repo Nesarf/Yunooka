@@ -16,7 +16,9 @@ const 建 = path.join(ROOT, "build");
 fs.mkdirSync(建, { recursive: true });
 
 const 源 = path.join(ROOT, "boot/boot.asm");
+const 源二 = path.join(ROOT, "boot/stage2.asm");
 const 像 = path.join(建, "boot.img");
+const 像二 = path.join(建, "stage2.bin");
 const 盘像 = path.join(建, "disk.img");
 const 盘 = path.join(建, "disk.vdi");
 
@@ -40,25 +42,34 @@ const 找VBox = () => {
   return 哪.status === 0 ? "VBoxManage" : null;
 };
 
-// ---- 一、nasm ----
-const 编 = spawnSync("nasm", ["-f", "bin", 源, "-o", 像], { encoding: "utf8" });
-if (编.status !== 0) 失败("nasm 编不过：" + String(编.stderr || "").slice(0, 400));
+// ---- 一、编两段，各查各的形状 ----
+// 两段各有各的硬约束：引导扇区必须正好 512 字节（BIOS 只读这一扇区），第二段必须在
+// 512 以内（它占一个扇区）。哪一条不成立，后面跑起来的东西就不是我们以为的那个。
+const 编一段 = (名字, 源路, 出) => {
+  const r = spawnSync("nasm", ["-f", "bin", 源路, "-o", 出], { encoding: "utf8" });
+  if (r.status !== 0) 失败(名字 + " 编不过：" + String(r.stderr || "").slice(0, 400));
+  const 字节 = fs.readFileSync(出);
+  if (字节.length > 512) 失败(名字 + " 超过一个扇区：" + 字节.length + " 字节");
+  return 字节;
+};
 
-// ---- 二、形状 ----
-const 扇区 = fs.readFileSync(像);
-if (扇区.length !== 512) 失败("引导扇区应当是 512 字节，实际 " + 扇区.length);
-if (扇区[510] !== 0x55 || 扇区[511] !== 0xaa) {
-  失败("末两字节应当是 55 AA，实际 " + 扇区[510].toString(16) + " " + 扇区[511].toString(16));
+const 引导 = 编一段("引导扇区", 源, 像);
+if (引导.length !== 512) 失败("引导扇区应当正好 512 字节，实际 " + 引导.length);
+if (引导[510] !== 0x55 || 引导[511] !== 0xaa) {
+  失败("末两字节应当是 55 AA，实际 " + 引导[510].toString(16) + " " + 引导[511].toString(16));
 }
-console.log("引导扇区  512 字节，签名 55 AA 对");
+const 二段 = 编一段("第二段", 源二, 像二);
+// 第二段自带签名（它也是一段可引导的代码，只是不经过 BIOS），所以这里只查长度上限。
+console.log("引导扇区  " + 引导.length + " 字节，签名 55 AA 对");
+console.log("第二段    " + 二段.length + " 字节（上限 512）");
 
-// ---- 三、补成一块盘 ----
-// VirtualBox 的磁盘有最小尺寸，而一块只有 512 字节的盘也算不上盘。补到 1 MiB：
-// 第一扇区是引导扇区，其余全是零。补零不是装饰 —— 它让这块盘有确定的长度，
-// 于是「挂上去的是不是我们建的那一块」也成了一个可以比对的数。
+// ---- 二、拼成一块盘 ----
+// 第一扇区是引导扇区，第二扇区是第二段，其余全是零。补零不是装饰 —— 它让这块盘有确定
+// 的长度，于是「挂上去的是不是我们建的那一块」也成了一个可以比对的数。
 const 总扇区 = 2048;
 const 盘内容 = Buffer.alloc(总扇区 * 512);
-扇区.copy(盘内容, 0);
+引导.copy(盘内容, 0);
+二段.copy(盘内容, 512);
 fs.writeFileSync(盘像, 盘内容);
 console.log("盘映像    " + 盘内容.length + " 字节（" + 总扇区 + " 个扇区）");
 

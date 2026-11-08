@@ -23,6 +23,10 @@ start:
     mov sp, 0x7c00
     sti
 
+    ; BIOS 从 dl 告诉我们它是从哪块盘引导的。这一份要留着 —— 读第二扇区的时候
+    ; 还得用同一个盘号，而那时 dl 早被别的调用改掉了。
+    mov [boot_drive], dl
+
     ; 串口 9600 8N1：先设 DLAB 再写除数，最后关 DLAB 并定帧格式。
     ; 这几步的顺序不能换 —— 除数寄存器与数据寄存器共用端口，DLAB 决定它是哪一个。
     mov dx, 0x3F9           ; IER：先关中断
@@ -54,6 +58,29 @@ start:
 
     mov si, message
     call video_print
+
+    ; 把第 2 个扇区读进 0x7E00，然后跳过去。这一读就是「引导扇区」与「内核」的分家 ——
+    ; 往后要加的东西都住在那一侧，而这一 512 字节从此不必再长大。
+    ; 用 BIOS 的 int 0x13 而不是自己驱动磁盘：这一层的任务是尽快把下一段交出去，
+    ; 真正的磁盘驱动属于内核，不属于这里。
+    mov ax, 0x0000
+    mov es, ax
+    mov bx, 0x7E00
+    mov ah, 0x02            ; 读扇区
+    mov al, 1               ; 读一个
+    mov ch, 0               ; 柱面 0
+    mov cl, 2               ; 第 2 个扇区（从 1 数）
+    mov dh, 0               ; 磁头 0
+    mov dl, [boot_drive]
+    int 0x13
+    jc disk_fail
+
+    jmp 0x0000:0x7E00       ; 远跳过去。段 0、偏移 0x7E00，与上面 es:bx 是同一个地址
+
+disk_fail:
+    ; 读盘失败要说一声，而不是静静停住 —— 停住与成功在串口上看起来一样。
+    mov si, disk_message
+    call serial_print
 
 .hang:
     hlt
@@ -93,6 +120,8 @@ video_print:
     ret
 
 message: db "Yunooka: boot ok", 13, 10, 0
+disk_message: db "Yunooka: disk read failed", 13, 10, 0
+boot_drive: db 0
 
 times 510-($-$$) db 0
 dw 0xaa55

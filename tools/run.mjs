@@ -19,7 +19,9 @@ const 盘 = path.join(建, "disk.vdi");
 const 串口 = path.join(建, "serial.log");
 const 截屏 = path.join(建, "screen.png");
 const 机名 = "Yunooka";
-const 该有 = "Yunooka: boot ok";
+// 两行都要在。只看到第二行说明第一段没跑；只看到第一行说明读盘或跳转断了 ——
+// 判据分两行写，正是为了让失败停在能分辨的位置上。
+const 该有 = ["Yunooka: boot ok", "Yunooka: stage2 ok"];
 const 留机 = process.argv.includes("--keep");
 
 const 做不了 = (为什么) => {
@@ -98,20 +100,23 @@ for (let i = 0; i < 40; i++) {
   睡(500);
   if (fs.existsSync(串口)) {
     读到 = fs.readFileSync(串口, "utf8");
-    if (读到.includes(该有)) break;
+    if (该有.every((s) => 读到.includes(s))) break;
   }
 }
 
 vbox(["controlvm", 机名, "screenshotpng", 截屏]);
 
 // ---- 四、报 ----
-const 成了 = 读到.includes(该有);
+const 缺 = 该有.filter((s) => !读到.includes(s));
+const 成了 = 缺.length === 0;
 console.log("");
 console.log("机器      " + 机名 + "（32 MiB，BIOS 引导，串口写文件）");
 console.log("串口读到  " + (读到 ? JSON.stringify(读到.replace(/\r/g, "\\r").replace(/\n/g, "\\n")) : "(空)"));
 console.log("截屏      " + 截屏);
 console.log("");
-console.log(成了 ? "那行字出现了：" + 该有 : "没等到那行字 —— 引导了，但没说话。");
+console.log(成了
+  ? "两行都在：" + 该有.join(" / ") + " —— 链条是两段。"
+  : "缺：" + 缺.join("、") + " —— 断在那一行前面。");
 
 if (!留机) {
   vbox(["controlvm", 机名, "poweroff"]);
