@@ -380,6 +380,8 @@ long_entry:
     call fn_probe
     call run_and_report
     call run_fn116_twice
+    call call_test
+    call call_report
     jmp .hang64
 .heap_bad:
     mov rsi, line_heap_bad
@@ -861,6 +863,51 @@ exec:
     xor rdx, rdx
     ret
 
+; 一次最小的函数调用：把调用者的 pc 与指令流保存起来，切到被调方，跑完再恢复。
+;
+; 这不是解释「调函数」指令 —— 那还要按名字找函数、传参数、算返回值占哪个槽。
+; 这一块只试通那条缝：同一个 exec 能不能跑另一个函数、并且回到调用者原来那一步。
+; 帧栈的骨架就在这几行 push/pop 里；往后加参数与局部槽，加的是这几行之间的内容，
+; 而不是换一种结构。
+;
+; 被调方是 块长 —— 但这个名字在种子里出现了**两次**（偏移 50814 与 65950），
+; 一个返回 256、一个返回 512。这里用后一个，因为 HMYR 自己的读取器把重名折进
+; 一个 Map 时会留下最后那个，而判据要与那一侧对得上。种子里 main 出现七次、
+; 块长与 is_punct 各两次 —— 重名不是异常，是这个种子的常态。
+call_test:
+    push rbx                        ; 调用者的 pc
+    push r12                        ; 调用者的指令流
+    push r13                        ; 调用者的指令数
+
+    mov r12, 0x20000 + 65950
+    mov r13, 2
+    call scan_instrs                ; 换一张偏移表：它只对当前这段指令流有意义
+    xor rbx, rbx
+    call exec
+
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+call_report:
+    mov r12, rax
+    mov rbx, rdx
+    mov rsi, line_call
+    call puts64
+    cmp r12, 1
+    jne .bad
+    mov rax, rbx
+    call f64_to_int
+    call put_num64
+    jmp put_nl64
+.bad:
+    mov rsi, line_bad_kind
+    call puts64
+    mov rax, r12
+    call put_num64
+    call put_nl64
+
 ; 跑两次符位：参数真时它应当交出 2147483648，参数假时交出 0。
 ; 这两次跑的是同一段指令、同一个入口，只差栈上那一个值 —— 所以它们同时验了
 ; 「跳转真的按条件走」与「两条路都走到了」。
@@ -1204,6 +1251,7 @@ instr_offsets: times 64 dq 0
 test_arg: dq 1
 
 line_fn116: db "Yunooka: fn116 -> ", 0
+line_call: db "Yunooka: call -> ", 0
 line_bad_kind: db "  kind=", 0
 line_unknown_op: db "  unknown op ", 0
 line_got: db "Yunooka: fn116 returned", 13, 10, 0

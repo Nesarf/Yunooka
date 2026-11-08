@@ -44,6 +44,7 @@ const 全程 = [
   "Yunooka: fn ",
   "Yunooka: op ",
   "Yunooka: letters -> ",
+  "Yunooka: call -> ",
 ];
 const 种子三种 = ["Yunooka: seed ok", "Yunooka: seed bad", "Yunooka: seed unreadable"];
 const 留机 = process.argv.includes("--keep");
@@ -184,6 +185,10 @@ const 结果行 = /Yunooka: letters -> (\w+)(?: (\d+))?/.exec(读到);
 // 这两行合起来才说明「跳转按条件走」—— 只验一个的话，一个永远不跳的解释器也能过。
 const 跳转结果 = [...读到.matchAll(/Yunooka: fn116 -> (\d+)/g)].map((m) => m[1]);
 const 跳转成 = 跳转结果.length === 2 && 跳转结果[0] === "2147483648" && 跳转结果[1] === "0";
+// 调用那一块：块长 在种子里有两个定义（一个返回 256、一个返回 512），而 HMYR 自己的
+// 读取器按名字折进 Map 时留的是后一个。判据跟着那一侧走，所以这里认 512。
+const 调用行 = /Yunooka: call -> (\d+)/.exec(读到);
+const 调用成 = 调用行 !== null && 调用行[1] === "512";
 console.log("第一个函数 " + (函数行
   ? 函数行[1] + "（参 " + 函数行[2] + "、槽 " + 函数行[3] + "、指令 " + 函数行[4] + "）"
   : "(没读出来)"));
@@ -196,6 +201,9 @@ console.log("求值结果  " + (结果行
 console.log("跳转      " + (跳转结果.length
   ? 跳转结果.map((n) => "fn116 -> " + n).join("  ") + (跳转成 ? "  —— 真时走一条、假时走另一条" : "  —— 不对：应当是 2147483648 与 0")
   : "(没跑)"));
+console.log("调用      " + (调用行
+  ? "块长 -> " + 调用行[1] + (调用成 ? "  —— 帧进去又出来了" : "  —— 不对：应当是 512")
+  : "(没跑)"));
 // 结构这一条只在带种子时算：没有种子时机器不读种子头，那是对的，不该因此变红。
 const 有种子 = 读到.includes("Yunooka: seed ok");
 const 求值成 = 结果行 !== null && 结果行[1] === "string" && 结果行[2] === "53";
@@ -207,6 +215,7 @@ const 结构成 = 有种子
     && 操作码行集[0] === 5
     && 求值成
     && 跳转成
+    && 调用成
   : true;
 // 成败三条合成一条：缺行、分配、结构。放在这里算，因为它要用到上面那个结构成 ——
 // 这也是第一次把它写在前面时的报错原因（Cannot access before initialization）。
