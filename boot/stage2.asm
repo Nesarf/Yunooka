@@ -387,6 +387,7 @@ long_entry:
     call call_report
     call run_by_name_twice
     call run_is_digit
+    call run_ata_test
     jmp .hang64
 .heap_bad:
     mov rsi, line_heap_bad
@@ -1406,6 +1407,101 @@ is_digit_report_bad:
     call put_num64
     jmp put_nl64
 
+; ======================================================================
+; ATA PIO：长模式下的第一块读盘能力
+; ======================================================================
+;
+; 文件系统的前提不是路径语法，是「进了长模式之后还读得到盘」。BIOS 的 int 0x13
+; 只活在实模式，所以这一段必须自己碰端口 —— 主通道 0x1F0 那一组，LBA28 的 PIO 读。
+;
+; 判据不是「读出来了」，而是「与 BIOS 读的是同一份」：种子已经由 int 0x13 读到
+; 0x20000，这里再用 ATA 读同一个扇区（LBA 33，种子在盘上的第一个扇区），
+; 512 字节逐字节比。两条完全不同的路给出同样的字节，才说明这一段对。
+
+; rdi = LBA，rsi = 目标缓冲区（512 字节）。进位清表示读到。
+ata_read:
+    push rsi
+    ; 设备/头：主盘、LBA 模式、再带上 LBA 的高四位
+    mov rax, rdi
+    shr rax, 24
+    and al, 0x0F
+    or al, 0xE0
+    mov dx, 0x1F6
+    out dx, al
+    ; 扇区数
+    mov dx, 0x1F2
+    mov al, 1
+    out dx, al
+    ; LBA 低三位
+    mov rax, rdi
+    mov dx, 0x1F3
+    out dx, al
+    mov rax, rdi
+    shr rax, 8
+    mov dx, 0x1F4
+    out dx, al
+    mov rax, rdi
+    shr rax, 16
+    mov dx, 0x1F5
+    out dx, al
+    ; 命令：读扇区
+    mov dx, 0x1F7
+    mov al, 0x20
+    out dx, al
+    ; 等 BSY 落、DRQ 起。超时不是防御性代码 —— 没有它，盘不在的时候这一段
+    ; 会永远停在这里，而「停住」和「读到一半」在串口上是一样的。
+    mov r10, 1000000
+.wait:
+    mov dx, 0x1F7
+    in al, dx
+    test al, 0x80
+    jnz .next
+    test al, 0x08                 ; DRQ
+    jnz .ready
+.next:
+    dec r10
+    jnz .wait
+    pop rsi
+    stc
+    ret
+.ready:
+    pop rdi                       ; 目标缓冲区
+    mov rcx, 256
+    mov dx, 0x1F0
+    rep insw                      ; 64 位下字符串指令写的是 rdi
+    clc
+    ret
+
+run_ata_test:
+    mov rax, 512
+    call alloc64
+    mov [ata_buf], rax            ; 缓冲区地址要留住：ata_read 会把 rax 用掉
+    mov rdi, 33                   ; 种子在盘上的第一个扇区：引导 1 + 第二段 32
+    mov rsi, rax
+    call ata_read
+    jc ata_fail
+    mov rsi, [ata_buf]
+    mov rdi, 0x20000
+    mov rcx, 512
+    repe cmpsb
+    jne ata_differ
+    mov rsi, line_ata_same
+    call puts64
+    ret
+ata_differ:
+    ; rcx 是还没比的那几个，所以差在第 512 - rcx 个字节上。
+    mov rax, 512
+    sub rax, rcx
+    mov rsi, line_ata_differ
+    call puts64
+    call put_num64
+    call put_nl64
+    ret
+ata_fail:
+    mov rsi, line_ata_fail
+    call puts64
+    ret
+
 ; 跑两次符位：参数真时它应当交出 2147483648，参数假时交出 0。
 ; 这两次跑的是同一段指令、同一个入口，只差栈上那一个值 —— 所以它们同时验了
 ; 「跳转真的按条件走」与「两条路都走到了」。
@@ -1757,6 +1853,7 @@ frame_count:   times 4 dq 0
 frame_slotbase: times 4 dq 0
 instr_offsets: times 64 dq 0
 test_arg: dq 1
+ata_buf: dq 0
 
 line_fn116: db "Yunooka: fn116 -> ", 0
 line_call: db "Yunooka: call -> ", 0
@@ -1783,6 +1880,9 @@ line_exec_none: db "Yunooka: exec ran out at ", 0
 line_miss_fn: db "Yunooka: no such function", 13, 10, 0
 line_miss_frame: db "Yunooka: frames exhausted", 13, 10, 0
 line_notail: db "Yunooka: notail pc ", 0
+line_ata_same: db "Yunooka: ata same 512", 13, 10, 0
+line_ata_differ: db "Yunooka: ata differ at ", 0
+line_ata_fail: db "Yunooka: ata read failed", 13, 10, 0
 line_bad_kind: db "  kind=", 0
 line_unknown_op: db "  unknown op ", 0
 line_got: db "Yunooka: fn116 returned", 13, 10, 0

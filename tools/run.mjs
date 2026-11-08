@@ -47,6 +47,7 @@ const 全程 = [
   "Yunooka: call -> ",
   "Yunooka: byname first -> ",
   "Yunooka: is_digit('a') -> ",
+  "Yunooka: ata ",
 ];
 const 种子三种 = ["Yunooka: seed ok", "Yunooka: seed bad", "Yunooka: seed unreadable"];
 const 留机 = process.argv.includes("--keep");
@@ -79,7 +80,23 @@ if (!fs.existsSync(盘)) 做不了("还没有 build/disk.vdi，先跑 node tools
 // ---- 一、机器：没有就建，有就复用 ----
 const 册 = vbox(["list", "vms"]);
 if (册.status !== 0) 做不了("VBoxManage list vms 跑不动");
-const 有这台 = String(册.stdout || "").includes('"' + 机名 + '"');
+let 有这台 = String(册.stdout || "").includes('"' + 机名 + '"');
+
+// 磁盘控制器必须是 IDE（PIIX4），不能是 AHCI。
+//
+// 长模式下的读盘走的是 ATA PIO 的 0x1F0 那一组端口，而那组端口属于 IDE 兼容模式；
+// AHCI 控制器不映射它们，read 0x1F7 会一直返回 0xFF —— 状态位看着永远「忙」，
+// 于是等待循环转到超时，而串口上只留下一句没头没尾的 ata start。
+//
+// 控制器一换，机器没法就地改，所以旧的直接删了重建。
+if (有这台) {
+  const 描述 = String(vbox(["showvminfo", 机名, "--machinereadable"]).stdout || "");
+  if (!/^storagecontrollername0="IDE"$/m.test(描述)) {
+    console.log("控制器不是 IDE，删了重建：" + 机名);
+    vbox(["unregistervm", 机名, "--delete"]);
+    有这台 = false;
+  }
+}
 
 const 态 = () => {
   const r = vbox(["showvminfo", 机名, "--machinereadable"]);
@@ -99,11 +116,11 @@ if (有这台 && 态() !== "poweroff" && 态() !== "aborted") {
 if (!有这台) {
   const 建机 = vbox(["createvm", "--name", 机名, "--ostype", "Other_64", "--register"]);
   if (建机.status !== 0) 做不了("建机器失败：" + String(建机.stderr || "").slice(0, 200));
-  vbox(["storagectl", 机名, "--name", "SATA", "--add", "sata", "--controller", "IntelAhci", "--portcount", "2"]);
-  vbox(["storageattach", 机名, "--storagectl", "SATA", "--port", "0", "--device", "0", "--type", "hdd", "--medium", 盘]);
+  vbox(["storagectl", 机名, "--name", "IDE", "--add", "ide", "--controller", "PIIX4", "--portcount", "2"]);
+  vbox(["storageattach", 机名, "--storagectl", "IDE", "--port", "0", "--device", "0", "--type", "hdd", "--medium", 盘]);
 } else {
-  const 卸 = vbox(["storageattach", 机名, "--storagectl", "SATA", "--port", "0", "--device", "0", "--medium", "none"]);
-  const 挂 = vbox(["storageattach", 机名, "--storagectl", "SATA", "--port", "0", "--device", "0", "--type", "hdd", "--medium", 盘]);
+  const 卸 = vbox(["storageattach", 机名, "--storagectl", "IDE", "--port", "0", "--device", "0", "--medium", "none"]);
+  const 挂 = vbox(["storageattach", 机名, "--storagectl", "IDE", "--port", "0", "--device", "0", "--type", "hdd", "--medium", 盘]);
   // 挂载失败要说出来。以前这里不看返回值，于是问题拖到 startvm 才以另一个面目出现
   // （「UUID 不匹配」），而真正的错在更早的地方。
   if (挂.status !== 0 && !String(挂.stderr || "").includes("already"))
@@ -209,6 +226,11 @@ const 数字行 = /Yunooka: is_digit\('7'\) -> (true|false)/.exec(读到);
 const 字母行 = /Yunooka: is_digit\('a'\) -> (true|false)/.exec(读到);
 const 数字成 = 数字行 !== null && 数字行[1] === "true"
   && 字母行 !== null && 字母行[1] === "false";
+// 长模式下的读盘：ATA PIO 读 LBA 33，与 BIOS 已经读到 0x20000 的那 512 字节逐字节比。
+// 两条完全不同的路给出同样的字节才说明这一段对 —— 「读出来了」本身说明不了什么，
+// 读错一个扇区也会读出一个结果。
+const ata行 = /Yunooka: ata (same 512|differ at \d+|read failed)/.exec(读到);
+const ata成 = ata行 !== null && ata行[1] === "same 512";
 console.log("第一个函数 " + (函数行
   ? 函数行[1] + "（参 " + 函数行[2] + "、槽 " + 函数行[3] + "、指令 " + 函数行[4] + "）"
   : "(没读出来)"));
@@ -232,6 +254,9 @@ console.log("内建      " + (数字行 ? "is_digit('7') -> " + 数字行[1] : "
   + "  " + (字母行 ? "is_digit('a') -> " + 字母行[1] : "is_digit('a') -> (没跑)")
   + (数字成 ? "  —— 十轮递归、索引、len、加，全对才给得出这两行"
     : "  —— 不对：应当是 '7' 真、'a' 假"));
+console.log("读盘      " + (ata行 ? "ATA -> " + ata行[1] : "ATA -> (没跑)")
+  + (ata成 ? "  —— 与 BIOS 读进来的那 512 字节逐字节相同"
+    : "  —— 不对：应当读到同一份字节"));
 // 结构这一条只在带种子时算：没有种子时机器不读种子头，那是对的，不该因此变红。
 const 有种子 = 读到.includes("Yunooka: seed ok");
 const 求值成 = 结果行 !== null && 结果行[1] === "string" && 结果行[2] === "53";
@@ -246,6 +271,7 @@ const 结构成 = 有种子
     && 调用成
     && 按名成
     && 数字成
+    && ata成
   : true;
 // 成败三条合成一条：缺行、分配、结构。放在这里算，因为它要用到上面那个结构成 ——
 // 这也是第一次把它写在前面时的报错原因（Cannot access before initialization）。

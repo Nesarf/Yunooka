@@ -158,12 +158,23 @@
       "notes": "解释器装不下了：is_digit 之后实到 6684 字节，times 8192 只剩一千多，再塞一块砖就会中途撞上去。三十二个扇区给 16 KB。三个数字必须一起改 —— boot.asm 的 al = 32、stage2.asm 的 dap_lba = 33（三批各是 33 / 97 / 161）、build.mjs 的种子偏移 16896；它们只会在跑起来的时候一起失败，所以布局注释写在 build.mjs 一处。build.mjs 现在也报「实到多少字节」，因为 times 会把输出补到 16384，那个数字总像是用满了。"
     },
     {
+      "id": "ata-read",
+      "title": "长模式下的 ATA PIO：读到的字节与 BIOS 读的一样",
+      "scope": "stage",
+      "status": "done",
+      "parent": "resident",
+      "after": ["second-stage"],
+      "verifiedBy": ["tools/run.mjs"],
+      "touches": ["boot/stage2.asm", "tools/run.mjs"],
+      "notes": "文件系统的前提是长模式下还能读盘，因为 BIOS 的 int 0x13 只活在实模式。主通道 0x1F0 那一组，LBA28 的 PIO 读。判据不是「读出来了」而是「与 BIOS 读的是同一份」：ATA 读 LBA 33，与 int 0x13 已经读到 0x20000 的那 512 字节逐字节比 —— 读错扇区也会读出一个结果，所以「读出来了」本身什么都说明不了。踩到的坑在机器那一侧：控制器原来是 AHCI，而 0x1F0 那组端口属于 IDE 兼容模式、AHCI 不映射，读 0x1F7 一直返回 0xFF，状态位看着永远忙、等待循环转到超时才放手，串口上只留一句没头没尾的 ata start；改成 PIIX4 就通了，run.mjs 现在检查控制器名、不是 IDE 就删了重建。"
+    },
+    {
       "id": "filesystem",
       "title": "文件系统：盘符从 α 起的小写希腊字母",
       "scope": "stage",
       "status": "open",
       "parent": "resident",
-      "after": ["builtins", "widen-stage2"],
+      "after": ["builtins", "widen-stage2", "ata-read"],
       "verifiedBy": ["tools/run.mjs"],
       "touches": ["README.md"],
       "notes": "盘符方案已经定在 README 里（α β γ …），而路径怎么写还没定 —— 那一件事要等文件系统本身有了形状才说得准。"
