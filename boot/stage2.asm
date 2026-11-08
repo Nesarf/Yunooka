@@ -364,7 +364,15 @@ long_entry:
 
     mov rsi, line_heap_ok
     call puts64
+
+    ; 没有种子就不读它的头。否则从零里会读出一个「版本 0、0 个函数」，而第一条指令
+    ; 那个 0 还会被翻成「加」—— 垃圾被翻译成漂亮数字，看起来像真读懂了。
+    ; 判据要的是「读得懂」，不是「读得出数」。
+    cmp dword [seed_bytes], 0
+    je .hang64
+
     call seed_header
+    call fn_probe
     jmp .hang64
 .heap_bad:
     mov rsi, line_heap_bad
@@ -421,6 +429,84 @@ put_num64:
     pop rcx
     pop rbx
     ret
+
+; 读第一个函数的头与它的第一条指令。格式按 src/code-file.mjs 的读程序：
+;   名（串：u16 长度 + 每字符 u16）| 参数量 u16 | 槽数 u16 |
+;   效果数 u16 + 每效果（串）| 指令数 u32 | 每条指令：操作码 u8 + 立即数
+; 只碰第一个函数与它的第一条指令。再往下就要按立即数形状算长度，而那是「能执行
+; 字节码」那一块的活，不是这一块的 —— 这里要证明的是「读得懂结构」。
+fn_probe:
+    mov rsi, 0x20000 + 9
+
+    ; 名字：UTF-16，但函数名都是 ASCII，所以只取每字符的低字节
+    movzx ecx, word [rsi]
+    add rsi, 2
+    push rsi
+    push rcx
+    mov rsi, line_fn
+    call puts64
+    pop rcx
+    pop rsi
+.name:
+    test ecx, ecx
+    jz .named
+    mov al, [rsi]
+    call putc64
+    add rsi, 2
+    dec ecx
+    jmp .name
+.named:
+    movzx eax, word [rsi]          ; 参数量
+    add rsi, 2
+    mov r14, rax
+    movzx eax, word [rsi]          ; 槽数
+    add rsi, 2
+    mov r15, rax
+
+    ; 效果表：数一数，然后把每个效果串跳过
+    movzx ecx, word [rsi]
+    add rsi, 2
+.eff:
+    test ecx, ecx
+    jz .effed
+    movzx edx, word [rsi]
+    add rsi, 2
+    lea rsi, [rsi + rdx * 2]
+    dec ecx
+    jmp .eff
+.effed:
+    mov edx, [rsi]                 ; 指令数，u32
+    add rsi, 4
+    mov r13, rdx
+    ; 把指令流起点存进 r12 再打印。rsi 一身二职：这一段里它是游标，而 puts64 要把它
+    ; 当成字符串指针用 —— 不先存一遍，打印完那三行之后游标就丢了，读到的操作码是
+    ; 消息尾巴里的字节（第一次读出来是 89，而真实值是 5）。
+    mov r12, rsi
+
+    mov rsi, line_fn_params
+    call puts64
+    mov rax, r14
+    call put_num64
+    mov rsi, line_fn_mid
+    call puts64
+    mov rax, r15
+    call put_num64
+    mov rsi, line_fn_instrs
+    call puts64
+    mov rax, r13
+    call put_num64
+    call put_nl64
+
+    ; 第一条指令的操作码单独占一行：它要拿 src/code-file.mjs 那张表来核对，
+    ; 而这张表的权威在那一侧，所以这里只报号，翻译留给读的人。
+    mov rsi, r12
+    movzx eax, byte [rsi]
+    mov r14, rax
+    mov rsi, line_op
+    call puts64
+    mov rax, r14
+    call put_num64
+    jmp put_nl64
 
 ; 把 rax 里的地址打成一整行：前缀、十六位十六进制、换行。
 show_alloc:
@@ -560,6 +646,11 @@ line_heap_ok: db "Yunooka: heap ok", 13, 10, 0
 line_heap_bad: db "Yunooka: heap bad", 13, 10, 0
 line_seed_hdr: db "Yunooka: seed v", 0
 line_seed_mid: db " ", 0
+line_fn: db "Yunooka: fn ", 0
+line_fn_params: db " params ", 0
+line_fn_mid: db " slots ", 0
+line_fn_instrs: db " instrs ", 0
+line_op: db "Yunooka: op ", 0
 line_nl:   db 13, 10, 0
 
 ; 分配器的游标。从 4 MB 起 —— 前 4 MB 已经被引导扇区、第二段、页表占着，种子在
