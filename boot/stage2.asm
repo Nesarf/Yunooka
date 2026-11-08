@@ -344,6 +344,31 @@ long_entry:
     call alloc64
     call show_alloc
 
+    ; ---- 堆自检 ----
+    ; 上面三条只证明分配器「在递增且对齐」，没有证明那些地址真的可读写。
+    ; 这一块补上那一半：分配 64 字节、填一个已知模式、再原地读回来逐字节比。
+    ; 写得进去、读得出来、并且读到的是自己写的东西 —— 三件都成立，才算这块内存属于它。
+    mov rax, 64
+    call alloc64
+    mov rbx, rax              ; 保住首地址：rep stosb 会把 rdi 推到末尾
+    mov rdi, rax
+    mov rcx, 64
+    mov al, 0xA5
+    rep stosb
+
+    mov rdi, rbx
+    mov rcx, 64
+    mov al, 0xA5
+    repe scasb                ; 每一字节都与 al 比，不等就提前停
+    jne .heap_bad
+
+    mov rsi, line_heap_ok
+    call puts64
+    jmp .hang64
+.heap_bad:
+    mov rsi, line_heap_bad
+    call puts64
+
 .hang64:
     cli
     hlt
@@ -483,6 +508,8 @@ line3fail: db "Yunooka: seed unreadable", 13, 10, 0
 line4:     db "Yunooka: protected mode ok", 13, 10, 0
 line5:     db "Yunooka: long mode ok", 13, 10, 0
 line_alloc: db "Yunooka: alloc ", 0
+line_heap_ok: db "Yunooka: heap ok", 13, 10, 0
+line_heap_bad: db "Yunooka: heap bad", 13, 10, 0
 line_nl:   db 13, 10, 0
 
 ; 分配器的游标。从 4 MB 起 —— 前 4 MB 已经被引导扇区、第二段、页表占着，种子在

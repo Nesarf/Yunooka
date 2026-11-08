@@ -22,16 +22,25 @@ const 机名 = "Yunooka";
 // 三行里前两行必有，第三行视有没有给种子而定 —— 所以这里只查前两行，
 // 第三行落在下面三种之一：seed ok、seed bad、seed unreadable。
 // 把它写进「必有」会让没有种子的那一趟假红；完全不查又会漏掉读盘失败。
-// 必有的四行：两段引导、保护模式、长模式。种子那一条视给不给 --seed 而定，所以它
-// 单独报（seed ok 带字节数 / seed bad / seed unreadable 三选一），不进成败线。
+// 必有的五行：两段引导、保护模式、长模式、堆自检。种子那一条视给不给 --seed 而定，
+// 所以它单独报（seed ok 带字节数 / seed bad / seed unreadable 三选一），不进成败线。
 const 该有 = [
   "Yunooka: boot ok",
   "Yunooka: stage2 ok",
   "Yunooka: protected mode ok",
   "Yunooka: long mode ok",
+  "Yunooka: heap ok",
 ];
-// 全程是出现过就好的那串，用来决定什么时候停止等待。
-const 全程 = [...该有.slice(0, 2), "Yunooka: seed ok", ...该有.slice(2)];
+// 全程是出现过就好的那串，用来决定什么时候停止等待。它比成败线多两样：
+// 种子那一行，以及分配地址（那是正则匹配的，不是固定字符串）。
+const 全程 = [
+  "Yunooka: boot ok",
+  "Yunooka: stage2 ok",
+  "Yunooka: seed ok",
+  "Yunooka: protected mode ok",
+  "Yunooka: long mode ok",
+  "Yunooka: heap ok",
+];
 const 种子三种 = ["Yunooka: seed ok", "Yunooka: seed bad", "Yunooka: seed unreadable"];
 const 留机 = process.argv.includes("--keep");
 
@@ -150,7 +159,7 @@ console.log("分配      " + (地址批.length ? 地址批.join("  ") : "(没有
 console.log("截屏      " + 截屏);
 console.log("");
 console.log(成了
-  ? "四行都在，链条是四段：引导、第二段、保护模式、长模式。"
+  ? "五行都在，链条是五段：引导、第二段、保护模式、长模式、堆。"
   : "缺：" + 缺.join("、") + " —— 断在那一行前面。");
 
 if (!留机) {
