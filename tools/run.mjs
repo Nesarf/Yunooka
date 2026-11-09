@@ -9,6 +9,7 @@
 // 用法：node tools/run.mjs
 //       node tools/run.mjs --keep        跑完不停机，好让人打开窗口看
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -17,6 +18,9 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const 建 = path.join(ROOT, "build");
 const 盘 = path.join(建, "disk.vdi");
 const 串口 = path.join(建, "serial.log");
+// 串口插座。用 tcpserver 而不是文件，因为文件那条路是单向的：虚拟机写得出来，
+// 主机写不进去。而回显测试与将来的 shell 都要字节能从主机走进去。
+const 串口口 = 47111;
 const 截屏 = path.join(建, "screen.png");
 const 机名 = "Yunooka";
 // 三行里前两行必有，第三行视有没有给种子而定 —— 所以这里只查前两行，
@@ -133,6 +137,12 @@ if (!有这台) {
 // ---- 二、配置：最小机器，串口写进文件 ----
 // 32 MiB 是 VirtualBox 允许的最小内存。这台机器现在只需要把一条指令走完，
 // 内存小反而好 —— 它逼着后面加东西时先想清楚要多少。
+//
+// 试过 tcpserver（双向插座），配置确实生效（showvminfo 里是 tcpserver,47111），
+// 但 run.mjs 收到的是空的：VirtualBox 的监听在虚拟机真正起来之后才开始听，
+// 而那时启动那二十来行已经写完了。要让双向成立，得先连上再放机器跑，
+// 或者换 pipe —— 那是 serial-io 的后半，单独一块。文件模式仍是单向的，
+// 所以现在只能收、不能发。
 for (const 旧 of [串口]) if (fs.existsSync(旧)) fs.unlinkSync(旧);
 vbox(["modifyvm", 机名, "--memory", "32", "--cpus", "1", "--firmware", "bios",
   "--boot1", "disk", "--boot2", "none", "--boot3", "none", "--boot4", "none",
@@ -143,7 +153,7 @@ vbox(["modifyvm", 机名, "--memory", "32", "--cpus", "1", "--firmware", "bios",
 const 起 = vbox(["startvm", 机名, "--type", "headless"]);
 if (起.status !== 0) 做不了("起不来：" + String(起.stderr || "").slice(0, 200));
 
-// 等串口文件里出现那行字，最多二十秒。引导扇区是同步的，正常几秒就够 ——
+// 等串口文件里出现那些行，最多二十秒。引导扇区是同步的，正常几秒就够 ——
 // 二十秒是给慢盘与冷启动留的余量。
 const 睡 = (毫秒) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 毫秒);
 let 读到 = "";
@@ -151,12 +161,9 @@ for (let i = 0; i < 40; i++) {
   睡(500);
   if (fs.existsSync(串口)) {
     读到 = fs.readFileSync(串口, "utf8");
-    // 全程每一行都出现、指令流四条到齐、并且两次求值都有结果，才收工；否则给满二十秒。
-    // 只等前两样是不够的：求值在最后，而它前面那一长串诊断让「读到的」永远像是完整的。
+    // 全程每一行都出现、指令流四条到齐、两次求值都有结果、两次按名字找都在，才收工。
     const 步数 = (读到.match(/Yunooka: op /g) || []).length;
     const 结果数 = (读到.match(/Yunooka: fn116 -> /g) || []).length;
-    // 按名字找有两次（后者与前者各一次）。两次都在才收工，否则会在第二次还
-    // 没写出来的时候读到只对一半的状态。
     const 按名数 = (读到.match(/Yunooka: byname/g) || []).length;
     if (全程.every((s) => 读到.includes(s)) && 步数 >= 4 && 结果数 >= 2 && 按名数 >= 2) break;
   }
