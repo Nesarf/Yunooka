@@ -138,11 +138,11 @@ if (!有这台) {
 // 32 MiB 是 VirtualBox 允许的最小内存。这台机器现在只需要把一条指令走完，
 // 内存小反而好 —— 它逼着后面加东西时先想清楚要多少。
 //
-// 试过 tcpserver（双向插座），配置确实生效（showvminfo 里是 tcpserver,47111），
-// 但 run.mjs 收到的是空的：VirtualBox 的监听在虚拟机真正起来之后才开始听，
-// 而那时启动那二十来行已经写完了。要让双向成立，得先连上再放机器跑，
-// 或者换 pipe —— 那是 serial-io 的后半，单独一块。文件模式仍是单向的，
-// 所以现在只能收、不能发。
+// 关于双向：试过两次 tcpserver，两次都是「连得上、收不到」。第一次以为监听太晚，
+// 于是 stage2 加了握手（第一行之前等一个字节）；加了之后症状一模一样。所以问题
+// 不在时序，在这条通道本身 —— 连上了却没有数据流过。这一件要单独查（换 pipe、
+// 或者用 VBoxManage 的调试口看 UART 状态），不该夹在别的砖里继续试。
+// 文件模式因此留着：它单向，但可靠。
 for (const 旧 of [串口]) if (fs.existsSync(旧)) fs.unlinkSync(旧);
 vbox(["modifyvm", 机名, "--memory", "32", "--cpus", "1", "--firmware", "bios",
   "--boot1", "disk", "--boot2", "none", "--boot3", "none", "--boot4", "none",
@@ -153,15 +153,13 @@ vbox(["modifyvm", 机名, "--memory", "32", "--cpus", "1", "--firmware", "bios",
 const 起 = vbox(["startvm", 机名, "--type", "headless"]);
 if (起.status !== 0) 做不了("起不来：" + String(起.stderr || "").slice(0, 200));
 
-// 等串口文件里出现那些行，最多二十秒。引导扇区是同步的，正常几秒就够 ——
-// 二十秒是给慢盘与冷启动留的余量。
+// 等串口文件里出现那些行，最多二十秒。
 const 睡 = (毫秒) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 毫秒);
 let 读到 = "";
 for (let i = 0; i < 40; i++) {
   睡(500);
   if (fs.existsSync(串口)) {
     读到 = fs.readFileSync(串口, "utf8");
-    // 全程每一行都出现、指令流四条到齐、两次求值都有结果、两次按名字找都在，才收工。
     const 步数 = (读到.match(/Yunooka: op /g) || []).length;
     const 结果数 = (读到.match(/Yunooka: fn116 -> /g) || []).length;
     const 按名数 = (读到.match(/Yunooka: byname/g) || []).length;

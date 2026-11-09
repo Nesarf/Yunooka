@@ -254,7 +254,7 @@
       "after": [],
       "verifiedBy": ["tools/run.mjs"],
       "touches": ["boot/stage2.asm", "tools/run.mjs"],
-      "notes": "shell 与 math-console 共同的前置。串口现在只写不读：run.mjs 用的是 --uartmode1 file，那是一条单向的路 —— 虚拟机写进去，主机读出来。要读，得把模式换成 tcpserver（或 pipe），再让 run.mjs 连上去写字节、收回来。stage2 这一侧加一个 read_char（等 LSR 的 bit 0，然后 in 0x3F8），判据是最小的一条：发一个 a，回显一个 a。它单独一块，因为它会把 run.mjs 的整个串口读取方式换掉 —— 现在的实现是「等文件里出现某行」，换成插座之后要改成「连上、收、判」。顺带它能解决另一件事：现在的等待靠轮询文件，而插座能立刻知道有新字节。"
+      "notes": "shell 与 math-console 共同的前置。前半已成：stage2 有了 read_char（等 LSR 的 bit 0，从 0x3F8 取字节，有上限）与 run_serial_echo（收到就回显，收不到就说 no input）。有一课值得记：第一版等 200000 次，在这台虚拟机上那是二十多秒，于是超时本身变成了它该报告的那种卡住 —— 降到 2000 才成了一次探测。后半（把字节从主机送进去）试过 tcpserver：配置确实生效（showvminfo 里是 tcpserver,47111），但 run.mjs 读到空。原因是监听在 guest 真正跑起来之后才由虚拟机那一侧创建，而那时启动那二十来行已经写完，单向丢失，客户端重试救不回来。「先连上再放机器跑」因此不可行 —— 监听与命名管道都属于虚拟机那一侧，主机没法先到。可行的方向是反过来：让虚拟机等。stage2 打印完第一行之后先等一个字节作为握手，主机连上、发一个字节，它才继续；这样输出的起点由主机决定，时序问题从根上消失，而那个「等一个字节」正好是 shell 的雏形。"
     },
     {
       "id": "widen-stage2",
