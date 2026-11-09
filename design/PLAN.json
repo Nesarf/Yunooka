@@ -246,6 +246,17 @@
       "notes": "YunookA 不是 Yunooka 的移植，它与 Yunooka 同级：同样是一整套 —— 系统、SDK、默认软件组、默认语言、开发平台。两台机器各有自己的一份，共用同一个语言本体（HMYR）。写成 HMYR 那边移植矩阵的一行是不对的，那一条只在「同一个系统换一个桌面宿主」时才成立；这一份是另一台机器。参考系统是三台真机器：红米 Turbo 4、红魔 11 Air、红魔 9S Pro。三台都是 arm64、都在安卓上，所以宿主口要回答的不是「扩展名怎么登记」，而是「一个 HMYR 程序在安卓里以什么身份存在」—— 应用里的资源、被别的程序拉起来的组件、还是 YunookA 自己托管的壳；安卓不给第二个答案，一个应用就是一个包裹，不存在「从任意目录启动一个程序」。名字里的 A 就是 Android：Yunooka 是桌面那一套，YunookA 是 Android 那一套，一个字母把区别说完了。"
     },
     {
+      "id": "serial-io",
+      "title": "串口读：让这台机器能收到字节",
+      "scope": "stage",
+      "status": "open",
+      "parent": "resident",
+      "after": [],
+      "verifiedBy": ["tools/run.mjs"],
+      "touches": ["boot/stage2.asm", "tools/run.mjs"],
+      "notes": "shell 与 math-console 共同的前置。串口现在只写不读：run.mjs 用的是 --uartmode1 file，那是一条单向的路 —— 虚拟机写进去，主机读出来。要读，得把模式换成 tcpserver（或 pipe），再让 run.mjs 连上去写字节、收回来。stage2 这一侧加一个 read_char（等 LSR 的 bit 0，然后 in 0x3F8），判据是最小的一条：发一个 a，回显一个 a。它单独一块，因为它会把 run.mjs 的整个串口读取方式换掉 —— 现在的实现是「等文件里出现某行」，换成插座之后要改成「连上、收、判」。顺带它能解决另一件事：现在的等待靠轮询文件，而插座能立刻知道有新字节。"
+    },
+    {
       "id": "widen-stage2",
       "title": "第二段从 8 KB 长到 16 KB：三个数字一起改",
       "scope": "stage",

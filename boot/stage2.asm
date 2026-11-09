@@ -405,6 +405,7 @@ long_entry:
     call call_report
     call run_by_name_twice
     call run_is_digit
+    call run_serial_echo
     call run_ata_test
     call run_fs_test
     call run_fs_open
@@ -1561,6 +1562,45 @@ fs_load:
     add rsi, rdi
     ret
 
+; 从串口读一个字节，放进 al。等 LSR 的 bit 0（数据就绪）。
+; 有上限：没有上限的话，没人在另一端的时候这里会永远等，而「在等」与「坏了」
+; 在串口上看起来完全一样 —— 这一课在前面几块里已经付过一次学费。
+read_char:
+    ; 2000 次不是「等多久」，是一次探测。串口在插座模式下会立刻告诉有没有字节；
+    ; 而 200000 次 in 在这台虚拟机上要几十秒 —— 那与卡住在串口上看起来一样，
+    ; 这一课刚在上一趟付过。
+    mov r10, 2000
+.wait:
+    mov dx, 0x3FD
+    in al, dx
+    test al, 0x01
+    jnz .ready
+    dec r10
+    jnz .wait
+    stc
+    ret
+.ready:
+    mov dx, 0x3F8
+    in al, dx
+    clc
+    ret
+
+; 收到一个字节就回显它，收不到就说 no input。
+run_serial_echo:
+    call read_char
+    jc .none
+    push rax
+    mov rsi, line_serial_got
+    call puts64
+    pop rax
+    call putc64                   ; puts64 用 lodsb，会改 al —— 所以字符先入栈
+    call put_nl64
+    ret
+.none:
+    mov rsi, line_serial_none
+    call puts64
+    ret
+
 run_ata_test:
     mov rax, 512
     call alloc64
@@ -2261,6 +2301,8 @@ line_fs_empty: db "Yunooka: fs root empty", 13, 10, 0
 line_fs_bad: db "Yunooka: fs bad magic", 13, 10, 0
 line_fs_fail: db "Yunooka: fs read failed", 13, 10, 0
 line_fs_preread: db "Yunooka: fs preread failed", 13, 10, 0
+line_serial_got: db "Yunooka: echo ", 0
+line_serial_none: db "Yunooka: no input", 13, 10, 0
 line_fs_open: db "Yunooka: open ", 0
 line_fs_arrow: db " -> ", 0
 line_fs_nofile: db "Yunooka: not found", 13, 10, 0
