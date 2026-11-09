@@ -97,6 +97,24 @@ stage2:
 
 ; ---- 进 32 位保护模式 ----
 .go32:
+    ; 文件系统的五个扇区先读进来：超级块、根目录、docs 目录、hello.txt、note.txt。
+    ;
+    ; 为什么不留给长模式：长模式里没有 BIOS，而 ATA PIO 在虚拟机模拟的 IDE 上不稳定 ——
+    ; 重试、0xFF、drain、逐 word、读前延迟，五轮补丁都没让它站住。BIOS 读盘从加电到
+    ; 现在一次没出过错，所以这里把不可靠的那一步换成可靠的那一步。
+    ;
+    ; 代价是真的：「能打开哪些文件」从此在启动时定死。换来的是文件系统这一层不用再跟
+    ; PIO 的时序搏斗，而 fs_lookup 与两层布局本来就不在怀疑范围内。
+    mov dword [dap_lba], 1024
+    mov word [dap_off], 0x0000
+    mov word [dap_seg], 0x4000
+    mov word [dap_count], 5
+    call read_batch
+    jnc .fs_ready
+    mov si, line_fs_preread
+    call serial_print
+.fs_ready:
+
     ; A20 用 BIOS 的 int 0x15, ax=0x2401 来开，不走 8042 键盘控制器那一路。
     ; 原先那一版（out 0x64 / 0x60）在 VirtualBox 上直接把 out 卡住了 —— 串口停在
     ; 观测字节后面，看起来像挂在保护模式上。BIOS 调用失败了也不管：这块固件
@@ -1533,6 +1551,16 @@ ata_read:
     stc
     ret
 
+; 预读进来的那五份东西：扇区 1024 起，落在 0x40000，每扇区 512 字节。
+; 接口与 ata_read 一样（rdi = 扇区号），但它不读盘 —— 它只是算出地址。
+; 长模式下的文件系统一路都走这里，PIO 那条路只在 run_ata_test 里留作对照。
+fs_load:
+    sub rdi, 1024
+    shl rdi, 9
+    mov rsi, 0x40000
+    add rsi, rdi
+    ret
+
 run_ata_test:
     mov rax, 512
     call alloc64
@@ -1572,14 +1600,9 @@ ata_fail:
 ;
 ; 名字读得出来，路径才有意义 —— 而路径有意义，文件才算存在。
 run_fs_test:
-    mov rax, 512
-    call alloc64
-    mov [fs_buf], rax
     mov rdi, 1024                   ; 超级块：引导与种子之后的第一千个扇区
-    mov rsi, rax
-    call ata_read
-    jc fs_fail
-    mov rsi, [fs_buf]
+    call fs_load
+    mov [fs_buf], rsi
     cmp dword [rsi], 0x4F4E5559     ; "YUNO"
     jne fs_bad
     cmp word [rsi + 4], 0x5346      ; "FS"
@@ -1587,9 +1610,8 @@ run_fs_test:
     movzx r14d, word [rsi + 6]      ; 版本
     mov r15d, [rsi + 12]            ; 根目录的第一个扇区
     mov rdi, r15
-    mov rsi, [fs_buf]
-    call ata_read
-    jc fs_fail
+    call fs_load
+    mov [fs_buf], rsi
     mov rsi, line_fs_ok
     call puts64
     mov rax, r14
@@ -1655,15 +1677,12 @@ run_fs_open:
     mov r13, rcx                  ; 目标名字长度
     mov r14, rdi                  ; 目标名字
     mov rdi, 1024
-    mov rsi, [fs_buf]
-    call ata_read
-    jc fs_open_read
+    call fs_load
+    mov [fs_buf], rsi
     mov rax, [fs_buf]
     mov rdi, [rax + 12]           ; 超级块说的根目录扇区
-    mov rsi, [fs_buf]
-    call ata_read
-    jc fs_open_read
-    mov rsi, [fs_buf]
+    call fs_load
+    mov [fs_buf], rsi
 .fs_entry:
     movzx eax, word [rsi]
     test eax, eax
@@ -1685,9 +1704,8 @@ run_fs_open:
     mov r15d, [rdx + 1]
     mov ebx, [rdx + 5]
     mov rdi, r15
-    mov rsi, [fs_buf]
-    call ata_read
-    jc fs_open_read
+    call fs_load
+    mov [fs_buf], rsi
     mov rsi, line_fs_open
     call puts64
     mov rdi, r14                  ; 盘符是 UTF-16 的希腊字，八位串口打不出来 —— 打名字
@@ -1740,11 +1758,9 @@ fs_open_read:
 ; r8 = 名字起点，r9 = 名字长度，rsi = 目录扇区。
 ; 回来 rax = 1 找到 / 0 没有；找到时 r15 = 起始扇区、rbx = 字节长度、dl = 类型。
 fs_lookup:
-    mov rdi, rsi
-    mov rsi, [fs_buf]
-    call ata_read
-    jc .miss
-    mov rsi, [fs_buf]
+    mov rdi, rsi                  ; 入参是目录扇区，fs_load 要的是 rdi
+    call fs_load
+    mov [fs_buf], rsi
 .entry:
     movzx eax, word [rsi]
     test eax, eax
@@ -1783,9 +1799,8 @@ run_fs_open2:
     cmp ax, 0x03B1
     jne fs_open_drive
     mov rdi, 1024
-    mov rsi, [fs_buf]
-    call ata_read
-    jc fs_open_read
+    call fs_load
+    mov [fs_buf], rsi
     mov rax, [fs_buf]
     mov r13d, [rax + 12]          ; 根目录扇区
     mov r8, fs_seg1               ; 第一段：docs
@@ -1801,9 +1816,8 @@ run_fs_open2:
     test rax, rax
     jz fs_open_miss
     mov rdi, r15
-    mov rsi, [fs_buf]
-    call ata_read
-    jc fs_open_read
+    call fs_load
+    mov [fs_buf], rsi
     mov rsi, line_fs_open
     call puts64
     mov rdi, fs_seg1
@@ -2235,6 +2249,7 @@ line_fs_first: db " first ", 0
 line_fs_empty: db "Yunooka: fs root empty", 13, 10, 0
 line_fs_bad: db "Yunooka: fs bad magic", 13, 10, 0
 line_fs_fail: db "Yunooka: fs read failed", 13, 10, 0
+line_fs_preread: db "Yunooka: fs preread failed", 13, 10, 0
 line_fs_open: db "Yunooka: open ", 0
 line_fs_arrow: db " -> ", 0
 line_fs_nofile: db "Yunooka: not found", 13, 10, 0
