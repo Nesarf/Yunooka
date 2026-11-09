@@ -48,6 +48,7 @@ const 全程 = [
   "Yunooka: byname first -> ",
   "Yunooka: is_digit('a') -> ",
   "Yunooka: ata ",
+  "Yunooka: fs ",
 ];
 const 种子三种 = ["Yunooka: seed ok", "Yunooka: seed bad", "Yunooka: seed unreadable"];
 const 留机 = process.argv.includes("--keep");
@@ -231,6 +232,11 @@ const 数字成 = 数字行 !== null && 数字行[1] === "true"
 // 读错一个扇区也会读出一个结果。
 const ata行 = /Yunooka: ata (same 512|differ at \d+|read failed)/.exec(读到);
 const ata成 = ata行 !== null && ata行[1] === "same 512";
+// 文件系统：超级块的版本、根目录扇区号、以及第一个条目的名字。名字是 build 按
+// design/FS.txt 放进去的，所以这一条验的是「读得懂那份布局」，不是「读出了一行字」：
+// 版本号与扇区号都来自超级块自己，而名字来自目录条目的 UTF-16 码元。
+const fs行 = /Yunooka: fs ok v(\d+) root (\d+) first (\S+)/.exec(读到);
+const fs成 = fs行 !== null && fs行[1] === "1" && fs行[2] === "1025" && fs行[3] === "hello.txt";
 console.log("第一个函数 " + (函数行
   ? 函数行[1] + "（参 " + 函数行[2] + "、槽 " + 函数行[3] + "、指令 " + 函数行[4] + "）"
   : "(没读出来)"));
@@ -257,6 +263,11 @@ console.log("内建      " + (数字行 ? "is_digit('7') -> " + 数字行[1] : "
 console.log("读盘      " + (ata行 ? "ATA -> " + ata行[1] : "ATA -> (没跑)")
   + (ata成 ? "  —— 与 BIOS 读进来的那 512 字节逐字节相同"
     : "  —— 不对：应当读到同一份字节"));
+console.log("文件系统  " + (fs行
+  ? "v" + fs行[1] + "，根目录第 " + fs行[2] + " 号扇区，第一个名字 " + fs行[3]
+  : "(没读出来)")
+  + (fs成 ? "  —— 名字与扇区号都来自盘上那份布局"
+    : "  —— 不对：应当是 v1、根目录 1025、第一个名字 hello.txt"));
 // 结构这一条只在带种子时算：没有种子时机器不读种子头，那是对的，不该因此变红。
 const 有种子 = 读到.includes("Yunooka: seed ok");
 const 求值成 = 结果行 !== null && 结果行[1] === "string" && 结果行[2] === "53";
@@ -272,6 +283,7 @@ const 结构成 = 有种子
     && 按名成
     && 数字成
     && ata成
+    && fs成
   : true;
 // 成败三条合成一条：缺行、分配、结构。放在这里算，因为它要用到上面那个结构成 ——
 // 这也是第一次把它写在前面时的报错原因（Cannot access before initialization）。

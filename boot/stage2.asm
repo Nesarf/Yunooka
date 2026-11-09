@@ -388,6 +388,7 @@ long_entry:
     call run_by_name_twice
     call run_is_digit
     call run_ata_test
+    call run_fs_test
     jmp .hang64
 .heap_bad:
     mov rsi, line_heap_bad
@@ -1421,6 +1422,20 @@ is_digit_report_bad:
 ; rdi = LBA，rsi = 目标缓冲区（512 字节）。进位清表示读到。
 ata_read:
     push rsi
+    ; 先等盘空下来。上一条命令还没收尾就写新的，盘会把这一条丢掉，而丢掉之后
+    ; insW 读出来的是上一次留在缓冲区里的字节 —— 看着像读成了，其实是旧的。
+    mov r10, 1000000
+.busy:
+    mov dx, 0x1F7
+    in al, dx
+    test al, 0x80
+    jz .idle
+    dec r10
+    jnz .busy
+    pop rsi
+    stc
+    ret
+.idle:
     ; 设备/头：主盘、LBA 模式、再带上 LBA 的高四位
     mov rax, rdi
     shr rax, 24
@@ -1469,6 +1484,17 @@ ata_read:
     mov rcx, 256
     mov dx, 0x1F0
     rep insw                      ; 64 位下字符串指令写的是 rdi
+    ; 读完再等 BSY 落，好让下一条命令发得出去。少了这一段，第一次读照成，
+    ; 第二次就会卡在「等盘」上 —— 症状是串口在它之前那一行停住。
+    mov r10, 1000000
+.drain:
+    mov dx, 0x1F7
+    in al, dx
+    test al, 0x80
+    jz .ok
+    dec r10
+    jnz .drain
+.ok:
     clc
     ret
 
@@ -1499,6 +1525,71 @@ ata_differ:
     ret
 ata_fail:
     mov rsi, line_ata_fail
+    call puts64
+    ret
+
+; ======================================================================
+; 文件系统：第 1024 号扇区上的超级块，与它指的那个根目录
+; ======================================================================
+;
+; 设计在 design/FS.txt。这一块只做到「读出一个名字」：
+; 超级块的魔数与版本、根目录的扇区号、以及根目录里第一个条目的名字。
+;
+; 名字读得出来，路径才有意义 —— 而路径有意义，文件才算存在。
+run_fs_test:
+    mov rax, 512
+    call alloc64
+    mov [fs_buf], rax
+    mov rdi, 1024                   ; 超级块：引导与种子之后的第一千个扇区
+    mov rsi, rax
+    call ata_read
+    jc fs_fail
+    mov rsi, [fs_buf]
+    cmp dword [rsi], 0x4F4E5559     ; "YUNO"
+    jne fs_bad
+    cmp word [rsi + 4], 0x5346      ; "FS"
+    jne fs_bad
+    movzx r14d, word [rsi + 6]      ; 版本
+    mov r15d, [rsi + 12]            ; 根目录的第一个扇区
+    mov rdi, r15
+    mov rsi, [fs_buf]
+    call ata_read
+    jc fs_fail
+    mov rsi, line_fs_ok
+    call puts64
+    mov rax, r14
+    call put_num64
+    mov rsi, line_fs_root
+    call puts64
+    mov rax, r15
+    call put_num64
+    mov r12, [fs_buf]
+    movzx eax, word [r12]           ; 第一个条目的名字长度
+    test eax, eax
+    jz fs_empty
+    mov r13, rax
+    mov rsi, line_fs_first
+    call puts64
+    xor rbx, rbx
+.name:
+    cmp rbx, r13
+    jae .name_done
+    movzx eax, word [r12 + 2 + rbx * 2]
+    call putc64                     ; 名字是 UTF-16 码元，这一版只取低字节
+    inc rbx
+    jmp .name
+.name_done:
+    jmp put_nl64
+fs_empty:
+    mov rsi, line_fs_empty
+    call puts64
+    ret
+fs_bad:
+    mov rsi, line_fs_bad
+    call puts64
+    ret
+fs_fail:
+    mov rsi, line_fs_fail
     call puts64
     ret
 
@@ -1854,6 +1945,7 @@ frame_slotbase: times 4 dq 0
 instr_offsets: times 64 dq 0
 test_arg: dq 1
 ata_buf: dq 0
+fs_buf: dq 0
 
 line_fn116: db "Yunooka: fn116 -> ", 0
 line_call: db "Yunooka: call -> ", 0
@@ -1883,6 +1975,12 @@ line_notail: db "Yunooka: notail pc ", 0
 line_ata_same: db "Yunooka: ata same 512", 13, 10, 0
 line_ata_differ: db "Yunooka: ata differ at ", 0
 line_ata_fail: db "Yunooka: ata read failed", 13, 10, 0
+line_fs_ok: db "Yunooka: fs ok v", 0
+line_fs_root: db " root ", 0
+line_fs_first: db " first ", 0
+line_fs_empty: db "Yunooka: fs root empty", 13, 10, 0
+line_fs_bad: db "Yunooka: fs bad magic", 13, 10, 0
+line_fs_fail: db "Yunooka: fs read failed", 13, 10, 0
 line_bad_kind: db "  kind=", 0
 line_unknown_op: db "  unknown op ", 0
 line_got: db "Yunooka: fn116 returned", 13, 10, 0

@@ -139,8 +139,49 @@ if (种子内容.length) {
   console.log("实到      " + (段内 + 4) + " 字节，余 " + (16384 - 段内 - 4));
 }
 
+// ---- 三·五、文件系统 ----
+// 设计在 design/FS.txt，这里只做第一块砖要的那一点：超级块、一个根目录、一份文件。
+// 位置照文档里写的固定在第 1024 号扇区 —— 前面一千个扇区留给引导链，它不参与分配。
+const 文件系统起 = 1024;
+const 根目录号 = 文件系统起 + 1;
+const 数据起 = 文件系统起 + 2;
+const 示例文件 = Buffer.from("Yunooka filesystem ok\n", "utf8");
+const 示例扇区数 = Math.ceil(示例文件.length / 512);
+
+const 码元 = (s) => {
+  const 列 = [];
+  for (let i = 0; i < s.length; i++) 列.push(s.charCodeAt(i));
+  return 列;
+};
+
+// 一个目录条目：u16 名字长度、若干码元、u8 类型、u32 起始扇区、u32 字节长度。
+// 变长、顺序摆、遇到名字长度为 0 就结束。
+const 写条目 = (buf, at, 名字, 类型, 起始, 长度) => {
+  const 列 = 码元(名字);
+  buf.writeUInt16LE(列.length, at); at += 2;
+  for (const c of 列) { buf.writeUInt16LE(c, at); at += 2; }
+  buf.writeUInt8(类型, at); at += 1;
+  buf.writeUInt32LE(起始, at); at += 4;
+  buf.writeUInt32LE(长度, at); at += 4;
+  return at;
+};
+
+const 超级块 = Buffer.alloc(512);
+超级块.write("YUNOFS", 0, "latin1");
+超级块.writeUInt16LE(1, 6);                        // 版本
+超级块.writeUInt32LE(盘字节数 / 512, 8);             // 盘上扇区总数
+超级块.writeUInt32LE(根目录号, 12);
+超级块.writeUInt32LE(1, 16);                       // 根目录占一个扇区
+超级块.writeUInt32LE(数据起, 20);
+超级块.writeUInt32LE(盘字节数 / 512 - 数据起 - 示例扇区数, 24);
+
+const 根目录 = Buffer.alloc(512);
+写条目(根目录, 0, "hello.txt", 0, 数据起, 示例文件.length);
+console.log("文件系统  超级块第 " + 文件系统起 + " 号扇区，根目录第 " + 根目录号
+  + " 号扇区，一份 hello.txt（" + 示例文件.length + " 字节）");
+
 // 盘用稀疏文件建，不在内存里放一份整盘副本 —— Node 的 Buffer 上限是 2 GB，而这块盘
-// 将来会要 4 GB。ftruncate 造出来的空洞不占磁盘也不占内存，三段各自写在它该在的
+// 将来会要 4 GB。ftruncate 造出来的空洞不占磁盘也不占内存，各段各自写在它该在的
 // 偏移上就够了。VDI 那一层同样对全零区域稀疏，所以两处都不必为「名义尺寸」付账。
 const fd = fs.openSync(盘像, "w");
 try {
@@ -148,6 +189,9 @@ try {
   fs.writeSync(fd, 引导, 0, 引导.length, 0);
   fs.writeSync(fd, 二段, 0, 二段.length, 512);
   fs.writeSync(fd, 种子内容, 0, 种子内容.length, 种子偏移);
+  fs.writeSync(fd, 超级块, 0, 512, 文件系统起 * 512);
+  fs.writeSync(fd, 根目录, 0, 512, 根目录号 * 512);
+  fs.writeSync(fd, 示例文件, 0, 示例文件.length, 数据起 * 512);
 } finally {
   fs.closeSync(fd);
 }
@@ -160,7 +204,10 @@ if (!VBox) 失败("没有 VirtualBox（VBoxManage 不在注册表、也不在 PA
 // VirtualBox 会报「still attached to 1 virtual machine(s)」。而 build 跑在 run 之前，
 // 那时上一趟的盘还挂着，所以这一步必须在这里做，不能指望 run 那一侧。
 // 虚拟机里没有这块盘时这条什么也不做（返回非零，忽略即可）。
-spawnSync(VBox, ["storageattach", "Yunooka", "--storagectl", "SATA", "--port", "0", "--device", "0", "--medium", "none"], { encoding: "utf8" });
+// 控制器名要与 tools/run.mjs 一致：那边建的是 IDE（PIIX4），因为长模式下的 ATA PIO
+// 要走 0x1F0 那组 legacy 端口，而 AHCI 不映射它们。这里写错只会让这一步静悄悄失败，
+// 然后把「盘还挂着」留到 closemedium 那一步去报 —— 那时读起来像盘坏了。
+spawnSync(VBox, ["storageattach", "Yunooka", "--storagectl", "IDE", "--port", "0", "--device", "0", "--medium", "none"], { encoding: "utf8" });
 // 然后再按**它自己的 UUID** 从登记里注销。不能按路径：旧条目多半已经 inaccessible
 // （文件被删或重建过），用路径匹配不到它，于是它一直挂着，下一次 startvm 报
 // 「UUID 与登记里那份不匹配」，而真正的错在这里。
