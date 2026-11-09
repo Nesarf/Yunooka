@@ -1423,21 +1423,36 @@ is_digit_report_bad:
 
 ; rdi = LBA，rsi = 目标缓冲区（512 字节）。进位清表示读到。
 ata_read:
+    ; rdi = LBA，rsi = 目标缓冲（512 字节）。进位清表示读到。
+    ;
+    ; 这一版把「一次没成」当成正常情况处理，而不是异常：虚拟机的 IDE 在连续调用的
+    ; 第三、第四次上会偶发地不理人，而症状是卡住 —— 加一句诊断就好、删掉又坏，
+    ; 所以它不是某个寄存器写错，是时序。做法是三条：读 0x1F7 见到 0xFF 就认定这组
+    ; 端口上没有盘（不是「忙」）；超时就整条命令重来一次；重试之前不再相信任何残留状态。
     push rsi
-    ; 先等盘空下来。上一条命令还没收尾就写新的，盘会把这一条丢掉，而丢掉之后
-    ; insW 读出来的是上一次留在缓冲区里的字节 —— 看着像读成了，其实是旧的。
-    mov r10, 1000000
+    push rdi
+    mov r11, 3                      ; 一次不成再试两次
+.try:
+    ; 总线浮空也当成「这一次没成」而不是「永远不成」：虚拟机会偶发地让状态读成 0xFF，
+    ; 而它下一次可能就是好的。真没盘的时候三次都这样，最后还是 .fail —— 慢一点，
+    ; 但比「一次浮空就放弃」诚实。
+    mov dx, 0x1F7
+    in al, dx
+    cmp al, 0xFF
+    je .retry
+    mov r10, 200000
 .busy:
     mov dx, 0x1F7
     in al, dx
+    cmp al, 0xFF
+    je .retry
     test al, 0x80
     jz .idle
     dec r10
     jnz .busy
-    pop rsi
-    stc
-    ret
+    jmp .retry
 .idle:
+    mov rdi, [rsp]                  ; LBA（重试时也要还在）
     ; 设备/头：主盘、LBA 模式、再带上 LBA 的高四位
     mov rax, rdi
     shr rax, 24
@@ -1465,12 +1480,13 @@ ata_read:
     mov dx, 0x1F7
     mov al, 0x20
     out dx, al
-    ; 等 BSY 落、DRQ 起。超时不是防御性代码 —— 没有它，盘不在的时候这一段
-    ; 会永远停在这里，而「停住」和「读到一半」在串口上是一样的。
-    mov r10, 1000000
+    ; 等 BSY 落、DRQ 起
+    mov r10, 200000
 .wait:
     mov dx, 0x1F7
     in al, dx
+    cmp al, 0xFF
+    je .retry
     test al, 0x80
     jnz .next
     test al, 0x08                 ; DRQ
@@ -1478,14 +1494,11 @@ ata_read:
 .next:
     dec r10
     jnz .wait
-    pop rsi
-    stc
-    ret
+    jmp .retry
 .ready:
-    pop rdi                       ; 目标缓冲区
+    mov rdi, [rsp + 8]            ; 目标缓冲区
     ; 逐 word 读，不用 rep insw。rep insw 在虚拟机模拟的 IDE 控制器上偶尔会挂住：
-    ; 两个实现都能跑，而挂住的那一个只在「前一行的时序稍有不同」时才挂 ——
-    ; 加一句诊断就好、删掉又坏，正是这种坏法。普通循环慢一点，但它每一步都看得见。
+    ; 两个实现都能跑，而挂住的那一个只在「前一行的时序稍有不同」时才挂。
     mov rcx, 256
     mov dx, 0x1F0
 .read:
@@ -1494,18 +1507,27 @@ ata_read:
     add rdi, 2
     dec rcx
     jnz .read
-    ; 读完再等 BSY 落，好让下一条命令发得出去。少了这一段，第一次读照成，
-    ; 第二次就会卡在「等盘」上 —— 症状是串口在它之前那一行停住。
-    mov r10, 1000000
+    ; 读完再等 BSY 落，好让下一条命令发得出去
+    mov r10, 200000
 .drain:
     mov dx, 0x1F7
     in al, dx
+    cmp al, 0xFF
+    je .done
     test al, 0x80
-    jz .ok
+    jz .done
     dec r10
     jnz .drain
-.ok:
+.done:
+    add rsp, 16
     clc
+    ret
+.retry:
+    dec r11
+    jnz .try
+.fail:
+    add rsp, 16
+    stc
     ret
 
 run_ata_test:
@@ -1769,16 +1791,12 @@ run_fs_open2:
     call fs_lookup
     test rax, rax
     jz fs_open_miss
-    mov al, '1'
-    call putc64                   ; 诊断：第一段 docs 找到了
     mov r8, fs_seg2               ; 第二段：note.txt，在 docs 里面找
     mov r9, 8
     mov rsi, r15
     call fs_lookup
     test rax, rax
     jz fs_open_miss
-    mov al, '2'
-    call putc64                   ; 诊断：第二段 note.txt 找到了
     mov rdi, r15
     mov rsi, [fs_buf]
     call ata_read

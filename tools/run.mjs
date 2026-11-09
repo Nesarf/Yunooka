@@ -244,6 +244,10 @@ const fs成 = fs行 !== null && fs行[1] === "1" && fs行[2] === "1025" && fs行
 const 打开行 = /Yunooka: open (\S+) -> (.+)/.exec(读到);
 const 打开成 = 打开行 !== null && 打开行[1] === "hello.txt"
   && 打开行[2].trim() === "Yunooka filesystem ok";
+// 两层：docs 目录里的 note.txt。这一条要的东西比上一条多一层 —— 先拿到目录的扇区，
+// 再在那个扇区里找下一个名字。一层与两层在代码上看起来一样，只有真的走两次才分得开。
+const 深行 = /Yunooka: open docs\/note\.txt -> (.+)/.exec(读到);
+const 深成 = 深行 !== null && 深行[1].trim() === "Yunooka subdirectory ok";
 console.log("第一个函数 " + (函数行
   ? 函数行[1] + "（参 " + 函数行[2] + "、槽 " + 函数行[3] + "、指令 " + 函数行[4] + "）"
   : "(没读出来)"));
@@ -278,6 +282,9 @@ console.log("文件系统  " + (fs行
 console.log("打开      " + (打开行 ? 打开行[1] + " -> " + 打开行[2].trim() : "(没打开)")
   + (打开成 ? "  —— 盘符、分隔、查找、读盘，四环全对才给得出这一行"
     : "  —— 不对：应当读到 Yunooka filesystem ok"));
+console.log("两层      " + (深行 ? "docs/note.txt -> " + 深行[1].trim() : "(没走到)")
+  + (深成 ? "  —— 先拿到目录的扇区，再在它里面找下一个名字"
+    : "  —— 不对：应当读到 Yunooka subdirectory ok"));
 // 结构这一条只在带种子时算：没有种子时机器不读种子头，那是对的，不该因此变红。
 const 有种子 = 读到.includes("Yunooka: seed ok");
 const 求值成 = 结果行 !== null && 结果行[1] === "string" && 结果行[2] === "53";
@@ -295,6 +302,7 @@ const 结构成 = 有种子
     && ata成
     && fs成
     && 打开成
+    && 深成
   : true;
 // 成败三条合成一条：缺行、分配、结构。放在这里算，因为它要用到上面那个结构成 ——
 // 这也是第一次把它写在前面时的报错原因（Cannot access before initialization）。
