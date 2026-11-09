@@ -202,6 +202,17 @@
       "notes": "清单由用户定下：Ichiwatashi（像素层与美术资源，窗口 UI 图标都从它出来）、Nanodesu 与 Torikago（安防：找可执行文件与看着它们）、Volcano-Separator（活动隔离）、Oak-Barrels（中继站）、KID（Kohane Index Desuno，索引）。共同点是都不属于应用那一层：一台没装任何应用的新机器上也要能跑起来，所以只能住在基础库里。这一条现在只是清单，一行代码都没有；每一个都要先回答同一个问题 —— 它的哪一部分必须在还没有操作系统的机器上就存在。"
     },
     {
+      "id": "browser",
+      "title": "默认浏览器：AikawaMei 与 VML 整合，底座装 Firefox 与 Chromium",
+      "scope": "stage",
+      "status": "open",
+      "parent": "resident",
+      "after": ["system-software"],
+      "verifiedBy": [],
+      "touches": ["README.md"],
+      "notes": "用户定的方向：AikawaMei 与 Vtuber's Monitor Link 整合成 Yunooka 的默认浏览器，底座同时装 Firefox 与 Chromium 两套引擎。这两个现在都不是浏览器 —— AikawaMei 是从 SilentCrystal 副本长出来的防御工具（会话卫生审计、内容规则、归因与下架），VML 是打包发布的监视器、带自己的 web 前端。整合的理由我读出来是「它们都在持续看着某些东西」，而浏览器是看着整个网络的那一个；这条理由是我读的，不是用户写的。还没回答的有三件：两套引擎是都要还是二选一；两套引擎在同一个系统里怎么并存；以及这个浏览器在「还没有操作系统」的那一层上占哪一块 —— 它与 Ichiwatashi 的像素层不是同一件事。"
+    },
+    {
       "id": "filesystem",
       "title": "文件系统：盘符从 α 起的小写希腊字母",
       "scope": "stage",
