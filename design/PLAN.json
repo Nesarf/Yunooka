@@ -186,6 +186,17 @@
       "notes": "22 个色号存在 design/palette.json，按用户给出的顺序，不重排。角色划分（背景、前景、强调）还没有定，文件里写的是 null 而不是编一个 —— 一份 22 色的清单不是一套配色。来源是 F:\\素材\\图\\brak 立绘\\kohane\\小一孁 琥珀音_info.jpg（字节其实是 PNG，扩展名写作 jpg）。它与 Ichiwatashi 的像素层是一对：色组定颜色，Ichiwatashi 定怎么画成像素。这一条之所以记成 done，是因为「色号被记下来并且可被代码读到」这件事已经完成；「它被用上」还没有。"
     },
     {
+      "id": "cursor-set",
+      "title": "光标组：暂时用本机那一套 Maki，十七个槽位",
+      "scope": "stage",
+      "status": "done",
+      "parent": "resident",
+      "after": [],
+      "verifiedBy": [],
+      "touches": ["design/CURSOR.txt", "README.md"],
+      "notes": "用户提出的一项：把本机正在用的鼠标指针方案暂时作为 Yunooka 的默认光标组。查清了，是 Maki —— 注册表 HKCU\\Control Panel\\Cursors 里十七个槽位全部指向 %SYSTEMROOT%\\Cursors\\Maki\\，方案名也是 Maki，CursorBaseSize 是 0x20。十七个文件合计 1816690 字节，其中七个静态（.cur，全部 16958 字节，同一套多尺寸容器）十个动画（.ani）。映射、字节数、来源都写进 design/CURSOR.txt。二进制没有搬进仓库：Maki 的再分发条款还没核过，许可没说清之前只记方案与来源。这一条记 done 是因为「方案被查清并记录下来」已经完成；它离被用上还差一整个图形界面 —— 等有像素层与窗口，要做的第一件事是「什么场合换哪一个」，而十七个槽位就是那个映射的骨架。还有两件这一版没定：默认尺寸，以及光标热点要不要自己重做（第三方 .cur 的热点是自带的，改尺寸不会跟着重算）。光标与配色分开记，因为改的时机不一样：配色跟着界面走，光标跟着交互走。"
+    },
+    {
       "id": "shell",
       "title": "默认 shell / 终端 / 控制台",
       "scope": "stage",
