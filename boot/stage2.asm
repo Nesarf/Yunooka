@@ -1660,6 +1660,8 @@ fs_fail:
 ; 判据是文件内容本身：盘符认错、分隔跳错、名字比错、扇区算错，任何一环出错都读不到
 ; 「Yunooka filesystem ok」这二十二个字节。一个字符对不上就全对不上。
 run_fs_open:
+    mov al, 'o'
+    call putc64                   ; 诊断：单层打开被调到了
     mov rdi, fs_path
     movzx eax, word [rdi]
     cmp ax, 0x03B1                ; α
@@ -1676,6 +1678,8 @@ run_fs_open:
 .fs_counted:
     mov r13, rcx                  ; 目标名字长度
     mov r14, rdi                  ; 目标名字
+    mov al, '1'
+    call putc64                   ; 诊断：名字长度算出来了
     mov rdi, 1024
     call fs_load
     mov [fs_buf], rsi
@@ -1683,7 +1687,12 @@ run_fs_open:
     mov rdi, [rax + 12]           ; 超级块说的根目录扇区
     call fs_load
     mov [fs_buf], rsi
+    mov al, '2'
+    call putc64                   ; 诊断：根目录取到了
 .fs_entry:
+    mov al, '0'
+    add al, r13b
+    call putc64                   ; 诊断：每一轮打出要找的名字长度
     movzx eax, word [rsi]
     test eax, eax
     jz fs_open_miss               ; 名字长度为 0：名册到头了
@@ -1691,7 +1700,7 @@ run_fs_open:
     jne .fs_next
     xor rdx, rdx
 .fs_cmp:
-    cmp rdx, r13
+    cmp rdx, 9                    ; 诊断：写死 hello.txt 的长度，替掉 r13
     jae .fs_hit
     mov ax, [rsi + 2 + rdx * 2]
     cmp ax, [r14 + rdx * 2]
@@ -1699,6 +1708,8 @@ run_fs_open:
     inc rdx
     jmp .fs_cmp
 .fs_hit:
+    mov al, '3'
+    call putc64                   ; 诊断：名字命中了
     movzx ecx, word [rsi]
     lea rdx, [rsi + 2 + rcx * 2]  ; 名字之后是类型 u8、起始 u32、长度 u32
     mov r15d, [rdx + 1]
