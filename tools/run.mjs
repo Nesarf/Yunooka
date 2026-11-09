@@ -62,8 +62,9 @@ const 全程 = [
   "Yunooka: shell> ",
   "Yunooka: repl> ",
   "Yunooka: math> average -> ",
-  // 交互式的那一行：客人机先打 shell ready，然后等主机把键送进来。
+  // 交互式的那两行：客人机先打各自的一句，然后等主机把键送进来。
   "Yunooka: shell ready",
+  "Yunooka: repl ready",
 ];
 const 种子三种 = ["Yunooka: seed ok", "Yunooka: seed bad", "Yunooka: seed unreadable"];
 const 留机 = process.argv.includes("--keep");
@@ -215,21 +216,33 @@ if (起.status !== 0) 做不了("起不来：" + String(起.stderr || "").slice(
 // 代价是多几个字节，猜一次的代价是偶尔「没收到」，而后者看起来和「键盘不通」一样。
 // 一旦那一行出现就停手：再送下去会落在后面交互式那一行里，被它当成真的按了 f。
 //
-// 交互式那一行（run_shell_live）要的是握手，不是猜：客人机先打 shell ready，
-// 这里看到之后才把那一行送进去。
-// 送那一行用 keyboardputstring，不用一个个注码。
+// 交互式那两行都要的是握手，不是猜：客人机先打 shell ready 或 repl ready，这里看到
+// 之后才把那一行送进去。两条路各说一句，因为主机分不清「现在轮到谁等键」。
 //
-// 两件事是实测出来的。一是 keyboardputstring 送的是集 1 的扫描码（用集 2 的表去读，
-// 回显会是 c3：0x21 被当成 c、0x26 被当成 3），所以客人机的表也统一到集 1。
-// 二是测试键不能用 f：前面 run_key_poll 用 keyboardputscancode 21 按下过 f 却从没放开，
-// VBox 认为它一直按着，于是 keyboardputstring "f" 不产生新的按下 —— 送 gfiles 得到
-// giles，丢的永远是 f。换成 x（0x2D）之后这一条就通了。
+// 送那一行用 keyboardputstring。两件事是实测出来的：它送的是集 1 的扫描码（用集 2 的
+// 表去读，回显会是 c3：0x21 被当成 c、0x26 被当成 3），所以客人机的表也统一到集 1；
+// 而测试键不能用 f —— run_key_poll 用 keyboardputscancode 21 按下过 f 却从没放开，
+// VBox 认为它一直按着，于是 keyboardputstring "f" 不产生新的按下（送 gfiles 得到
+// giles，丢的永远是 f）。换成 x（0x2D）之后就通了。
 //
-// 还是一次一个字符：整行一次送时 8042 的缓冲装不下，头一个会被挤掉（回显 iles）。
-const 该行文字 = "files";
+// 送一行的办法：一个字符一次，最后补一个回车。
+//
+// 一次送整行时 8042 的缓冲装不下，头一个会被挤掉（回送 files 得到 iles）。逐字符、
+// 每个之间留六十毫秒就好了。回车单独用 keyboardputscancode 送按下码 0x1C。
 const 睡 = (毫秒) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 毫秒);
+const 送一行 = (文字) => {
+  for (const 字 of 文字) {
+    vbox(["controlvm", 机名, "keyboardputstring", 字]);
+    睡(60);
+  }
+  睡(100);
+  // 回车也要送放开码（集 1：按下 1C、放开 9C）。只送按下时 8042 认为回车一直按着，
+  // 重复码会追到下一条命令里 —— 症状是第二条命令收到一个空行。
+  vbox(["controlvm", 机名, "keyboardputscancode", "1c", "9c"]);
+};
 let 读到 = "";
 let 送过整行 = false;
+let 送过名字 = false;
 for (let i = 0; i < 40; i++) {
   睡(500);
   if (!送过整行) {
@@ -240,23 +253,21 @@ for (let i = 0; i < 40; i++) {
   if (fs.existsSync(串口)) {
     读到 = fs.readFileSync(串口, "utf8");
     if (!送过整行 && 读到.includes("Yunooka: shell ready")) {
-      // 一个字符一次。一次送整行时 8042 的缓冲装不下，头一个被挤掉 —— 回显是 iles，
-      // 少的就是第一个。逐字符送的代价是每个约一百毫秒，而客人机的窗口有十几秒。
-      for (const 字 of 该行文字) {
-        vbox(["controlvm", 机名, "keyboardputstring", 字]);
-        睡(60);
-      }
-      睡(100);
-      vbox(["controlvm", 机名, "keyboardputscancode", "1c"]);   // 回车：集 1 的 0x1C
+      送一行("files");
       送过整行 = true;
+    }
+    // 第二条要靠第二条握手：repl 在 shell 之后才开始等键，所以它自己说一句 repl ready。
+    if (!送过名字 && 读到.includes("Yunooka: repl ready")) {
+      送一行("letters");
+      送过名字 = true;
     }
     const 步数 = (读到.match(/Yunooka: op /g) || []).length;
     const 结果数 = (读到.match(/Yunooka: fn116 -> /g) || []).length;
     const 按名数 = (读到.match(/Yunooka: byname/g) || []).length;
-    // 收手的条件里要有「交互那一行也走完了」：只等 shell ready 会在这儿就断电，
-    // 而键刚送出去、客人机还没处理。那样看到的是一行 ready 加一条空白 —— 与
-    // 「键没送到」一模一样。
-    const 交互完 = /Yunooka: shell ready[\s\S]*?Yunooka: shell> files/.test(读到);
+    // 收手的条件里要有「交互那两行也走完了」：只等 ready 会在这儿就断电，而键刚送出去、
+    // 客人机还没处理。那样看到的是一行 ready 加一条空白 —— 与「键没送到」一模一样。
+    const 交互完 = /Yunooka: shell ready[\s\S]*?Yunooka: shell> files/.test(读到)
+      && /Yunooka: repl ready[\s\S]*?Yunooka: repl-live> letters/.test(读到);
     if (交互完 && 全程.every((s) => 读到.includes(s)) && 步数 >= 4 && 结果数 >= 2 && 按名数 >= 2) break;
   }
 }
@@ -367,6 +378,12 @@ const 键成 = 键行 !== null && 键行[1] === "000000000000002D";
 // 只查「有 hello.txt」会被前面从信箱读的那一次占便宜 —— 那一行也是 files。
 const 活行 = /Yunooka: shell ready[\s\S]*?Yunooka: shell> files[\s\S]*?hello\.txt docs/.exec(读到);
 const 活成 = 活行 !== null;
+// repl 的交互那一半：输入一个名字，运行时求它的值。
+// letters 是种子里第一个函数，返回一个 53 字符的串 —— 那个 53 不是打出来的常量，
+// 是 exec 真的跑了它才有的。与盘上那份 repl.txt 的 512 区分开：一个是事先写好的名字，
+// 一个是运行时打进去的名字。
+const 求值活行 = /Yunooka: repl ready[\s\S]*?Yunooka: repl-live> letters[\s\S]*?string 53/.exec(读到);
+const 求值活成 = 求值活行 !== null;
 // 文件系统：超级块的版本、根目录扇区号、以及第一个条目的名字。名字是 build 按
 // design/FS.txt 放进去的，所以这一条验的是「读得懂那份布局」，不是「读出了一行字」：
 // 版本号与扇区号都来自超级块自己，而名字来自目录条目的 UTF-16 码元。
@@ -452,6 +469,9 @@ console.log("键盘      " + (键行 ? (键行[1] ? "key " + 键行[1] : "no key
 console.log("交互      " + (活行 ? "shell ready -> shell> files" : "(没跑到)")
   + (活成 ? "  —— 键是运行时送进去的：先说 ready，主机再送 files 加回车，然后它照做了"
     : "  —— 不对：应当是 shell ready 之后接上 shell> files 与目录列表"));
+console.log("求值活    " + (求值活行 ? "repl ready -> repl-live> letters -> string 53" : "(没跑到)")
+  + (求值活成 ? "  —— 打进去的名字被找到、被跑过；那个 53 是 exec 算出来的"
+    : "  —— 不对：应当是 repl ready 之后接上 repl-live> letters 与 string 53"));
 console.log("文件系统  " + (fs行
   ? "v" + fs行[1] + "，根目录第 " + fs行[2] + " 号扇区，第一个名字 " + fs行[3]
   : "(没读出来)")
@@ -502,6 +522,7 @@ const 结构成 = 有种子
     && 陷成
     && 键成
     && 活成
+    && 求值活成
     && fs成
     && 打开成
     && 深成

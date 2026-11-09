@@ -576,6 +576,7 @@ long_entry:
     call run_div_report
     call run_math
     call run_shell_live
+    call run_repl_live
     call run_trap_test
     jmp .hang64
 .heap_bad:
@@ -2165,9 +2166,14 @@ shell_missing:
 ; 就把时序从猜测变成了握手。
 ;
 ; 超时也要说话：不说的话，一个没送到的键与一个坏掉的键盘在串口上是同一行空白。
-run_shell_live:
-    mov rsi, line_shell_ready
-    call puts64
+; 收一行按键到 line_buf。调用者先打自己的握手行 —— 这里只管收。
+;
+; 为什么抽出来：shell 与 repl 要收的是同一种东西（一行 ASCII），而「读 0x64、查表、
+; 攒缓冲、回车收尾」这四步抄两遍，改一处就会漏另一处。抽出来之后两条路的差别只剩
+; 「拿到这一行之后做什么」。
+;
+; 出：rax = 1 表示收到一行（长度在 line_len，line_buf 以零收尾），0 表示超时。
+read_line_keys:
     mov qword [line_len], 0
     mov r10, 20000000              ; 窗口：主机逐个送键，每个之间留五十毫秒，这里等着
 .key:
@@ -2185,7 +2191,7 @@ run_shell_live:
     test al, al
     jz .next
     cmp al, 13
-    je .line_done
+    je .done
     mov rcx, [line_len]
     cmp rcx, 63
     jae .next                      ; 满了就丢：截断会变成另一条命令
@@ -2198,14 +2204,23 @@ run_shell_live:
 .next:
     dec r10
     jnz .key
-    mov rsi, line_shell_timeout
-    call puts64
+    xor eax, eax
     ret
-.line_done:
+.done:
     call put_nl64
     mov rcx, [line_len]
     lea rdi, [line_buf]
     mov byte [rdi + rcx], 0        ; 收尾的零：puts64 与 bytes_eq 都要它
+    mov rax, 1
+    ret
+
+; shell 的交互那一行：先说 ready、收一行、解释它。
+run_shell_live:
+    mov rsi, line_shell_ready
+    call puts64
+    call read_line_keys
+    test rax, rax
+    jz .timeout
     mov rsi, line_shell_prompt
     call puts64
     lea rsi, [line_buf]
@@ -2242,6 +2257,104 @@ run_shell_live:
 .list_done:
     call put_nl64
     ret
+.timeout:
+    mov rsi, line_shell_timeout
+    call puts64
+    ret
+
+; ======================================================================
+; repl 的交互那一半：输入一个名字，机器在运行时求它的值
+; ======================================================================
+;
+; 盘上那份 repl.txt 是事先写好的名字。这一半要的是运行时打进去的名字 —— 两者用的是
+; 同一条路（find_fn_by_name 找到它、exec 跑它、把返回值打出来），差别只在名字从哪来。
+; 这正是 repl 那一条要的「给 exec 一个门」：门开了之后，求值不再由编译期决定。
+;
+; 名字要走 UTF-16：种子里存的是码元，而键盘给的是 ASCII 字节。转一次比另写一个
+; 「按 ASCII 比名字」的查找器便宜，也少一处会分岔的地方 —— 两种查找器迟早会比出
+; 不一样的结果，而那种不一样很难看出来。
+run_repl_live:
+    mov rsi, line_repl_ready
+    call puts64
+    call read_line_keys
+    test rax, rax
+    jz .timeout
+    mov rsi, line_repl_live_prompt
+    call puts64
+    lea rsi, [line_buf]
+    call puts64
+    call put_nl64
+    lea rdi, [line_buf]
+    lea rsi, [line_buf16]
+    mov rcx, [line_len]
+    test rcx, rcx
+    jz .unknown                    ; 空名字不该被当成一个函数去查
+    xor rdx, rdx
+.conv:
+    cmp rdx, rcx
+    jae .converted
+    movzx eax, byte [rdi + rdx]
+    mov [rsi + rdx * 2], ax
+    inc rdx
+    jmp .conv
+.converted:
+    lea rdi, [line_buf16]
+    mov r8, rcx                    ; 名字长度，find_fn_by_name 要这个
+    xor r15, r15                   ; 后者胜，与读程序 同一条规矩
+    call find_fn_by_name
+    test rax, rax
+    jz .unknown
+    mov r12, rsi                   ; 指令流
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+    call print_value
+    call put_nl64
+    ret
+.unknown:
+    mov rsi, line_repl_live_unk
+    call puts64
+    ret
+.timeout:
+    mov rsi, line_repl_live_to
+    call puts64
+    ret
+
+; 打印 exec 交回来的值：rax = 种类，rdx = 内容。不打换行，由调用者收尾。
+;
+; 认不出的种类把号码打出来，而不是当成空 —— 「算出了空」与「算出了不认识的类型」
+; 在串口上看起来一样，而它们的修法完全不同。
+print_value:
+    cmp rax, 1
+    je .num
+    cmp rax, 2
+    je .str
+    cmp rax, 3
+    je .bool
+    mov rsi, line_bad_kind
+    call puts64
+    jmp put_num64
+.num:
+    mov rax, rdx
+    call f64_to_int
+    jmp put_num64
+.str:
+    push rdx
+    mov rsi, line_string
+    call puts64
+    pop rdx
+    movzx eax, word [rdx]          ; 串的头两个字节是长度
+    jmp put_num64
+.bool:
+    mov rax, rdx
+    test rax, rax
+    jz .false
+    mov rsi, line_true_flat
+    jmp puts64
+.false:
+    mov rsi, line_false_flat
+    jmp puts64
 
 ; ======================================================================
 ; repl 的前半：从盘上读一个名字，按名字调它，把值打出来
@@ -3414,6 +3527,13 @@ line_key: db "Yunooka: key ", 0
 line_key_none: db "Yunooka: no key", 13, 10, 0
 line_shell_ready: db "Yunooka: shell ready", 13, 10, 0
 line_shell_timeout: db "Yunooka: no line", 13, 10, 0
+line_repl_ready: db "Yunooka: repl ready", 13, 10, 0
+line_repl_live_prompt: db "Yunooka: repl-live> ", 0
+line_repl_live_unk: db "Yunooka: no such name", 13, 10, 0
+line_repl_live_to: db "Yunooka: no line", 13, 10, 0
+; 不带换行的 true / false：print_value 不打换行，由调用者收尾，所以不能借用带换行那份。
+line_true_flat: db "true", 0
+line_false_flat: db "false", 0
 
 ; 扫描码集 1 → ASCII。索引就是扫描码，值是字符，0 表示「这个键不产字」。
 ;
@@ -3444,6 +3564,8 @@ keymap:
 align 8
 line_buf: times 64 db 0
 line_len: dq 0
+; 同一个名字的 UTF-16 版本：键盘给的是 ASCII 字节，而种子里存的是码元。
+line_buf16: times 128 db 0
 line_fs_open: db "Yunooka: open ", 0
 line_fs_arrow: db " -> ", 0
 line_fs_nofile: db "Yunooka: not found", 13, 10, 0

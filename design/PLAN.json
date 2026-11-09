@@ -211,12 +211,12 @@
       "id": "repl",
       "title": "交互式解释器：给 exec 一个门",
       "scope": "stage",
-      "status": "open",
+      "status": "done",
       "parent": "resident",
       "after": ["shell"],
       "verifiedBy": ["tools/run.mjs"],
-      "touches": ["boot/stage2.asm"],
-      "notes": "文件输入那一半已成：盘上 repl.txt 里是一个函数名（块长，UTF-16 码元），run_repl 按名字找它、跑它、把值打出来 —— 串口上是 repl> 2 units -> 512，连续两次运行退出码 0。那个 512 不是打出来的常量，是 exec 真的跑了第二个定义的结果，所以这一行同时验了按名字查找、常量、返回、以及把 f64 还原成整数。名字本身打不出来：块长 的低字节是 0x57 与 0x7F，八位串口只出一个 W，所以那一行打的是码元数 —— 判据不放在显示上，因为显示在那里有真实的限制。交互那一半（从键盘读一行）仍在 serial-io 后面。用户说「如果需要直接在 HMYR 上面做就直接改 HMYR」—— 编译与求值那一侧确实属于 HMYR，Yunooka 这一侧只负责「拿到一个名字」和「打一个值」。"
+      "touches": ["boot/stage2.asm", "tools/run.mjs"],
+      "notes": "两半都成了，门开了。文件输入那一半：盘上 repl.txt 里是一个函数名（块长，UTF-16 码元），run_repl 按名字找它、跑它、打出来 —— repl> 2 units -> 512。那个 512 是 exec 真的跑了第二个定义的结果。名字本身打不出来：块长 的低字节是 0x57 与 0x7F，八位串口只出一个 W，所以那一行打的是码元数。交互那一半：run_repl_live 先说一句 repl ready，主机看到才逐字符送名字，客人机收一行、转成 UTF-16、find_fn_by_name、exec、print_value —— 判据是 repl ready 之后接上 repl-live> letters 与 string 53。选 letters 是因为它的返回值是串而不是数，这样 print_value 的分类那几支里有两支被走到；而 53 不是打出来的常量，是 exec 算的。与文件那一半的 512 区分开：一个是事先写好的名字，一个是运行时打进去的。收键那一段抽成了 read_line_keys，shell 与 repl 共用 —— 四步（读 0x64、查表、攒缓冲、回车收尾）抄两遍就会改一处漏一处。踩了两个坑。一是回车只送按下码 1C 会让 8042 认为它一直按着，重复码追到下一条命令里，症状是 repl 收到一个空行；补上放开码 9C 就好了 —— 这条与字符不用补放开码不一样，因为 keyboardputstring 自己会拆。二是空名字不该被当成一个函数去查，加了判断之后 unknown 那一支才真的会走。求值本身仍属于 HMYR：Yunooka 这一侧只负责「拿到一个名字」与「打一个值」，中间那段是种子里已有的 exec。"
     },
     {
       "id": "userland",
