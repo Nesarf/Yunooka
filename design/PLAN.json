@@ -169,15 +169,26 @@
       "notes": "文件系统的前提是长模式下还能读盘，因为 BIOS 的 int 0x13 只活在实模式。主通道 0x1F0 那一组，LBA28 的 PIO 读。判据不是「读出来了」而是「与 BIOS 读的是同一份」：ATA 读 LBA 33，与 int 0x13 已经读到 0x20000 的那 512 字节逐字节比 —— 读错扇区也会读出一个结果，所以「读出来了」本身什么都说明不了。踩到的坑在机器那一侧：控制器原来是 AHCI，而 0x1F0 那组端口属于 IDE 兼容模式、AHCI 不映射，读 0x1F7 一直返回 0xFF，状态位看着永远忙、等待循环转到超时才放手，串口上只留一句没头没尾的 ata start；改成 PIIX4 就通了，run.mjs 现在检查控制器名、不是 IDE 就删了重建。"
     },
     {
+      "id": "fs-superblock",
+      "title": "盘上的第一份布局：超级块、根目录、读出一个名字",
+      "scope": "stage",
+      "status": "done",
+      "parent": "resident",
+      "after": ["ata-read"],
+      "verifiedBy": ["tools/run.mjs"],
+      "touches": ["design/FS.txt", "boot/stage2.asm", "tools/build.mjs"],
+      "notes": "先有了 design/FS.txt 那一份形状，才有这一块：第 1024 号扇区起是文件系统，超级块写着版本、扇区总数、根目录扇区与它占几个、数据起点、空闲数；目录是一串变长条目，遇到名字长度为 0 就结束；文件数据连续。build 按这份布局写进一个超级块、一个根目录、一份 hello.txt，stage2 用 ATA 读回来并打出「版本、根目录扇区、第一个名字」——三个数都来自盘上那份字节，所以那一行说明布局被读懂了。踩到的两个坑：ata_read 读完没有等 BSY 落，下一条命令被丢掉、insw 读回上一次的缓冲（看着像读成了）；build.mjs 卸盘还写着 SATA 控制器名，那是换 IDE 之前留下的，失败得很静，要到媒体登记那一步才露头。"
+    },
+    {
       "id": "filesystem",
       "title": "文件系统：盘符从 α 起的小写希腊字母",
       "scope": "stage",
       "status": "open",
       "parent": "resident",
-      "after": ["builtins", "widen-stage2", "ata-read"],
+      "after": ["builtins", "widen-stage2", "ata-read", "fs-superblock"],
       "verifiedBy": ["tools/run.mjs"],
-      "touches": ["README.md"],
-      "notes": "盘符方案已经定在 README 里（α β γ …），而路径怎么写还没定 —— 那一件事要等文件系统本身有了形状才说得准。"
+      "touches": ["design/FS.txt", "README.md"],
+      "notes": "形状与路径都定了，写在 design/FS.txt：盘符是小写希腊字母、路径绝对且用斜杠、名字是 UTF-16 码元。剩下的是把路径真的走一遍 —— 解析 α:/a/b、按名字在目录里查、把盘符翻译成盘。这一版只走一层，嵌套留给有进程之后。"
     },
     {
       "id": "self-host",
