@@ -98,7 +98,9 @@ stage2:
 
 ; ---- 进 32 位保护模式 ----
 .go32:
-    ; 文件系统的五个扇区先读进来：超级块、根目录、docs 目录、hello.txt、note.txt。
+    ; 文件系统的六个扇区先读进来：超级块、根目录、docs 目录、hello.txt、note.txt、
+    ; cmd.txt。盘上的东西每多一份，这个数就跟一次；而它也必须与 build 写进去的
+    ; 布局一致，否则预读区里少一份、fs_load 却照算不误。
     ;
     ; 为什么不留给长模式：长模式里没有 BIOS，而 ATA PIO 在虚拟机模拟的 IDE 上不稳定 ——
     ; 重试、0xFF、drain、逐 word、读前延迟，五轮补丁都没让它站住。BIOS 读盘从加电到
@@ -109,7 +111,7 @@ stage2:
     mov dword [dap_lba], 1024
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x4000
-    mov word [dap_count], 5
+    mov word [dap_count], 6
     call read_batch
     jnc .fs_ready
     mov si, line_fs_preread
@@ -436,6 +438,7 @@ long_entry:
     call run_fs_test
     call run_fs_open
     call run_fs_open2
+    call run_shell
     jmp .hang64
 .heap_bad:
     mov rsi, line_heap_bad
@@ -1578,7 +1581,7 @@ ata_read:
     stc
     ret
 
-; 预读进来的那五份东西：扇区 1024 起，落在 0x40000，每扇区 512 字节。
+; 预读进来的那六份东西：扇区 1024 起，落在 0x40000，每扇区 512 字节。
 ; 接口与 ata_read 一样（rdi = 扇区号），但它不读盘 —— 它只是算出地址。
 ; 长模式下的文件系统一路都走这里，PIO 那条路只在 run_ata_test 里留作对照。
 fs_load:
@@ -1624,6 +1627,105 @@ run_serial_echo:
     ret
 .none:
     mov rsi, line_serial_none
+    call puts64
+    ret
+
+; 比较两段字节。rdi 与 rsi 是地址，rcx 是字节数。相等清进位。
+; 为什么不用 same：那个是实模式那份的例程，指令编码是 16 位的 —— 长模式下执行会错。
+bytes_eq:
+.l:
+    test rcx, rcx
+    jz .yes
+    mov al, [rdi]
+    cmp al, [rsi]
+    jne .no
+    inc rdi
+    inc rsi
+    dec rcx
+    jmp .l
+.yes:
+    clc
+    ret
+.no:
+    stc
+    ret
+
+; ======================================================================
+; shell 的解释那一半
+; ======================================================================
+;
+; 交互那一半要串口能收字节，而那条路还没通（连试两次都是「连上、无数据」）。
+; 所以命令先写在盘上：cmd.txt 里是一行 files。这一半做的是「读到一行、认它、
+; 回答」—— 与将来的键盘输入走同一条解释路径，只是输入的来源不同。
+;
+; 认得出与认不出都要有声音：只回答一个文件列表，看不出「认」这件事发生过；
+; 而认不出时给 unknown command，才说明比较那一步是真的在比。
+run_shell:
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]          ; 根目录扇区（32 位读）
+    mov r8, fs_cmd_name
+    mov r9, 7
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz shell_missing
+    mov rdi, r15                  ; cmd.txt 所在的扇区
+    call fs_load
+    mov r14, rsi                  ; 命令内容 —— r14 从此换了身份，目录扇区已经用完
+    mov rsi, line_shell_prompt
+    call puts64
+    mov rsi, r14
+.echo:
+    lodsb
+    test al, al
+    jz .echo_end
+    cmp al, 10
+    je .echo_end
+    call putc64
+    jmp .echo
+.echo_end:
+    call put_nl64
+    mov rdi, r14
+    mov rsi, fs_cmd_files
+    mov rcx, 5
+    call bytes_eq
+    jc shell_unknown
+    ; files：把根目录里的名字逐个打出来
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov edi, [rax + 12]
+    call fs_load
+    mov rsi, rsi
+.entry:
+    movzx ecx, word [rsi]
+    test ecx, ecx
+    jz .done
+    push rsi
+    push rcx
+    mov rdi, rsi
+    add rdi, 2
+    call put_utf16_ascii
+    mov al, ' '
+    call putc64
+    pop rcx
+    pop rsi
+    lea rsi, [rsi + 11 + rcx * 2]
+    jmp .entry
+.done:
+    call put_nl64
+    ret
+
+shell_unknown:
+    mov rsi, line_shell_unknown
+    call puts64
+    ret
+shell_missing:
+    mov rsi, line_shell_missing
     call puts64
     ret
 
@@ -2338,6 +2440,15 @@ fs_path2: dw 0x03B1, 0x003A, 0x002F, 0x0064, 0x006F, 0x0063, 0x0073, 0x002F
           dw 0x006E, 0x006F, 0x0074, 0x0065, 0x002E, 0x0074, 0x0078, 0x0074, 0
 fs_seg1: dw 0x0064, 0x006F, 0x0063, 0x0073, 0
 fs_seg2: dw 0x006E, 0x006F, 0x0074, 0x0065, 0x002E, 0x0074, 0x0078, 0x0074, 0
+
+; shell 的两样：要从盘上找的文件名，与它认得的第一条命令。
+; 命令是 ASCII（不是 UTF-16）—— 因为 cmd.txt 的内容就是 ASCII 字节，
+; 而比较那一步按字节比。
+fs_cmd_name: dw 0x0063, 0x006D, 0x0064, 0x002E, 0x0074, 0x0078, 0x0074, 0
+fs_cmd_files: db "files"
+line_shell_prompt: db "Yunooka: shell> ", 0
+line_shell_unknown: db "Yunooka: unknown command", 13, 10, 0
+line_shell_missing: db "Yunooka: no cmd.txt", 13, 10, 0
 line_bad_kind: db "  kind=", 0
 line_unknown_op: db "  unknown op ", 0
 line_got: db "Yunooka: fn116 returned", 13, 10, 0

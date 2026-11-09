@@ -185,10 +185,10 @@
       "scope": "stage",
       "status": "open",
       "parent": "resident",
-      "after": ["fs-open", "math-console"],
+      "after": ["fs-open"],
       "verifiedBy": ["tools/run.mjs"],
       "touches": ["boot/stage2.asm"],
-      "notes": "用户点名的第一件。终端、控制台、shell 在别的系统里常被混着叫，这里也先按一件事记：一个能读一行、解释它、把结果写回来的东西。它排在文件系统之后，因为一个连文件都读不稳的 shell 只能做算术。真正要先定的是三件：命令从哪来（内置表还是按路径找）、错误怎么报、以及它与 HMYR 的关系 —— 如果命令就是 HMYR 的表达式，那 shell 与 REPL 是同一件事的两面。"
+      "notes": "用户点名的第一件。终端、控制台、shell 在别的系统里常被混着叫，这里也先按一件事记：一个能读一行、解释它、把结果写回来的东西。它拆成两半，因为这两半的前置不一样：解释那一半只需要「读到一行」，可以从盘上的命令文件读（fs-open 已经给了这条路），现在就能做；交互那一半要串口能收字节，排在 serial-io 后面 —— 而 serial-io 的通道连试两次都收不到数据，所以这一半暂时没有开工条件。原先这一条 after 里写着 math-console，那是个环（shell → math-console → repl → shell），已改掉：math-console 的前半其实是 repl 的一个特性，不该反过来挡着 shell。"
     },
     {
       "id": "repl",
