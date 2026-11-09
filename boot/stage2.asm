@@ -390,6 +390,7 @@ long_entry:
     call run_ata_test
     call run_fs_test
     call run_fs_open
+    call run_fs_open2
     jmp .hang64
 .heap_bad:
     mov rsi, line_heap_bad
@@ -1702,6 +1703,114 @@ fs_open_read:
     call puts64
     ret
 
+; ======================================================================
+; 多级目录：在一个目录里找名字，然后按段走下去
+; ======================================================================
+;
+; 绝对路径是「从根往下走」的，所以多级目录并不需要「当前目录」那个状态 —— 每一层只要
+; 知道「这一层是哪个扇区」，就够走下一步。这也是为什么这一块能先于进程做出来。
+;
+; 一叠套着的抽屉，每个抽屉里有一张纸写着下一个抽屉的扇区号。走两层就是拉两次抽屉。
+
+; r8 = 名字起点，r9 = 名字长度，rsi = 目录扇区。
+; 回来 rax = 1 找到 / 0 没有；找到时 r15 = 起始扇区、rbx = 字节长度、dl = 类型。
+fs_lookup:
+    mov rdi, rsi
+    mov rsi, [fs_buf]
+    call ata_read
+    jc .miss
+    mov rsi, [fs_buf]
+.entry:
+    movzx eax, word [rsi]
+    test eax, eax
+    jz .miss                      ; 名字长度为 0：这一层到头了
+    cmp rax, r9
+    jne .next
+    xor rdx, rdx
+.cmp:
+    cmp rdx, r9
+    jae .hit
+    mov ax, [rsi + 2 + rdx * 2]
+    cmp ax, [r8 + rdx * 2]
+    jne .next
+    inc rdx
+    jmp .cmp
+.hit:
+    movzx ecx, word [rsi]
+    lea rdx, [rsi + 2 + rcx * 2]
+    movzx r10d, byte [rdx]        ; 类型
+    mov r15d, [rdx + 1]
+    mov ebx, [rdx + 5]
+    mov rdx, r10
+    mov rax, 1
+    ret
+.next:
+    movzx ecx, word [rsi]
+    lea rsi, [rsi + 11 + rcx * 2]
+    jmp .entry
+.miss:
+    xor rax, rax
+    ret
+
+run_fs_open2:
+    mov rdi, fs_path2
+    movzx eax, word [rdi]
+    cmp ax, 0x03B1
+    jne fs_open_drive
+    mov rdi, 1024
+    mov rsi, [fs_buf]
+    call ata_read
+    jc fs_open_read
+    mov rax, [fs_buf]
+    mov r13d, [rax + 12]          ; 根目录扇区
+    mov r8, fs_seg1               ; 第一段：docs
+    mov r9, 4
+    mov rsi, r13
+    call fs_lookup
+    test rax, rax
+    jz fs_open_miss
+    mov al, '1'
+    call putc64                   ; 诊断：第一段 docs 找到了
+    mov r8, fs_seg2               ; 第二段：note.txt，在 docs 里面找
+    mov r9, 8
+    mov rsi, r15
+    call fs_lookup
+    test rax, rax
+    jz fs_open_miss
+    mov al, '2'
+    call putc64                   ; 诊断：第二段 note.txt 找到了
+    mov rdi, r15
+    mov rsi, [fs_buf]
+    call ata_read
+    jc fs_open_read
+    mov rsi, line_fs_open
+    call puts64
+    mov rdi, fs_seg1
+    call put_utf16_ascii
+    mov al, '/'
+    call putc64
+    mov rdi, fs_seg2
+    call put_utf16_ascii
+    mov rsi, line_fs_arrow
+    call puts64
+    mov rsi, [fs_buf]
+    mov rcx, rbx
+.put:
+    test rcx, rcx
+    jz .put_done
+    mov al, [rsi]
+    push rsi
+    push rcx
+    call putc64
+    pop rcx
+    pop rsi
+    inc rsi
+    dec rcx
+    jmp .put
+.put_done:
+    call put_nl64
+    ret
+
 ; 打一串 UTF-16 码元，只取低字节。这一版的名字都是 ASCII，够用；非 ASCII 的名字会
 ; 在这里变成别的字节，而那是「打印」这一层的限制，不是名字本身的。
 put_utf16_ascii:
@@ -2114,6 +2223,13 @@ line_fs_nodrive: db "Yunooka: unknown drive", 13, 10, 0
 ; 路径自己写清楚。α : / h e l l o . t x t
 fs_path: dw 0x03B1, 0x003A, 0x002F, 0x0068, 0x0065, 0x006C, 0x006C
          dw 0x006F, 0x002E, 0x0074, 0x0078, 0x0074, 0
+
+; 两条段名与整条路径。段名是给 fs_lookup 用的（它不知道路径，只认一个名字），
+; 整条路径留着给以后的切分器 —— 这一版先手动喂两段，因为两段就是全部。
+fs_path2: dw 0x03B1, 0x003A, 0x002F, 0x0064, 0x006F, 0x0063, 0x0073, 0x002F
+          dw 0x006E, 0x006F, 0x0074, 0x0065, 0x002E, 0x0074, 0x0078, 0x0074, 0
+fs_seg1: dw 0x0064, 0x006F, 0x0063, 0x0073, 0
+fs_seg2: dw 0x006E, 0x006F, 0x0074, 0x0065, 0x002E, 0x0074, 0x0078, 0x0074, 0
 line_bad_kind: db "  kind=", 0
 line_unknown_op: db "  unknown op ", 0
 line_got: db "Yunooka: fn116 returned", 13, 10, 0

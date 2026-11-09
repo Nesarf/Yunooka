@@ -210,7 +210,18 @@
       "after": ["system-software"],
       "verifiedBy": [],
       "touches": ["README.md"],
-      "notes": "用户定的方向：AikawaMei 与 Vtuber's Monitor Link 整合成 Yunooka 的默认浏览器，底座同时装 Firefox 与 Chromium 两套引擎。这两个现在都不是浏览器 —— AikawaMei 是从 SilentCrystal 副本长出来的防御工具（会话卫生审计、内容规则、归因与下架），VML 是打包发布的监视器、带自己的 web 前端。整合的理由我读出来是「它们都在持续看着某些东西」，而浏览器是看着整个网络的那一个；这条理由是我读的，不是用户写的。还没回答的有三件：两套引擎是都要还是二选一；两套引擎在同一个系统里怎么并存；以及这个浏览器在「还没有操作系统」的那一层上占哪一块 —— 它与 Ichiwatashi 的像素层不是同一件事。"
+      "notes": "用户定的方向：AikawaMei（相川 冥）与 Vtuber's Monitor Link 整合成 Yunooka 的默认浏览器，底座同时装 Firefox 与 Chromium 两套引擎。这两个现在都不是浏览器 —— 相川 冥 是从 SilentCrystal 副本长出来的防御工具（会话卫生审计、内容规则、归因与下架），VML 是打包发布的监视器、带自己的 web 前端。整合的理由我读出来是「它们都在持续看着某些东西」，而浏览器是看着整个网络的那一个；这条理由是我读的，不是用户写的。还没回答的有三件：两套引擎是都要还是二选一；两套引擎在同一个系统里怎么并存；以及这个浏览器在「还没有操作系统」的那一层上占哪一块 —— 它与 Ichiwatashi 的像素层不是同一件事。"
+    },
+    {
+      "id": "fs-multilevel",
+      "title": "多级目录：在某一层里找名字，然后一层层走下去",
+      "scope": "stage",
+      "status": "open",
+      "parent": "resident",
+      "after": ["fs-open"],
+      "verifiedBy": ["tools/run.mjs"],
+      "touches": ["boot/stage2.asm", "tools/build.mjs"],
+      "notes": "代码与盘都写好了：build 现在放两层（根目录的 hello.txt 与 docs 目录，docs 里的 note.txt），stage2 抽出了 fs_lookup（在某个目录扇区里按名字找条目，交回起始扇区与长度）并走两段。设计上这一块不需要「当前目录」—— 绝对路径从根往下走，每层只要知道「这一层是哪个扇区」。卡住的地方不在这一块：ata_read 在连续第三次调用时会卡，加一句诊断就好、删掉又坏，把 rep insw 换成逐 word 循环也没解决，所以它不止一个原因。这一块没验成，代码留在半成品状态，诊断标记也还留着。下一块应当是 ATA 的单块砖：超时后重发命令、需要时软复位、以及一个能区分「盘忙」与「盘没了」的状态读法。"
     },
     {
       "id": "filesystem",

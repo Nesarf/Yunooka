@@ -140,13 +140,19 @@ if (种子内容.length) {
 }
 
 // ---- 三·五、文件系统 ----
-// 设计在 design/FS.txt，这里只做第一块砖要的那一点：超级块、一个根目录、一份文件。
+// 设计在 design/FS.txt，这里做两件事：把布局摆出来，再放一份两层的样本。
 // 位置照文档里写的固定在第 1024 号扇区 —— 前面一千个扇区留给引导链，它不参与分配。
+//
+// 两层的意思是：根目录里有 hello.txt 与一个叫 docs 的目录，docs 里再有 note.txt。
+// 多级路径这条路，判据必须真的走过一次「先拿到目录的扇区、再在它里面找下一个名字」，
+// 否则一层与两层在代码上看起来是一样的。
 const 文件系统起 = 1024;
 const 根目录号 = 文件系统起 + 1;
-const 数据起 = 文件系统起 + 2;
+const 子目录号 = 文件系统起 + 2;
+const 数据起 = 文件系统起 + 3;
 const 示例文件 = Buffer.from("Yunooka filesystem ok\n", "utf8");
-const 示例扇区数 = Math.ceil(示例文件.length / 512);
+const 子文件 = Buffer.from("Yunooka subdirectory ok\n", "utf8");
+const 示例扇区数 = Math.ceil(示例文件.length / 512) + Math.ceil(子文件.length / 512);
 
 const 码元 = (s) => {
   const 列 = [];
@@ -176,9 +182,15 @@ const 超级块 = Buffer.alloc(512);
 超级块.writeUInt32LE(盘字节数 / 512 - 数据起 - 示例扇区数, 24);
 
 const 根目录 = Buffer.alloc(512);
-写条目(根目录, 0, "hello.txt", 0, 数据起, 示例文件.length);
+let 根位 = 写条目(根目录, 0, "hello.txt", 0, 数据起, 示例文件.length);
+写条目(根目录, 根位, "docs", 1, 子目录号, 0);       // 目录的字节长度没有意义，写 0
+
+const 子目录 = Buffer.alloc(512);
+写条目(子目录, 0, "note.txt", 0, 数据起 + 1, 子文件.length);
+
 console.log("文件系统  超级块第 " + 文件系统起 + " 号扇区，根目录第 " + 根目录号
-  + " 号扇区，一份 hello.txt（" + 示例文件.length + " 字节）");
+  + " 号扇区，docs 目录第 " + 子目录号 + " 号扇区；hello.txt（" + 示例文件.length
+  + " 字节）与 docs/note.txt（" + 子文件.length + " 字节）");
 
 // 盘用稀疏文件建，不在内存里放一份整盘副本 —— Node 的 Buffer 上限是 2 GB，而这块盘
 // 将来会要 4 GB。ftruncate 造出来的空洞不占磁盘也不占内存，各段各自写在它该在的
@@ -191,7 +203,9 @@ try {
   fs.writeSync(fd, 种子内容, 0, 种子内容.length, 种子偏移);
   fs.writeSync(fd, 超级块, 0, 512, 文件系统起 * 512);
   fs.writeSync(fd, 根目录, 0, 512, 根目录号 * 512);
+  fs.writeSync(fd, 子目录, 0, 512, 子目录号 * 512);
   fs.writeSync(fd, 示例文件, 0, 示例文件.length, 数据起 * 512);
+  fs.writeSync(fd, 子文件, 0, 子文件.length, (数据起 + 1) * 512);
 } finally {
   fs.closeSync(fd);
 }

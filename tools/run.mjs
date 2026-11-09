@@ -50,6 +50,7 @@ const 全程 = [
   "Yunooka: ata ",
   "Yunooka: fs ",
   "Yunooka: open ",
+  "Yunooka: open docs/",
 ];
 const 种子三种 = ["Yunooka: seed ok", "Yunooka: seed bad", "Yunooka: seed unreadable"];
 const 留机 = process.argv.includes("--keep");
