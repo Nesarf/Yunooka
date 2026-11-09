@@ -389,6 +389,7 @@ long_entry:
     call run_is_digit
     call run_ata_test
     call run_fs_test
+    call run_fs_open
     jmp .hang64
 .heap_bad:
     mov rsi, line_heap_bad
@@ -1481,9 +1482,17 @@ ata_read:
     ret
 .ready:
     pop rdi                       ; 目标缓冲区
+    ; 逐 word 读，不用 rep insw。rep insw 在虚拟机模拟的 IDE 控制器上偶尔会挂住：
+    ; 两个实现都能跑，而挂住的那一个只在「前一行的时序稍有不同」时才挂 ——
+    ; 加一句诊断就好、删掉又坏，正是这种坏法。普通循环慢一点，但它每一步都看得见。
     mov rcx, 256
     mov dx, 0x1F0
-    rep insw                      ; 64 位下字符串指令写的是 rdi
+.read:
+    in ax, dx
+    mov [rdi], ax
+    add rdi, 2
+    dec rcx
+    jnz .read
     ; 读完再等 BSY 落，好让下一条命令发得出去。少了这一段，第一次读照成，
     ; 第二次就会卡在「等盘」上 —— 症状是串口在它之前那一行停住。
     mov r10, 1000000
@@ -1591,6 +1600,121 @@ fs_bad:
 fs_fail:
     mov rsi, line_fs_fail
     call puts64
+    ret
+
+; ======================================================================
+; 按路径打开一份文件
+; ======================================================================
+;
+; 设计在 design/FS.txt 第三节。这一版只认 α 一块盘、只走一层目录 —— 两条限制都写成了
+; 明确的声音（unknown drive / not found），而不是静悄悄给出一个空。
+;
+; 判据是文件内容本身：盘符认错、分隔跳错、名字比错、扇区算错，任何一环出错都读不到
+; 「Yunooka filesystem ok」这二十二个字节。一个字符对不上就全对不上。
+run_fs_open:
+    mov rdi, fs_path
+    movzx eax, word [rdi]
+    cmp ax, 0x03B1                ; α
+    jne fs_open_drive
+    add rdi, 6                    ; 跳过 α : /
+    xor rcx, rcx                  ; 名字多长：扫到 0 码元
+.fs_count:
+    cmp rcx, 64                   ; 上限：路径再长也不该长过 64 个码元。没有这一条，
+    jae fs_open_miss              ; 一个找不到 0 的扫法会一直往前读，而「卡住」与「没有这个
+    cmp word [rdi + rcx * 2], 0   ; 文件」在串口上是两种完全不同的结论
+    je .fs_counted
+    inc rcx
+    jmp .fs_count
+.fs_counted:
+    mov r13, rcx                  ; 目标名字长度
+    mov r14, rdi                  ; 目标名字
+    mov rdi, 1024
+    mov rsi, [fs_buf]
+    call ata_read
+    jc fs_open_read
+    mov rax, [fs_buf]
+    mov rdi, [rax + 12]           ; 超级块说的根目录扇区
+    mov rsi, [fs_buf]
+    call ata_read
+    jc fs_open_read
+    mov rsi, [fs_buf]
+.fs_entry:
+    movzx eax, word [rsi]
+    test eax, eax
+    jz fs_open_miss               ; 名字长度为 0：名册到头了
+    cmp rax, r13
+    jne .fs_next
+    xor rdx, rdx
+.fs_cmp:
+    cmp rdx, r13
+    jae .fs_hit
+    mov ax, [rsi + 2 + rdx * 2]
+    cmp ax, [r14 + rdx * 2]
+    jne .fs_next
+    inc rdx
+    jmp .fs_cmp
+.fs_hit:
+    movzx ecx, word [rsi]
+    lea rdx, [rsi + 2 + rcx * 2]  ; 名字之后是类型 u8、起始 u32、长度 u32
+    mov r15d, [rdx + 1]
+    mov ebx, [rdx + 5]
+    mov rdi, r15
+    mov rsi, [fs_buf]
+    call ata_read
+    jc fs_open_read
+    mov rsi, line_fs_open
+    call puts64
+    mov rdi, r14                  ; 盘符是 UTF-16 的希腊字，八位串口打不出来 —— 打名字
+    call put_utf16_ascii
+    mov rsi, line_fs_arrow
+    call puts64
+    mov rsi, [fs_buf]
+    mov rcx, rbx
+.fs_put:
+    test rcx, rcx
+    jz .fs_put_done
+    mov al, [rsi]
+    push rsi
+    push rcx
+    call putc64
+    pop rcx
+    pop rsi
+    inc rsi
+    dec rcx
+    jmp .fs_put
+.fs_put_done:
+    call put_nl64
+    ret
+.fs_next:
+    movzx ecx, word [rsi]         ; 条目变长：2 + 2*名字 + 1 + 4 + 4
+    lea rsi, [rsi + 11 + rcx * 2]
+    jmp .fs_entry
+fs_open_miss:
+    mov rsi, line_fs_nofile
+    call puts64
+    ret
+fs_open_drive:
+    mov rsi, line_fs_nodrive
+    call puts64
+    ret
+fs_open_read:
+    mov rsi, line_fs_fail
+    call puts64
+    ret
+
+; 打一串 UTF-16 码元，只取低字节。这一版的名字都是 ASCII，够用；非 ASCII 的名字会
+; 在这里变成别的字节，而那是「打印」这一层的限制，不是名字本身的。
+put_utf16_ascii:
+.one:
+    movzx eax, word [rdi]
+    test eax, eax
+    jz .out
+    push rdi
+    call putc64
+    pop rdi
+    add rdi, 2
+    jmp .one
+.out:
     ret
 
 ; 跑两次符位：参数真时它应当交出 2147483648，参数假时交出 0。
@@ -1981,6 +2105,15 @@ line_fs_first: db " first ", 0
 line_fs_empty: db "Yunooka: fs root empty", 13, 10, 0
 line_fs_bad: db "Yunooka: fs bad magic", 13, 10, 0
 line_fs_fail: db "Yunooka: fs read failed", 13, 10, 0
+line_fs_open: db "Yunooka: open ", 0
+line_fs_arrow: db " -> ", 0
+line_fs_nofile: db "Yunooka: not found", 13, 10, 0
+line_fs_nodrive: db "Yunooka: unknown drive", 13, 10, 0
+
+; 要打开的那条路径。以 0 码元结尾，这样算长度不必另存一个数 —— 而是把长度交给
+; 路径自己写清楚。α : / h e l l o . t x t
+fs_path: dw 0x03B1, 0x003A, 0x002F, 0x0068, 0x0065, 0x006C, 0x006C
+         dw 0x006F, 0x002E, 0x0074, 0x0078, 0x0074, 0
 line_bad_kind: db "  kind=", 0
 line_unknown_op: db "  unknown op ", 0
 line_got: db "Yunooka: fn116 returned", 13, 10, 0

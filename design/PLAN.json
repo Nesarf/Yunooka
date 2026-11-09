@@ -180,15 +180,37 @@
       "notes": "先有了 design/FS.txt 那一份形状，才有这一块：第 1024 号扇区起是文件系统，超级块写着版本、扇区总数、根目录扇区与它占几个、数据起点、空闲数；目录是一串变长条目，遇到名字长度为 0 就结束；文件数据连续。build 按这份布局写进一个超级块、一个根目录、一份 hello.txt，stage2 用 ATA 读回来并打出「版本、根目录扇区、第一个名字」——三个数都来自盘上那份字节，所以那一行说明布局被读懂了。踩到的两个坑：ata_read 读完没有等 BSY 落，下一条命令被丢掉、insw 读回上一次的缓冲（看着像读成了）；build.mjs 卸盘还写着 SATA 控制器名，那是换 IDE 之前留下的，失败得很静，要到媒体登记那一步才露头。"
     },
     {
+      "id": "fs-open",
+      "title": "按路径打开一份文件：认盘符、跳分隔、按名字找、读内容",
+      "scope": "stage",
+      "status": "done",
+      "parent": "resident",
+      "after": ["fs-superblock"],
+      "verifiedBy": ["tools/run.mjs"],
+      "touches": ["boot/stage2.asm", "tools/run.mjs"],
+      "notes": "四环：认盘符（α）、跳过 :/ 、在根目录里按名字比 UTF-16 码元、把数据扇区读出来。判据是那二十二个字节的内容 —— 任何一环错，读到的都不会是 Yunooka filesystem ok。未知盘符与找不到名字各有自己的声音（unknown drive / not found），而不是静悄悄给一个空。踩到的坑值得单记：rep insw 在虚拟机模拟的 IDE 控制器上偶尔挂住，而它只在前一行的时序稍有不同时才挂 —— 加一句诊断就好、删掉又坏，两次绿说明不了什么；改成逐 word 读的普通循环才稳。盘符是 UTF-16 希腊字，八位串口打不出来，所以判据行打的是名字。"
+    },
+    {
+      "id": "system-software",
+      "title": "Yunooka 的系统软件：Ichiwatashi、安防、隔离、中继、索引",
+      "scope": "stage",
+      "status": "open",
+      "parent": "resident",
+      "after": ["filesystem"],
+      "verifiedBy": [],
+      "touches": ["README.md"],
+      "notes": "清单由用户定下：Ichiwatashi（像素层与美术资源，窗口 UI 图标都从它出来）、Nanodesu 与 Torikago（安防：找可执行文件与看着它们）、Volcano-Separator（活动隔离）、Oak-Barrels（中继站）、KID（Kohane Index Desuno，索引）。共同点是都不属于应用那一层：一台没装任何应用的新机器上也要能跑起来，所以只能住在基础库里。这一条现在只是清单，一行代码都没有；每一个都要先回答同一个问题 —— 它的哪一部分必须在还没有操作系统的机器上就存在。"
+    },
+    {
       "id": "filesystem",
       "title": "文件系统：盘符从 α 起的小写希腊字母",
       "scope": "stage",
       "status": "open",
       "parent": "resident",
-      "after": ["builtins", "widen-stage2", "ata-read", "fs-superblock"],
+      "after": ["builtins", "widen-stage2", "ata-read", "fs-superblock", "fs-open"],
       "verifiedBy": ["tools/run.mjs"],
       "touches": ["design/FS.txt", "README.md"],
-      "notes": "形状与路径都定了，写在 design/FS.txt：盘符是小写希腊字母、路径绝对且用斜杠、名字是 UTF-16 码元。剩下的是把路径真的走一遍 —— 解析 α:/a/b、按名字在目录里查、把盘符翻译成盘。这一版只走一层，嵌套留给有进程之后。"
+      "notes": "形状、路径、打开一条路径都做完了，写在 design/FS.txt。剩下的：多级目录（α:/a/b 里的第二个斜杠）、α 之后的盘符、以及写。三件都留给「有进程之后」—— 因为多级目录要先回答「谁记得自己站在哪一层」，而那正是当前目录那个问题的另一面。"
     },
     {
       "id": "self-host",

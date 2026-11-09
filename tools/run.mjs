@@ -49,6 +49,7 @@ const 全程 = [
   "Yunooka: is_digit('a') -> ",
   "Yunooka: ata ",
   "Yunooka: fs ",
+  "Yunooka: open ",
 ];
 const 种子三种 = ["Yunooka: seed ok", "Yunooka: seed bad", "Yunooka: seed unreadable"];
 const 留机 = process.argv.includes("--keep");
@@ -237,6 +238,11 @@ const ata成 = ata行 !== null && ata行[1] === "same 512";
 // 版本号与扇区号都来自超级块自己，而名字来自目录条目的 UTF-16 码元。
 const fs行 = /Yunooka: fs ok v(\d+) root (\d+) first (\S+)/.exec(读到);
 const fs成 = fs行 !== null && fs行[1] === "1" && fs行[2] === "1025" && fs行[3] === "hello.txt";
+// 按路径打开：认盘符、跳过 α:/、在根目录里按名字找、把内容读出来。判据是内容本身 ——
+// 这四环里任何一环错，读到的都不会是那二十二个字节。
+const 打开行 = /Yunooka: open (\S+) -> (.+)/.exec(读到);
+const 打开成 = 打开行 !== null && 打开行[1] === "hello.txt"
+  && 打开行[2].trim() === "Yunooka filesystem ok";
 console.log("第一个函数 " + (函数行
   ? 函数行[1] + "（参 " + 函数行[2] + "、槽 " + 函数行[3] + "、指令 " + 函数行[4] + "）"
   : "(没读出来)"));
@@ -268,6 +274,9 @@ console.log("文件系统  " + (fs行
   : "(没读出来)")
   + (fs成 ? "  —— 名字与扇区号都来自盘上那份布局"
     : "  —— 不对：应当是 v1、根目录 1025、第一个名字 hello.txt"));
+console.log("打开      " + (打开行 ? 打开行[1] + " -> " + 打开行[2].trim() : "(没打开)")
+  + (打开成 ? "  —— 盘符、分隔、查找、读盘，四环全对才给得出这一行"
+    : "  —— 不对：应当读到 Yunooka filesystem ok"));
 // 结构这一条只在带种子时算：没有种子时机器不读种子头，那是对的，不该因此变红。
 const 有种子 = 读到.includes("Yunooka: seed ok");
 const 求值成 = 结果行 !== null && 结果行[1] === "string" && 结果行[2] === "53";
@@ -284,6 +293,7 @@ const 结构成 = 有种子
     && 数字成
     && ata成
     && fs成
+    && 打开成
   : true;
 // 成败三条合成一条：缺行、分配、结构。放在这里算，因为它要用到上面那个结构成 ——
 // 这也是第一次把它写在前面时的报错原因（Cannot access before initialization）。
