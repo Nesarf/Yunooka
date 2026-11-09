@@ -147,6 +147,28 @@
       "notes": "做成的比原来写的多：调内置 len，加上索引、等（串按内容比而不是按指针）、加、大等，还有帧栈与参数落槽 —— 因为 is_digit 七条指令里这些全要用。尾调用也是这一块补的：in_set 是十轮递归，不做尾调用四帧立刻用完。判据是 is_digit('7') 真与 is_digit('a') 假，两个都要对，只验一个的话「永远返回 true」照样能过。三个坑一个比一个安静：CR4.OSFXSR 没开，SSE 指令 #UD 而无 IDT 就成三重故障，症状是串口停在上一行；pop_val 自己用 rcx，而参数循环的上限也放在 rcx；find_fn_by_name 把 rbx 用成自己的计数（收工时 401），调用者却以为那还是自己的 pc，于是 instr_offsets[402] 出表、每处调用都被判成非尾。"
     },
     {
+      "id": "disk-health",
+      "title": "盘的健康：CrystalDiskInfo 那一套改成 Yunooka 的",
+      "scope": "stage",
+      "status": "open",
+      "parent": "resident",
+      "after": ["fs-multilevel"],
+      "verifiedBy": ["tools/run.mjs"],
+      "touches": ["boot/stage2.asm"],
+      "notes": "用户点到 CrystalDiskInfo。它读的是 SMART（自监测分析与报告技术），命令还是 ATA 的（0xB0 读、0xB1 开），所以它与 fs-multilevel 卡住的那一层是同一条路 —— ATA 的读扇区先稳下来，这一条才谈得上。要做三件：IDENTIFY DEVICE 拿型号与能力位、SMART READ DATA 拿温度与通电时间与重映射扇区计数、以及把这些数按「哪个是健康指标」分类，而不是当成一堆数打出来。KID 那份记录里已经写过「DiskInfo 风格」，展示的调子有参照。"
+    },
+    {
+      "id": "task-manager",
+      "title": "任务管理器那一套：进程、资源、启动项",
+      "scope": "stage",
+      "status": "open",
+      "parent": "resident",
+      "after": ["system-software"],
+      "verifiedBy": [],
+      "touches": ["README.md"],
+      "notes": "用户点到 Windows 任务管理器。这一条比 SMART 远得多：它显示进程与它们的资源占用，而 Yunooka 现在没有进程 —— 只有一个执行流，连「当前目录」都因此没有主人（这一条在 filesystem 的 notes 里也写过）。所以它不是「实现一个列表」，而是「先有进程这个概念」：一个能被创建、被切换、被结束的东西，并且知道自己占了多少内存。在那之前它只能作为方向记着，写不出判据。"
+    },
+    {
       "id": "widen-stage2",
       "title": "第二段从 8 KB 长到 16 KB：三个数字一起改",
       "scope": "stage",
