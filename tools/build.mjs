@@ -159,8 +159,21 @@ const 命令文件 = Buffer.from("files\n", "utf8");
 // 名字要与种子里真有的一致：块长 在种子中出现两次，读程序 折进 Map 时留最后那个
 // （返回 512），而按名字找也留最后一个，所以两边对得上。
 const 求值输入 = Buffer.from("块长", "utf16le");
+// 数学控制台的四行输入，UTF-16 码元。设计在 design/MATH.txt。
+//
+// 四行放在一个文件里不是图省事：三节说的是「一行的两种形状」—— 冒号前是已知运算名
+// 就是具名运算，否则按表达式读。所以分派发生在行上，而四行正好压住四种写法：
+// 第一行是具名运算（average），后三行是同一个左边的三种写法（y、f(x)、f x）。
+// 括号与空格都是给人看的，对读的人没有影响 —— 三行认出来应当一模一样。
+//
+// average 那一串选它是因为五件事压在一条读数里：十进制小数（30.4）、π 与 e 两个常量
+// （6π、24e）、逗号分隔、以及平均本身。少一样，六位小数就对不上。
+// 九个数、六个整数、一个小数、两个常量，和是 262.48831980370736。
+const 数学输入 = Buffer.from(
+  "average: 1,4,19,40,55,29,30.4,6π,24e\ny=1/x\nf(x)=1/x\nf x=1/x", "utf16le");
 const 示例扇区数 = Math.ceil(示例文件.length / 512) + Math.ceil(子文件.length / 512)
-  + Math.ceil(命令文件.length / 512) + Math.ceil(求值输入.length / 512);
+  + Math.ceil(命令文件.length / 512) + Math.ceil(求值输入.length / 512)
+  + Math.ceil(数学输入.length / 512);
 
 const 码元 = (s) => {
   const 列 = [];
@@ -193,7 +206,8 @@ const 根目录 = Buffer.alloc(512);
 let 根位 = 写条目(根目录, 0, "hello.txt", 0, 数据起, 示例文件.length);
 根位 = 写条目(根目录, 根位, "docs", 1, 子目录号, 0);       // 目录的字节长度没有意义，写 0
 根位 = 写条目(根目录, 根位, "cmd.txt", 0, 数据起 + 2, 命令文件.length);
-写条目(根目录, 根位, "repl.txt", 0, 数据起 + 3, 求值输入.length);
+根位 = 写条目(根目录, 根位, "repl.txt", 0, 数据起 + 3, 求值输入.length);
+写条目(根目录, 根位, "math.txt", 0, 数据起 + 4, 数学输入.length);
 
 const 子目录 = Buffer.alloc(512);
 写条目(子目录, 0, "note.txt", 0, 数据起 + 1, 子文件.length);
@@ -201,7 +215,8 @@ const 子目录 = Buffer.alloc(512);
 console.log("文件系统  超级块第 " + 文件系统起 + " 号扇区，根目录第 " + 根目录号
   + " 号扇区，docs 目录第 " + 子目录号 + " 号扇区；hello.txt（" + 示例文件.length
   + " 字节）、docs/note.txt（" + 子文件.length + " 字节）、cmd.txt（"
-  + 命令文件.length + " 字节）、repl.txt（" + 求值输入.length + " 字节，UTF-16）");
+  + 命令文件.length   + " 字节）、repl.txt（" + 求值输入.length + " 字节，UTF-16）、math.txt（"
+  + 数学输入.length + " 字节，UTF-16）");
 
 // 盘用稀疏文件建，不在内存里放一份整盘副本 —— Node 的 Buffer 上限是 2 GB，而这块盘
 // 将来会要 4 GB。ftruncate 造出来的空洞不占磁盘也不占内存，各段各自写在它该在的
@@ -219,6 +234,7 @@ try {
   fs.writeSync(fd, 子文件, 0, 子文件.length, (数据起 + 1) * 512);
   fs.writeSync(fd, 命令文件, 0, 命令文件.length, (数据起 + 2) * 512);
   fs.writeSync(fd, 求值输入, 0, 求值输入.length, (数据起 + 3) * 512);
+  fs.writeSync(fd, 数学输入, 0, 数学输入.length, (数据起 + 4) * 512);
 } finally {
   fs.closeSync(fd);
 }

@@ -111,7 +111,7 @@ stage2:
     mov dword [dap_lba], 1024
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x4000
-    mov word [dap_count], 7
+    mov word [dap_count], 8
     call read_batch
     jnc .fs_ready
     mov si, line_fs_preread
@@ -440,6 +440,9 @@ long_entry:
     call run_fs_open2
     call run_shell
     call run_repl
+    call run_div_test
+    call run_div_report
+    call run_math
     jmp .hang64
 .heap_bad:
     mov rsi, line_heap_bad
@@ -495,6 +498,79 @@ put_num64:
     pop rdx
     pop rcx
     pop rbx
+    ret
+
+; xmm0 除以 xmm1，结果留在 xmm0。只碰 xmm 那一侧，不动通用寄存器。
+; 加与减就地展开，除单独成一小段：平均值的最后一个动作就是它，run_math 也要用，
+; 而两处各写一遍 divsd 就等于把「除怎么算」写了两份。
+div_f64:
+    divsd xmm0, xmm1
+    ret
+
+; 打印 xmm0，六位小数，四舍五入。
+;
+; 先乘一百万、加半个单位、再截断，就把「保留几位」折成一次整数除法：商是整数部分，
+; 余数是那六位。只用到一条 cvttsd2si，不必逐位判进位。
+;
+; 负数先摘符号位再按非负走 —— 这一版的小数只来自 average，它不会给出负数，
+; 但把负数留给无符号 div 会溢出成一个巨大的错值，而那种错值看起来像个正常的答案。
+put_f64:
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push r8
+    push r9
+    push r10
+    movq rax, xmm0
+    test rax, rax
+    jns .positive
+    movsd xmm1, [const_signmask]
+    xorpd xmm0, xmm1                ; 清符号位：与 0x8000... 异或
+    mov r10, 1
+    jmp .scaled
+.positive:
+    xor r10, r10
+.scaled:
+    movsd xmm1, [const_1e6]
+    mulsd xmm0, xmm1
+    addsd xmm0, [const_half]
+    cvttsd2si rbx, xmm0             ; 六位定点数
+    mov rax, rbx
+    xor edx, edx
+    mov rcx, 1000000
+    div rcx                         ; rax = 整数部分，rdx = 六位小数
+    test r10, r10
+    jz .int_part
+    push rax
+    mov al, '-'
+    call putc64
+    pop rax
+.int_part:
+    push rdx                        ; 六位小数留着，put_num64 会用到 rdx
+    call put_num64
+    mov al, '.'
+    call putc64
+    pop rax
+    xor r8, r8
+    lea r9, [frac_places]
+.frac:
+    mov rcx, [r9 + r8 * 8]          ; 这一位的位权：100000、10000 …… 1
+    xor edx, edx
+    div rcx                         ; rax = 这一位，rdx = 剩下的
+    add al, '0'
+    call putc64                     ; 它保护 rax 与 rdx
+    mov rax, rdx
+    inc r8
+    cmp r8, 6
+    jb .frac
+    pop r10
+    pop r9
+    pop r8
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
     ret
 
 ; 读第一个函数的头与它的第一条指令。格式按 src/code-file.mjs 的读程序：
@@ -849,6 +925,8 @@ exec:
     je .op_index
     cmp r14, 0                      ; 加（号是 0，不是 30 —— 30 是减）
     je .op_add
+    cmp r14, 6                      ; 除
+    je .op_div
     ; 不认的指令：把号报出来。静默返回「空」会让一个陌生的操作码看起来像「算出了空值」，
     ; 而这两件事在串口上应该分得开。
     mov rsi, line_unknown_op
@@ -1123,6 +1201,18 @@ exec:
     call pop_val                    ; 左
     movq xmm0, rdx
     addsd xmm0, xmm1
+    movq rdx, xmm0
+    mov rax, 1
+    call push_val
+    inc rbx
+    jmp .loop
+
+.op_div:
+    call pop_val                    ; 右
+    movq xmm1, rdx
+    call pop_val                    ; 左
+    movq xmm0, rdx
+    call div_f64
     movq rdx, xmm0
     mov rax, 1
     call push_val
@@ -1797,6 +1887,367 @@ repl_missing:
     mov rsi, line_repl_missing
     call puts64
     ret
+
+; ======================================================================
+; 数学：把 average: 那一串算出一个数
+; ======================================================================
+;
+; design/MATH.txt 三节定了右边两种形状：带 x 的表达式（能画也能求值）与不带 x 的具名
+; 运算（只有结果）。这一块只做第二种 —— 它不是取舍，是顺序：第一种要表达式求值，
+; 那是 HMYR 编译器的活；第二种只要「读几个数、加起来、除以个数」，而这三件事这台机器
+; 现在都有（十进制解析、f64 加、f64 除）。
+;
+; 所以这一块不是「数学控制台做完了」，是它的第一半有了可以判的形态。
+;
+; 读一个数：rdi 指向 UTF-16 码元，rcx 是可读的码元数（含分隔符）。
+; 出：xmm0 = 值，rax = 用掉几个码元。
+;
+; 语法只有三种东西：十进制数字（可带一个小数点）、π（U+03C0）、e（ASCII 的 e）。
+; 后两个是「乘以这个常量」—— 6π 是六乘圆周率，24e 是二十四乘底数。第一个既不是数字
+; 也不是常量的码元（逗号、空格、行尾）就是数的结束。
+;
+; 小数部分先当整数攒起来，最后除以十的位数：一次除法，误差比逐位乘 0.1 小，
+; 而且 30.4 这条路走下来正好是 30 + 4/10，不是三十次浮点乘加。
+parse_decimal:
+    push rbx
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    mov r10, rcx                    ; 上界挪个地方：下面 rcx 要用来放位权
+    xor r8, r8                      ; 用掉几个码元
+    xor r11, r11                    ; 整数部分（整数形式）
+    xor r12, r12                    ; 小数部分（整数形式）
+    xor r9, r9                      ; 小数位数
+    xor rbx, rbx                    ; 读到过数字吗
+.int_loop:
+    cmp r8, r10
+    jae .int_done
+    movzx eax, word [rdi + r8 * 2]
+    cmp ax, '0'
+    jb .maybe_dot
+    cmp ax, '9'
+    ja .maybe_dot
+    imul r11, r11, 10
+    sub eax, '0'
+    add r11, rax
+    mov rbx, 1
+    inc r8
+    jmp .int_loop
+.maybe_dot:
+    cmp ax, '.'
+    jne .int_done
+    inc r8
+.frac_loop:
+    cmp r8, r10
+    jae .int_done
+    movzx eax, word [rdi + r8 * 2]
+    cmp ax, '0'
+    jb .int_done
+    cmp ax, '9'
+    ja .int_done
+    imul r12, r12, 10
+    sub eax, '0'
+    add r12, rax
+    inc r9
+    mov rbx, 1
+    inc r8
+    jmp .frac_loop
+.int_done:
+    cvtsi2sd xmm0, r11
+    test r9, r9
+    jz .constants
+    cmp r9, 9                       ; 表到十的九次方；再多就不认，按已有位数走
+    ja .constants
+    cvtsi2sd xmm1, r12
+    lea rax, [pow10_tab]
+    mov rcx, [rax + r9 * 8]
+    cvtsi2sd xmm2, rcx
+    divsd xmm1, xmm2                ; xmm1 = 小数部分 ÷ 十的位数
+    addsd xmm0, xmm1                ; 再与整数部分相加，整数部分一直在 xmm0 里
+.constants:
+    cmp r8, r10
+    jae .done
+    movzx eax, word [rdi + r8 * 2]
+    cmp ax, 0x03C0
+    je .pi
+    cmp ax, 'e'
+    je .euler
+    jmp .done
+.pi:
+    movsd xmm1, [const_pi]
+    jmp .apply
+.euler:
+    movsd xmm1, [const_e]
+.apply:
+    test rbx, rbx
+    jnz .multiply
+    movsd xmm0, xmm1                ; 前面没有数字：这个常量本身就是这个数
+    mov rbx, 1
+    jmp .next
+.multiply:
+    mulsd xmm0, xmm1
+.next:
+    inc r8
+    jmp .constants
+.done:
+    mov rax, r8
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbx
+    ret
+
+; 求 math.txt 里那一行。判据是两行读数：sum 与 average。
+;
+; 为什么分两行：一条判据同时压住十进制、常量、除法与小数打印，错了分不清是谁错。
+; 和错而商对说明加法没问题、除法错了；和对而商错说明除法或个数错了。两行分得开。
+run_math:
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]
+    mov r8, fs_math_name
+    mov r9, 8                       ; "math.txt"
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz math_missing
+    mov rdi, r15
+    call fs_load
+    mov r14, rsi                    ; 四行的 UTF-16 码元
+    mov r15, rbx
+    shr r15, 1                      ; 字节数折成码元数
+.line_loop:
+.skip_ws:
+    test r15, r15
+    jz .all_done
+    movzx eax, word [r14]
+    cmp ax, ' '
+    je .skip_one
+    cmp ax, 10
+    je .skip_one
+    cmp ax, 13
+    je .skip_one
+    jmp .have_line
+.skip_one:
+    add r14, 2
+    dec r15
+    jmp .skip_ws
+.have_line:
+    xor r8, r8                      ; 这一行有多长
+.len_loop:
+    cmp r8, r15
+    jae .len_done
+    cmp word [r14 + r8 * 2], 10
+    je .len_done
+    inc r8
+    jmp .len_loop
+.len_done:
+    test r8, r8
+    jz .skip_line                   ; 空行不必分派，分派它只会得到一句 unknown
+    call math_line
+.skip_line:
+    lea r14, [r14 + r8 * 2]         ; 先跳过这一行本身
+    sub r15, r8
+    test r15, r15
+    jz .all_done                    ; 行占了剩余全部：没有换行可跳
+    add r14, 2                      ; 再跳过换行那个码元
+    dec r15
+    jmp .line_loop
+.all_done:
+    ret
+
+; 一行怎么读。design/MATH.txt 三节：冒号前是已知运算名就是具名运算，否则按表达式读。
+; 而表达式那一边，左边是 y 还是 f(x) 还是 f x 都不影响 —— 括号与空格是给人看的。
+; 所以这里的判据不是「算出了什么」，是「三种写法认出来一模一样」。算与画都还没有：
+; 算要表达式求值（HMYR 的编译器那份活），画要一块能画点的界面。
+; 入：r14 = 行首，r8 = 行长（码元数）。
+math_line:
+    push rbx
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    xor r9, r9
+.find_eq:
+    cmp r9, r8
+    jae .not_curve
+    cmp word [r14 + r9 * 2], '='
+    je .is_curve
+    inc r9
+    jmp .find_eq
+.is_curve:
+    mov rsi, line_curve
+    call puts64
+    xor r10, r10
+.name_loop:
+    cmp r10, r9
+    jae .name_done
+    movzx eax, word [r14 + r10 * 2]
+    call putc64                     ; 左边原样打，空格也打：f x 与 f(x) 要看得见差别
+    inc r10
+    jmp .name_loop
+.name_done:
+    mov rsi, line_curve_arrow
+    call puts64
+    lea r11, [r9 + 1]
+.has_x:
+    cmp r11, r8
+    jae .no_x
+    movzx eax, word [r14 + r11 * 2]
+    cmp ax, 'x'
+    je .yes_x
+    cmp ax, 'X'
+    je .yes_x
+    inc r11
+    jmp .has_x
+.yes_x:
+    mov rsi, line_curve_hasx
+    call puts64
+    jmp .curve_done
+.no_x:
+    mov rsi, line_curve_nox
+    call puts64
+.curve_done:
+    call put_nl64
+    jmp .done
+.not_curve:
+    cmp r8, 8
+    jb math_unknown
+    lea rsi, [math_op_average]
+    xor r9, r9
+.prefix:
+    mov ax, [rsi + r9 * 2]
+    cmp ax, [r14 + r9 * 2]
+    jne math_unknown
+    inc r9
+    cmp r9, 8
+    jb .prefix
+    lea rdi, [r14 + 16]             ; 跳过 average: 那八个码元
+    mov rcx, r8
+    sub rcx, 8
+    call math_average
+.done:
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbx
+    ret
+
+; 具名运算的正文：逗号分隔的一串数。入 rdi = 首码元，rcx = 码元数。
+math_average:
+    push r14
+    push r15
+    push r12
+    mov r14, rdi
+    mov r15, rcx
+    xorpd xmm3, xmm3                ; 和
+    xor r12, r12                    ; 个数
+.skip:
+    test r15, r15
+    jz .finish
+    movzx eax, word [r14]
+    cmp ax, ' '
+    je .blank
+    cmp ax, ','
+    jne .number
+.blank:
+    add r14, 2
+    dec r15
+    jmp .skip
+.number:
+    mov rdi, r14
+    mov rcx, r15
+    call parse_decimal
+    test rax, rax
+    jz .finish                      ; 一个都读不动就不再往前：否则这一步原地打转
+    addsd xmm3, xmm0
+    inc r12
+    lea r14, [r14 + rax * 2]
+    sub r15, rax
+    jmp .skip
+.finish:
+    test r12, r12
+    jz .unknown
+    movsd [math_sum], xmm3
+    mov rsi, line_math_sum
+    call puts64
+    movsd xmm0, [math_sum]
+    call put_f64
+    call put_nl64
+    mov rsi, line_math_avg
+    call puts64
+    movsd xmm0, [math_sum]
+    cvtsi2sd xmm1, r12
+    call div_f64
+    call put_f64
+    call put_nl64
+    jmp .done
+.unknown:
+    mov rsi, line_math_unknown
+    call puts64
+.done:
+    pop r12
+    pop r15
+    pop r14
+    ret
+
+math_unknown:
+    mov rsi, line_math_unknown
+    call puts64
+    ret
+math_missing:
+    mov rsi, line_math_missing
+    call puts64
+    ret
+
+; 给「除」这条操作码一个自己会红的判据。
+;
+; run_math 里的平均也走 div_f64，但它证明的是「平均值算得对」，不是「解释器认得
+; 操作码 6」—— exec 那条分发表若漏了这一条，average 那一行照样是绿的。所以这里造
+; 一段四条的迷你流：常量 π、常量 2、除、返回，交给 exec 跑。读数 1.570796327。
+;
+; 选 π 而不是随便两个数：常量的八字节位模式若读歪了，这里立刻看得出来。
+run_div_test:
+    push rbx
+    push r12
+    push r13
+    mov r12, div_prog
+    mov r13, 4
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    call scan_instrs
+    xor rbx, rbx
+    call exec
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+run_div_report:
+    mov r12, rax
+    mov rbx, rdx
+    mov rsi, line_div
+    call puts64
+    cmp r12, 1
+    jne .bad
+    movq xmm0, rbx
+    call put_f64
+    jmp put_nl64
+.bad:
+    mov rsi, line_bad_kind
+    call puts64
+    mov rax, r12
+    call put_num64
+    jmp put_nl64
 
 run_ata_test:
     mov rax, 512
@@ -2548,6 +2999,51 @@ line_repl_arrow: db " -> ", 0
 line_repl_units: db " units", 0
 line_repl_unknown: db "Yunooka: no such name", 13, 10, 0
 line_repl_missing: db "Yunooka: no repl.txt", 13, 10, 0
+
+; 数学那几样。输入是 UTF-16（与 repl.txt 同一种：它要能被 HMYR 的名字读法读），
+; 而打印是 ASCII —— 八位串口打不出中文，所以读数一律用数字与拉丁字母。
+fs_math_name: dw 0x006D, 0x0061, 0x0074, 0x0068, 0x002E, 0x0074, 0x0078, 0x0074, 0
+math_op_average: dw 0x0061, 0x0076, 0x0065, 0x0072, 0x0061, 0x0067, 0x0065, 0x003A
+line_math_sum: db "Yunooka: math> sum -> ", 0
+line_math_avg: db "Yunooka: math> average -> ", 0
+line_math_unknown: db "Yunooka: unknown operation", 13, 10, 0
+line_math_missing: db "Yunooka: no math.txt", 13, 10, 0
+; 表达式这一边：只报左边被认成了什么，不报算出什么。左边原样打（f(x) 与 f x 的差别
+; 要看得见），右边只报有没有 x —— 有没有 x 就是「能不能画」的判据。
+line_curve: db "Yunooka: curve ", 0
+line_curve_arrow: db " -> ", 0
+line_curve_hasx: db "has x", 0
+line_curve_nox: db "no x", 0
+line_div: db "Yunooka: div -> ", 0
+
+; 六位小数的位权，从大到小。用表而不是每轮除以十：除数与被除数都是常数级的小整数，
+; 表把「第几位」这件事变成一次索引，读的人不必跟着一个变量推它的值。
+frac_places: dq 100000, 10000, 1000, 100, 10, 1
+; 十的幂，parse_decimal 用「小数部分 ÷ 十的位数」那一步取。第 0 格占位，从第 1 格起用。
+pow10_tab: dq 1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000
+
+align 8
+; 数学用到的浮点常量，按 f64 的位模式写死。为什么不写成 3.14159...：
+; nasm 不解析浮点字面量，所以这里是那几个数的原始位模式。
+; π = 0x400921FB54442D18、e = 0x4005BF0A8B145769，都用 node 的 writeDoubleLE 核过。
+const_pi: dq 0x400921FB54442D18
+const_e: dq 0x4005BF0A8B145769
+const_1e6: dq 0x412E848000000000
+const_half: dq 0x3FE0000000000000
+const_signmask: dq 0x8000000000000000
+math_sum: dq 0
+
+; 「除」的判据程序：常量 π、常量 2、除、返回。四条指令，值全是 f64 的原始位模式。
+; db 5 是常量的操作码，db 1 是值种类「数」，随后八字节是那个数本身 —— 与 read_value
+; 的读法一一对应。28 是返回。
+align 8
+div_prog:
+    db 5, 1
+    dq 0x400921FB54442D18           ; π
+    db 5, 1
+    dq 0x4000000000000000           ; 2
+    db 6                            ; 除
+    db 28                           ; 返回
 line_bad_kind: db "  kind=", 0
 line_unknown_op: db "  unknown op ", 0
 line_got: db "Yunooka: fn116 returned", 13, 10, 0
