@@ -236,14 +236,14 @@
     },
     {
       "id": "android-port",
-      "title": "YunookA：arm64 安卓上的移植，开发机型红米 Turbo 4",
+      "title": "YunookA：与 Yunooka 同级的一整套，跑在 arm64 安卓上",
       "scope": "stage",
       "status": "open",
       "parent": "resident",
       "after": ["fs-multilevel"],
       "verifiedBy": [],
       "touches": ["README.md"],
-      "notes": "Himeyuri For YunookA 是移植矩阵里最后加的一条，写在 HMYR 的 design/FULLSELF.txt 第九节。跑在 arm64 安卓上，开发机型红米 Turbo 4（16 GB 内存、512 GB 存储）。名字用大写 A 结尾，与桌面那个 Yunooka 分开 —— 后者是这门语言自己的系统，前者是同一个系统在 arm64 安卓上的移植。它与前几条移植不同：安卓没有「从某个目录启动一个程序」，一个应用就是一个包裹，所以宿主口要回答的不是「扩展名怎么登记」，而是「一个 HMYR 程序在安卓里以什么身份存在」—— 应用里的资源、被别的程序拉起来的组件、还是 YunookA 自己托管的壳。Yunooka 这一侧与它的关系是同一套语言与文件系统换一个宿主口；16 GB 内存给了先做对再做省的余地。"
+      "notes": "YunookA 不是 Yunooka 的移植，它与 Yunooka 同级：同样是一整套 —— 系统、SDK、默认软件组、默认语言、开发平台。两台机器各有自己的一份，共用同一个语言本体（HMYR）。写成 HMYR 那边移植矩阵的一行是不对的，那一条只在「同一个系统换一个桌面宿主」时才成立；这一份是另一台机器。参考系统是三台真机器：红米 Turbo 4、红魔 11 Air、红魔 9S Pro。三台都是 arm64、都在安卓上，所以宿主口要回答的不是「扩展名怎么登记」，而是「一个 HMYR 程序在安卓里以什么身份存在」—— 应用里的资源、被别的程序拉起来的组件、还是 YunookA 自己托管的壳；安卓不给第二个答案，一个应用就是一个包裹，不存在「从任意目录启动一个程序」。名字用大写 A 结尾，与 Yunooka 分开：它们是同级的两个名字，不是同一个名字的两种写法。"
     },
     {
       "id": "widen-stage2",
