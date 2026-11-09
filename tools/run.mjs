@@ -38,6 +38,10 @@ const 该有 = [
 // 全程是「都出现才算跑完」的那串，用来决定什么时候停止等待。它比成败线多几样：
 // 种子那一行（不带种子时不会出现，所以那种情况靠满时长兜底）、种子的头、第一个函数、
 // 第一条指令。
+// 「全程」里那一项曾经跟着 --ata 走，因为 ATA 那条测试当时偶发抛异常、默认不跑。
+// 后来查清了：根因是长模式下一直开着中断（BIOS 的 PIC 还在送定时器中断，而 IDT 里
+// 32 号往后是空的），long_entry 加了一句 cli 就修好了。它已经回到主链上，所以这里
+// 也回到无条件。
 const 全程 = [
   "Yunooka: boot ok",
   "Yunooka: stage2 ok",
@@ -57,6 +61,9 @@ const 全程 = [
   "Yunooka: open docs/",
   "Yunooka: shell> ",
   "Yunooka: repl> ",
+  // 键盘那一步在串口回显之后、文件系统之前。它要等到一个键才会往下走，所以放在这里
+  // 让等待循环覆盖到那一秒 —— 不放在这里的话循环会在数学那几行之后就收手。
+  "Yunooka: key ",
 ];
 const 种子三种 = ["Yunooka: seed ok", "Yunooka: seed bad", "Yunooka: seed unreadable"];
 const 留机 = process.argv.includes("--keep");
@@ -182,16 +189,12 @@ if (!/^"IDE-0-1"=/m.test(机器信息)) {
 //
 // 格式与 cmd.txt 一致：ASCII 字节，一行一个换行。不按 UTF-16 是因为 shell 的比较
 // 那一步按字节比，两处的形状一样，run_shell 就只需要在「来源」上分叉。
-// ATA 那条测试默认不跑：PIO 读 0x1F7 偶发抛异常（见 ata-flake），而它不在任何真正的
-// 路径上 —— 文件系统早就不用 PIO 了。让一条偶尔抛异常的测试留在主链上，代价是主判据
-// 随机变红，而那让后面每一步都不可信。用 --ata 才把它打开，开关住在信箱头里那个留白字段。
-const 跑ata = process.argv.includes("--ata");
 const 信内容 = "files\n";
 const 信字节 = Buffer.from(信内容, "latin1");
 const 信格 = Buffer.alloc(512);
 信格.write("YUNOMBX\0", 0, "latin1");
 信格.writeUInt16LE(1, 8);           // 版本
-信格.writeUInt16LE(跑ata ? 1 : 0, 10);  // 留白改当开关：bit 0 = 跑 ATA 那条测试
+信格.writeUInt16LE(0, 10);          // 留白：对齐用。曾经借它当 ATA 的开关，现在不用了
 信格.writeUInt32LE(信字节.length, 12);
 信格.writeUInt32LE(1, 16);          // 序列号：每改一次加一，将来客人机靠它认新
 信字节.copy(信格, 32);
@@ -206,11 +209,18 @@ try {
 const 起 = vbox(["startvm", 机名, "--type", "headless"]);
 if (起.status !== 0) 做不了("起不来：" + String(起.stderr || "").slice(0, 200));
 
-// 等串口文件里出现那些行，最多二十秒。
+// 等串口文件里出现那些行，最多二十秒。同时每轮送一次按键。
+//
+// 为什么要反复送：客人机只在一小段窗口里轮询键盘（run_key_poll），而主机猜不准那一秒。
+// 送多次的代价是多几个字节，猜一次的代价是偶尔「没收到」—— 而后者看起来和「键盘不通」
+// 一模一样，会把一次成功读成失败。
+//
+// 2b 是 set 2 的 F 键按下；这一版不送放开码，因为判据只要一个字节。
 const 睡 = (毫秒) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 毫秒);
 let 读到 = "";
 for (let i = 0; i < 40; i++) {
   睡(500);
+  if (i < 20) vbox(["controlvm", 机名, "keyboardputscancode", "2b"]);
   if (fs.existsSync(串口)) {
     读到 = fs.readFileSync(串口, "utf8");
     const 步数 = (读到.match(/Yunooka: op /g) || []).length;
@@ -291,8 +301,7 @@ const 数字成 = 数字行 !== null && 数字行[1] === "true"
 // 两条完全不同的路给出同样的字节才说明这一段对 —— 「读出来了」本身说明不了什么，
 // 读错一个扇区也会读出一个结果。
 const ata行 = /Yunooka: ata (same 512|differ at \d+|read failed)/.exec(读到);
-// 不跑的那一趟不算错，也不白送：只有 --ata 时才要求它读到同一份字节。
-const ata成 = 跑ata ? (ata行 !== null && ata行[1] === "same 512") : true;
+const ata成 = ata行 !== null && ata行[1] === "same 512";
 // 信箱：第二块盘、扇区 0、八个字节的魔数。三种读数分开，因为它们指向三种坏法 ——
 // 没挂上或盘号不对是 no mailbox，挂上了但主机没写是 mailbox bad，只有 ok 才说明
 // 「主机用普通文件写进去的那一行，客人机在读盘时认出来了」。
@@ -314,6 +323,11 @@ const 陷成 = idt行
   && 读到.includes("Yunooka: trap test")
   && 陷行 !== null && 陷行[1] === "6"
   && !读到.includes("Yunooka: handler returned");
+// 键盘：主机每轮送一次 set 2 的 F 按下码（0x2B），客人机轮询 0x64 与 0x60 收到它。
+// 判据要那个字节本身，不是「有没有收到」—— 收到的码若不对，说明端口读在别处，而
+// 「收到一个数」这件事仍然成立，两者要分得开。
+const 键行 = /Yunooka: key ([0-9A-F]+)|Yunooka: (no key)/.exec(读到);
+const 键成 = 键行 !== null && 键行[1] === "000000000000002B";
 // 文件系统：超级块的版本、根目录扇区号、以及第一个条目的名字。名字是 build 按
 // design/FS.txt 放进去的，所以这一条验的是「读得懂那份布局」，不是「读出了一行字」：
 // 版本号与扇区号都来自超级块自己，而名字来自目录条目的 UTF-16 码元。
@@ -382,11 +396,8 @@ console.log("内建      " + (数字行 ? "is_digit('7') -> " + 数字行[1] : "
   + "  " + (字母行 ? "is_digit('a') -> " + 字母行[1] : "is_digit('a') -> (没跑)")
   + (数字成 ? "  —— 十轮递归、索引、len、加，全对才给得出这两行"
     : "  —— 不对：应当是 '7' 真、'a' 假"));
-console.log("读盘      " + (ata行 ? "ATA -> " + ata行[1]
-  : (跑ata ? "ATA -> (没跑)" : "ATA -> (跳过，要 --ata)"))
-  + (ata成
-    ? (跑ata ? "  —— 与 BIOS 读进来的那 512 字节逐字节相同"
-      : "  —— 这条要单独跑：它偶发抛异常，不进主判据")
+console.log("读盘      " + (ata行 ? "ATA -> " + ata行[1] : "ATA -> (没跑)")
+  + (ata成 ? "  —— 与 BIOS 读进来的那 512 字节逐字节相同"
     : "  —— 不对：应当读到同一份字节"));
 console.log("信箱      " + (信行 ? 信行[1] : "(没跑到)")
   + "  " + (源行 ? "input from " + 源行[1] : "input from (没跑到)")
@@ -396,6 +407,9 @@ console.log("异常      " + (idt行 ? "idt ok" : "idt (没装)")
   + "  " + (陷行 ? "exception " + 陷行[1] : "exception (没抓到)")
   + (陷成 ? "  —— ud2 触发的 #UD 被接住了，处理者没有返回"
     : "  —— 不对：应当是 exception 6，且没有 handler returned"));
+console.log("键盘      " + (键行 ? (键行[1] ? "key " + 键行[1] : "no key") : "(没跑到)")
+  + (键成 ? "  —— 主机注入的那一个扫描码，客人机从 0x60 读到了"
+    : "  —— 不对：应当是 key 000000000000002B"));
 console.log("文件系统  " + (fs行
   ? "v" + fs行[1] + "，根目录第 " + fs行[2] + " 号扇区，第一个名字 " + fs行[3]
   : "(没读出来)")
@@ -444,6 +458,7 @@ const 结构成 = 有种子
     && 信成
     && 源成
     && 陷成
+    && 键成
     && fs成
     && 打开成
     && 深成

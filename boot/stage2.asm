@@ -483,6 +483,16 @@ putc32:
 ; ======================================================================
 [bits 64]
 long_entry:
+    ; 关中断。这一行是被一次偶发崩溃逼出来的：串口、ATA、键盘三条路都在不同位置
+    ; 抛过 #GP 与 #DF，位置不固定、号码不固定 —— 那是「有东西随时插进来」的样子，
+    ; 不是某条指令写错了的样子。进长模式这一路上从没关过中断，而 BIOS 装的 PIC
+    ; 在长模式下仍然会送中断来，IDT 里 32 号往后全是 0（present=0），于是一次定时器
+    ; 中断就是一次 #GP，而 #GP 处理里再撞一次就成了 #DF。
+    ;
+    ; 这一版全部靠轮询，没有任何东西需要中断，所以关掉它不损失什么。以后要收中断时，
+    ; 得先把 PIC 重映射到 0x20 之后、把用到的 IRQ 在 IDT 里填上，再 sti —— 顺序反了
+    ; 就会像这次一样，症状落在完全无关的三条路上。
+    cli
     mov ax, 0x10
     mov ds, ax
     mov es, ax
@@ -551,17 +561,12 @@ long_entry:
     call run_by_name_twice
     call run_is_digit
     call run_serial_echo
-    ; ATA 那条测试要信箱里的开关打开才跑。理由记在 ata-flake：PIO 读 0x1F7 那一段
-    ; 偶发抛异常（连跑四趟，有一趟 #GP at 0x1167，正好落在 in al, dx 之后），而它不在
-    ; 任何真正的路径上 —— 文件系统早就不用 PIO 了，这条只是「长模式能不能读盘」的证明。
-    ; 留着一条偶尔抛异常的测试在主链上，代价是主判据会随机变红，而那让后面每一步都不可信。
-    ;
-    ; 开关用信箱头里那个留白的 u16（偏移 10）。信箱不存在时那里是零，于是不跑 —— 默认安全。
-    movzx eax, word [0x50000 + 10]
-    test eax, 1
-    jz .skip_ata
+    call run_key_poll
+    ; 这一条曾经被挪开过：当时它偶发抛 #GP/#DF，于是用信箱里一个开关把它踢出主链。
+    ; 后来查到根因不在 PIO —— 是长模式下一直开着中断，BIOS 的 PIC 仍在送定时器中断，
+    ; 而 IDT 里 32 号往后全是 0。long_entry 加了一句 cli 之后，三趟连着都是 same 512。
+    ; 所以它回到主链上，无条件跑。
     call run_ata_test
-.skip_ata:
     call run_fs_test
     call run_fs_open
     call run_fs_open2
@@ -1847,6 +1852,46 @@ run_serial_echo:
 .none:
     mov rsi, line_serial_none
     call puts64
+    ret
+
+; ======================================================================
+; 键盘：运行时收字节的第二条路
+; ======================================================================
+;
+; 串口那条路在 tcpserver 后端上出不去（四条实测在 stage2 的串口一节），所以「运行时
+; 收到东西」要换一条。键盘是现成的：主机能用 VBoxManage controlvm keyboardputscancode
+; 直接注入扫描码，不需要窗口焦点，也不需要 guest 装任何驱动。
+;
+; 这一版用轮询 0x64 而不是中断：8042 的状态口会告诉我们「输出缓冲里有没有东西」，
+; 而中断要先配 8259、再在 IDT 里给 IRQ1 开门。先证明「能读到码」，那两件之后再说 ——
+; 顺序反了的话，读不到码时会在中断配置里找问题，而那里本来没问题。
+;
+; 注意这里只读 0x64 与 0x60。当初 A20 那一版是往 0x64 写，把 out 卡住了；读是另一回事。
+;
+; 扫描码集是 set 2（VirtualBox 的 BIOS 日志写着 scanning enabled）。所以主机送 0x2B
+; 表示按下 F，送来 0xAB 表示放开。这一版不翻译，只把收到的码打出来 —— 翻译表可以后加，
+; 而「收到了什么」是一张表替代不了的事实。
+run_key_poll:
+    mov r10, 5000000               ; 大约几秒：够主机在这段窗口里送一个键
+.wait:
+    mov dx, 0x64
+    in al, dx
+    test al, 0x01                  ; bit 0：输出缓冲有数据
+    jnz .got
+    dec r10
+    jnz .wait
+    mov rsi, line_key_none
+    call puts64
+    ret
+.got:
+    mov dx, 0x60
+    in al, dx                      ; 扫描码
+    movzx r15, al
+    mov rsi, line_key
+    call puts64
+    mov rax, r15
+    call put_hex64
+    call put_nl64
     ret
 
 ; 比较两段字节。rdi 与 rsi 是地址，rcx 是字节数。相等清进位。
@@ -3273,6 +3318,8 @@ idt_desc:
     dq 0x5000
 line_serial_got: db "Yunooka: echo ", 0
 line_serial_none: db "Yunooka: no input", 13, 10, 0
+line_key: db "Yunooka: key ", 0
+line_key_none: db "Yunooka: no key", 13, 10, 0
 line_fs_open: db "Yunooka: open ", 0
 line_fs_arrow: db " -> ", 0
 line_fs_nofile: db "Yunooka: not found", 13, 10, 0
