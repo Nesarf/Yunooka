@@ -1709,7 +1709,7 @@ run_shell:
     push rcx
     mov rdi, rsi
     add rdi, 2
-    call put_utf16_ascii
+    call put_utf16_n              ; 按长度打：名字之后紧跟的不是码元
     mov al, ' '
     call putc64
     pop rcx
@@ -2030,6 +2030,27 @@ put_utf16_ascii:
     pop rdi
     add rdi, 2
     jmp .one
+.out:
+    ret
+
+; rdi = 码元串，rcx = 码元数。只打这些，不看零码元。
+;
+; 为什么另起一个：目录条目里的名字之后紧跟类型 u8 与起始扇区 u32，那几个字节
+; 不是码元。用「打到零码元」那种写法，类型是 0 而扇区号是 0x403 时，读到的
+; 下一个「码元」是 0x0300 —— 不是零，于是多打出几个看不见的字节。
+put_utf16_n:
+.l:
+    test rcx, rcx
+    jz .out
+    movzx eax, word [rdi]
+    push rdi
+    push rcx
+    call putc64
+    pop rcx
+    pop rdi
+    add rdi, 2
+    dec rcx
+    jmp .l
 .out:
     ret
 

@@ -188,7 +188,7 @@
       "after": ["fs-open"],
       "verifiedBy": ["tools/run.mjs"],
       "touches": ["boot/stage2.asm"],
-      "notes": "用户点名的第一件。终端、控制台、shell 在别的系统里常被混着叫，这里也先按一件事记：一个能读一行、解释它、把结果写回来的东西。它拆成两半，因为这两半的前置不一样：解释那一半只需要「读到一行」，可以从盘上的命令文件读（fs-open 已经给了这条路），现在就能做；交互那一半要串口能收字节，排在 serial-io 后面 —— 而 serial-io 的通道连试两次都收不到数据，所以这一半暂时没有开工条件。原先这一条 after 里写着 math-console，那是个环（shell → math-console → repl → shell），已改掉：math-console 的前半其实是 repl 的一个特性，不该反过来挡着 shell。"
+      "notes": "用户点名的第一件。终端、控制台、shell 在别的系统里常被混着叫，这里先按一件事记：一个能读一行、解释它、把结果写回来的东西。它拆成两半，因为两半的前置不一样。解释那一半已经做成：盘上有一份 cmd.txt，里面写着 files；run_shell 查它、把那一行回显、比前五个字节是不是 files，是就列根目录，不是就说 unknown command —— 判据是提示符、回显、以及按顺序列出的三个名字都在，连续两次运行退出码 0。交互那一半还没开工：它要串口能收字节，而 serial-io 的通道连试两次都收不到数据。原先这一条 after 里写着 math-console，那是个环（shell → math-console → repl → shell），已改掉。路上有两个小坑：put_utf16_ascii 打到零码元，而目录条目里名字之后紧跟类型与扇区号，类型是 0、扇区是 0x403 时读出的下一个「码元」是 0x0300 —— 不是零，于是多打出几个看不见的字节，另写了 put_utf16_n 按长度打；另一次「卡在八个字符」其实是 run.mjs 读文件太早，虚拟机还在写，不是 stage2 的问题。"
     },
     {
       "id": "repl",

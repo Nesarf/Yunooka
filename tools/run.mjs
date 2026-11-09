@@ -55,6 +55,7 @@ const 全程 = [
   "Yunooka: fs ",
   "Yunooka: open ",
   "Yunooka: open docs/",
+  "Yunooka: shell> ",
 ];
 const 种子三种 = ["Yunooka: seed ok", "Yunooka: seed bad", "Yunooka: seed unreadable"];
 const 留机 = process.argv.includes("--keep");
@@ -253,6 +254,12 @@ const 打开成 = 打开行 !== null && 打开行[1] === "hello.txt"
 // 再在那个扇区里找下一个名字。一层与两层在代码上看起来一样，只有真的走两次才分得开。
 const 深行 = /Yunooka: open docs\/note\.txt -> (.+)/.exec(读到);
 const 深成 = 深行 !== null && 深行[1].trim() === "Yunooka subdirectory ok";
+// shell 的解释那一半：盘上的 cmd.txt 里写着一行 files，它要认出来并回答。
+// 判据是三步都在：提示符打出来、命令被回显、根目录的三个名字按顺序列出来。
+// 只验提示符的话，一个只会打字的实现照样能过。
+const 壳行 = /Yunooka: shell> files/.exec(读到);
+const 列行 = /hello\.txt docs cmd\.txt/.exec(读到);
+const 壳成 = 壳行 !== null && 列行 !== null;
 console.log("第一个函数 " + (函数行
   ? 函数行[1] + "（参 " + 函数行[2] + "、槽 " + 函数行[3] + "、指令 " + 函数行[4] + "）"
   : "(没读出来)"));
@@ -290,6 +297,10 @@ console.log("打开      " + (打开行 ? 打开行[1] + " -> " + 打开行[2].t
 console.log("两层      " + (深行 ? "docs/note.txt -> " + 深行[1].trim() : "(没走到)")
   + (深成 ? "  —— 先拿到目录的扇区，再在它里面找下一个名字"
     : "  —— 不对：应当读到 Yunooka subdirectory ok"));
+console.log("壳        " + (壳行 ? "shell> files" : "(没跑到)")
+  + (列行 ? "  → " + 列行[0] : "  → (没列出来)")
+  + (壳成 ? "  —— 命令从盘上读、认得出来、回答得出"
+    : "  —— 不对：应当认出 files 并列出 hello.txt docs cmd.txt"));
 // 结构这一条只在带种子时算：没有种子时机器不读种子头，那是对的，不该因此变红。
 const 有种子 = 读到.includes("Yunooka: seed ok");
 const 求值成 = 结果行 !== null && 结果行[1] === "string" && 结果行[2] === "53";
@@ -308,6 +319,7 @@ const 结构成 = 有种子
     && fs成
     && 打开成
     && 深成
+    && 壳成
   : true;
 // 成败三条合成一条：缺行、分配、结构。放在这里算，因为它要用到上面那个结构成 ——
 // 这也是第一次把它写在前面时的报错原因（Cannot access before initialization）。
