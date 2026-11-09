@@ -121,6 +121,50 @@ stage2:
     call serial_print
 .fs_ready:
 
+    ; 信箱：第二块 IDE 盘，primary slave，BIOS 盘号 0x81。
+    ;
+    ; 为什么要有它：串口那条通道只能往外说（四条实测写在下面那一节里），而「主机往里送
+    ; 一行」这件事必须有另一条路。这块盘是裸的 —— 主机用普通文件写入、客人机只读它的
+    ; 第 0 个扇区 —— 所以换一条输入不必重建主盘。
+    ;
+    ; 三条读数分开，因为它们指向三种不同的坏法：no mailbox 是盘都读不到（没挂上、或盘号
+    ; 不对），mailbox bad 是读到了但魔数不对（主机没写、或写到了别的偏移），
+    ; mailbox ok 才是这条通道成立。
+    mov al, [drive]
+    mov [mbox_save], al
+    mov byte [drive], 0x81
+    mov dword [dap_lba], 0
+    mov word [dap_off], 0x0000
+    mov word [dap_seg], 0x5000
+    mov word [dap_count], 1
+    call read_batch
+    setc al
+    mov [mbox_carry], al
+    mov al, [mbox_save]
+    mov [drive], al
+    cmp byte [mbox_carry], 0
+    jne .mbox_fail
+    push es
+    mov ax, 0x5000
+    mov es, ax
+    xor di, di
+    mov si, mbox_magic
+    mov cx, 8
+    call same_es
+    pop es
+    jc .mbox_bad
+    mov si, line_mbox_ok
+    call serial_print
+    jmp .mbox_done
+.mbox_bad:
+    mov si, line_mbox_bad
+    call serial_print
+    jmp .mbox_done
+.mbox_fail:
+    mov si, line_mbox_fail
+    call serial_print
+.mbox_done:
+
     ; A20 用 BIOS 的 int 0x15, ax=0x2401 来开，不走 8042 键盘控制器那一路。
     ; 原先那一版（out 0x64 / 0x60）在 VirtualBox 上直接把 out 卡住了 —— 串口停在
     ; 观测字节后面，看起来像挂在保护模式上。BIOS 调用失败了也不管：这块固件
@@ -1819,6 +1863,29 @@ bytes_eq:
 ; 认得出与认不出都要有声音：只回答一个文件列表，看不出「认」这件事发生过；
 ; 而认不出时给 unknown command，才说明比较那一步是真的在比。
 run_shell:
+    ; 输入从哪来：先看信箱。
+    ;
+    ; 信箱那一块是实模式读进来的，落在物理 0x50000（页表把前 1 GB 身份映射，所以
+    ; 长模式里这个常量就是地址）。头 32 字节，内容从 0x50020 起，形状与 cmd.txt 一样
+    ; 是 ASCII 字节 —— 所以下面「认命令」那一段一个字都不用改，变的只是来源。
+    ;
+    ; 为什么值得这么分：串口只能往外说，于是「主机往里送一行」一直只有一个办法 ——
+    ; 重建整块盘。现在换一行输入不必再碰主盘。
+    mov rdi, 0x50000
+    mov rsi, mbox_magic
+    mov rcx, 8
+    call bytes_eq
+    jc .from_disk
+    mov r15d, [0x50000 + 12]      ; 字节数：32 位读，高半边是序列号
+    test r15, r15
+    jz .from_disk
+    mov r14, 0x50020
+    mov rsi, line_shell_from_mbox
+    call puts64
+    jmp .have_line
+.from_disk:
+    mov rsi, line_shell_from_disk
+    call puts64
     mov rdi, 1024
     call fs_load
     mov [fs_buf], rsi
@@ -1833,6 +1900,7 @@ run_shell:
     mov rdi, r15                  ; cmd.txt 所在的扇区
     call fs_load
     mov r14, rsi                  ; 命令内容 —— r14 从此换了身份，目录扇区已经用完
+.have_line:
     mov rsi, line_shell_prompt
     call puts64
     mov rsi, r14
@@ -2899,6 +2967,11 @@ putc64:
 ; ======================================================================
 [bits 16]
 drive: db 0
+; 信箱那几样。mbox_save 存主盘号，因为 int 0x13 的盘号要从 [drive] 里取，而读信箱时
+; 得临时把它换成 0x81 —— 读坏了不能连主盘一起不认。
+mbox_save: db 0
+mbox_carry: db 0
+mbox_magic: db "YUNOMBX", 0
 seed_magic: db "HMYRB"
 
 ; Disk Address Packet，16 字节。每次调用前重设 count 与 off/seg —— int 0x13 会把
@@ -3030,6 +3103,9 @@ line_fs_empty: db "Yunooka: fs root empty", 13, 10, 0
 line_fs_bad: db "Yunooka: fs bad magic", 13, 10, 0
 line_fs_fail: db "Yunooka: fs read failed", 13, 10, 0
 line_fs_preread: db "Yunooka: fs preread failed", 13, 10, 0
+line_mbox_ok: db "Yunooka: mailbox ok", 13, 10, 0
+line_mbox_bad: db "Yunooka: mailbox bad", 13, 10, 0
+line_mbox_fail: db "Yunooka: no mailbox", 13, 10, 0
 line_serial_got: db "Yunooka: echo ", 0
 line_serial_none: db "Yunooka: no input", 13, 10, 0
 line_fs_open: db "Yunooka: open ", 0
@@ -3055,6 +3131,10 @@ fs_seg2: dw 0x006E, 0x006F, 0x0074, 0x0065, 0x002E, 0x0074, 0x0078, 0x0074, 0
 fs_cmd_name: dw 0x0063, 0x006D, 0x0064, 0x002E, 0x0074, 0x0078, 0x0074, 0
 fs_cmd_files: db "files"
 line_shell_prompt: db "Yunooka: shell> ", 0
+; 输入从哪来。这两行不是装饰：只打 files 的答案，看不出那句话是信箱里的还是盘上的，
+; 而这两件事的成败完全不同。
+line_shell_from_mbox: db "Yunooka: input from mailbox", 13, 10, 0
+line_shell_from_disk: db "Yunooka: input from cmd.txt", 13, 10, 0
 line_shell_unknown: db "Yunooka: unknown command", 13, 10, 0
 line_shell_missing: db "Yunooka: no cmd.txt", 13, 10, 0
 

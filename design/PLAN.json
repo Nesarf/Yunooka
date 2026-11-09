@@ -277,12 +277,23 @@
       "id": "input-mailbox",
       "title": "一条能进得去的路：主机把输入留在盘上，客人机读它",
       "scope": "stage",
-      "status": "open",
+      "status": "done",
       "parent": "resident",
       "after": ["fs-open"],
       "verifiedBy": ["tools/run.mjs"],
       "touches": ["boot/stage2.asm", "tools/run.mjs", "design/FS.txt"],
-      "notes": "为什么立这一条：serial-io 查到底之后，串口只有文件后端能用，而它只能往外说。可是「敲一行、回车、它给答案」必须有一条路把字节送进去，所以路要换一条，而不是继续调串口。候选是第二块小盘当信箱：主机往盘上写一行，客人机启动时读它。它与盘上那几份输入（cmd.txt、repl.txt、math.txt）的分别只有一个，而那个分别正是全部价值 —— 换输入不必重建主盘。局限也写清楚：它不是交互。主机写的时候客人机已经在跑，所以要么先写后启动，要么重启一次让它读。真正边打边算还要等一个能在运行时收到东西的机制，而这块机器现在两样都没有：没有 IDT，也没有能在运行时看见的共享内存。所以这一条能给的是「不必重建就能换一条输入」，不是「边打边算」。信箱多大、一行怎么定界、读不到说什么，都还没定。"
+      "notes": "为什么立这一条：serial-io 查到底之后，串口只有文件后端能用，而它只能往外说。可是「主机往里送一行」必须有一条路，所以路换了一条。做成的形态是第二块盘：一块 1 MB 的裸盘（VirtualBox 的 RAW medium，主机的普通文件就是它的全部内容），挂在 primary slave，BIOS 盘号 0x81。stage2 在实模式用 int 0x13 读它的第 0 个扇区到物理 0x50000，验八个字节的魔数 YUNOMBX 加一个 0；长模式里 run_shell 先看那一块，魔数对且字节数非零就把它当输入，否则退回主盘上的 cmd.txt。头 32 字节：魔数、版本 u16、留白 u16、字节数 u32、序列号 u32，内容从第 32 字节起，形状与 cmd.txt 一样是 ASCII 字节 —— 所以「认命令」那一段一个字都不用改，变的只是来源。判据两行：mailbox ok（魔数对）与 input from mailbox（那一行真的被当成 shell 的输入）。两行缺一不可，因为盘上 cmd.txt 里也是 files，只打一个文件列表看不出输入从哪来。红的验法是把信箱里的词换成 list：读到 shell> list 与 unknown command，而列目录的答案同时消失 —— 那才证明输入真的来自信箱而不是主盘。这一条给的是「换一行输入不必重建主盘」，不是交互；真要边打边算还要等一个运行时能收到东西的机制，而这块机器现在两样都没有。盘必须先造一次（createmedium 会注册一个 UUID，重建会让登记里那份失效），所以 run.mjs 只在缺的时候造，造完就只改内容。"
+    },
+    {
+      "id": "mailbox-input",
+      "title": "让信箱里那一行真的被解释：三条读数各管一件事",
+      "scope": "stage",
+      "status": "done",
+      "parent": "resident",
+      "after": ["input-mailbox"],
+      "verifiedBy": ["tools/run.mjs"],
+      "touches": ["boot/stage2.asm", "tools/run.mjs"],
+      "notes": "这一条与 input-mailbox 是同一次改动落地的，分开记只为一件事：三件事的坏法不同，读数就要分得开。通道能读通（mailbox ok）不代表那一行被当成输入（input from mailbox），也不代表它被认出来（shell> files 与列目录）。做的改动只有一处：run_shell 在去翻 cmd.txt 之前先看物理 0x50000，魔数对且字节数非零就用它当 r14，否则原路不变。多打一行 input from mailbox 或 input from cmd.txt，因为只打 files 的答案看不出输入从哪来 —— 盘上那份也是 files。"
     },
     {
       "id": "widen-stage2",

@@ -153,6 +153,51 @@ vbox(["modifyvm", 机名, "--memory", "32", "--cpus", "1", "--firmware", "bios",
   "--audio", "none", "--usb", "off", "--nic1", "none",
   "--uart1", "0x3F8", "4", "--uartmode1", "file", 串口]);
 
+// ---- 二·五、信箱 ----
+//
+// 一块裸盘：主机的普通文件就是它的全部内容，所以写它就是改客人机能读到的输入。
+// 这是 input-mailbox 那一条的落地 —— 串口只能往外说，往里送走这。
+//
+// 布局：扇区 0 是头，魔数八字节、版本 u16、留白 u16、码元数 u32、序列号 u32，
+// 内容从第 32 字节起按 UTF-16 码元摆。主人机两侧只共享这一份约定，而它只写在两处：
+// 这里，与 stage2 的 mbox_magic。
+//
+// 盘要先存在。它是一次性造的（createmedium 会注册一个 UUID，重建会让登记里那份失效），
+// 所以这里只在缺的时候造，造完就一直改内容。
+const 信箱 = path.join(建, "mailbox.raw");
+if (!fs.existsSync(信箱)) {
+  const 造 = vbox(["createmedium", "disk", "--filename", 信箱, "--size", "1",
+    "--format", "RAW", "--variant", "Fixed"]);
+  if (造.status !== 0) 做不了("信箱盘造不出来：" + String(造.stderr || "").slice(0, 200));
+}
+// 挂到 primary slave。BIOS 那边它就成了盘号 0x81，stage2 按这个号读第一扇区。
+const 机器信息 = String(vbox(["showvminfo", 机名, "--machinereadable"]).stdout || "");
+if (!/^"IDE-0-1"=/m.test(机器信息)) {
+  const 挂 = vbox(["storageattach", 机名, "--storagectl", "IDE", "--port", "0", "--device", "1",
+    "--type", "hdd", "--medium", 信箱, "--mtype", "normal"]);
+  if (挂.status !== 0) 做不了("信箱挂不上去：" + String(挂.stderr || "").slice(0, 200));
+}
+// 这一趟放在信箱里的那一行。它与盘上 cmd.txt 里的那一行是同一个词 —— 先用同一个词
+// 对照，两处结果一样，才说明「输入是从信箱来的」这件事没有别的东西在替它干活。
+//
+// 格式与 cmd.txt 一致：ASCII 字节，一行一个换行。不按 UTF-16 是因为 shell 的比较
+// 那一步按字节比，两处的形状一样，run_shell 就只需要在「来源」上分叉。
+const 信内容 = "files\n";
+const 信字节 = Buffer.from(信内容, "latin1");
+const 信格 = Buffer.alloc(512);
+信格.write("YUNOMBX\0", 0, "latin1");
+信格.writeUInt16LE(1, 8);           // 版本
+信格.writeUInt16LE(0, 10);          // 留白：对齐用，先写零
+信格.writeUInt32LE(信字节.length, 12);
+信格.writeUInt32LE(1, 16);          // 序列号：每改一次加一，将来客人机靠它认新
+信字节.copy(信格, 32);
+const 信fd = fs.openSync(信箱, "r+");
+try {
+  fs.writeSync(信fd, 信格, 0, 512, 0);
+} finally {
+  fs.closeSync(信fd);
+}
+
 // ---- 三、跑 ----
 const 起 = vbox(["startvm", 机名, "--type", "headless"]);
 if (起.status !== 0) 做不了("起不来：" + String(起.stderr || "").slice(0, 200));
@@ -243,6 +288,17 @@ const 数字成 = 数字行 !== null && 数字行[1] === "true"
 // 读错一个扇区也会读出一个结果。
 const ata行 = /Yunooka: ata (same 512|differ at \d+|read failed)/.exec(读到);
 const ata成 = ata行 !== null && ata行[1] === "same 512";
+// 信箱：第二块盘、扇区 0、八个字节的魔数。三种读数分开，因为它们指向三种坏法 ——
+// 没挂上或盘号不对是 no mailbox，挂上了但主机没写是 mailbox bad，只有 ok 才说明
+// 「主机用普通文件写进去的那一行，客人机在读盘时认出来了」。
+const 信行 = /Yunooka: (mailbox ok|mailbox bad|no mailbox)/.exec(读到);
+const 信成 = 信行 !== null && 信行[1] === "mailbox ok";
+// 光认出魔数还不够：那句话要真的被当成 shell 的输入。两行读数配合才说得出这件事 ——
+// 只打 files 的答案，看不出它是信箱里的还是盘上的（盘上 cmd.txt 那份也是 files）。
+// 上一趟红就是靠这一条：把信箱里的词换成 list，读到 shell> list 与 unknown command，
+// 列目录的答案同时消失 —— 那才证明输入真的来自信箱。
+const 源行 = /Yunooka: input from (mailbox|cmd\.txt)/.exec(读到);
+const 源成 = 源行 !== null && 源行[1] === "mailbox";
 // 文件系统：超级块的版本、根目录扇区号、以及第一个条目的名字。名字是 build 按
 // design/FS.txt 放进去的，所以这一条验的是「读得懂那份布局」，不是「读出了一行字」：
 // 版本号与扇区号都来自超级块自己，而名字来自目录条目的 UTF-16 码元。
@@ -314,6 +370,10 @@ console.log("内建      " + (数字行 ? "is_digit('7') -> " + 数字行[1] : "
 console.log("读盘      " + (ata行 ? "ATA -> " + ata行[1] : "ATA -> (没跑)")
   + (ata成 ? "  —— 与 BIOS 读进来的那 512 字节逐字节相同"
     : "  —— 不对：应当读到同一份字节"));
+console.log("信箱      " + (信行 ? 信行[1] : "(没跑到)")
+  + "  " + (源行 ? "input from " + 源行[1] : "input from (没跑到)")
+  + (信成 && 源成 ? "  —— 主机写进裸盘的那一行，被读出来、并且当成了 shell 的输入"
+    : "  —— 不对：应当是 mailbox ok 且 input from mailbox"));
 console.log("文件系统  " + (fs行
   ? "v" + fs行[1] + "，根目录第 " + fs行[2] + " 号扇区，第一个名字 " + fs行[3]
   : "(没读出来)")
@@ -327,7 +387,7 @@ console.log("两层      " + (深行 ? "docs/note.txt -> " + 深行[1].trim() : 
     : "  —— 不对：应当读到 Yunooka subdirectory ok"));
 console.log("壳        " + (壳行 ? "shell> files" : "(没跑到)")
   + (列行 ? "  → " + 列行[0] : "  → (没列出来)")
-  + (壳成 ? "  —— 命令从盘上读、认得出来、回答得出"
+  + (壳成 ? "  —— 那一行认得出来、回答得出（来源见上一行）"
     : "  —— 不对：应当认出 files 并列出 hello.txt docs cmd.txt"));
 console.log("求值      " + (求值行 ? "repl> 2 units -> " + 求值行[1] : "(没跑到)")
   + (重求成 ? "  —— 按名字找到第二个定义，跑出它的常量"
@@ -359,6 +419,8 @@ const 结构成 = 有种子
     && 按名成
     && 数字成
     && ata成
+    && 信成
+    && 源成
     && fs成
     && 打开成
     && 深成
