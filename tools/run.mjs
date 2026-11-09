@@ -299,6 +299,16 @@ const 信成 = 信行 !== null && 信行[1] === "mailbox ok";
 // 列目录的答案同时消失 —— 那才证明输入真的来自信箱。
 const 源行 = /Yunooka: input from (mailbox|cmd\.txt)/.exec(读到);
 const 源成 = 源行 !== null && 源行[1] === "mailbox";
+// IDT：故意跑一条未定义指令（ud2），异常号要打出来是 6，而且处理器不能返回。
+// 三件事都验：表装上了（idt ok），它真的被用上了（exception 6），处理器没有假装无事
+// 发生（handler returned 不出现）—— 最后这一条是前提式的：没有 trap test 就算红，
+// 否则「没出现」会被一个根本跑不到的路径白送。
+const idt行 = /Yunooka: idt ok/.test(读到);
+const 陷行 = /Yunooka: exception (\d+)/.exec(读到);
+const 陷成 = idt行
+  && 读到.includes("Yunooka: trap test")
+  && 陷行 !== null && 陷行[1] === "6"
+  && !读到.includes("Yunooka: handler returned");
 // 文件系统：超级块的版本、根目录扇区号、以及第一个条目的名字。名字是 build 按
 // design/FS.txt 放进去的，所以这一条验的是「读得懂那份布局」，不是「读出了一行字」：
 // 版本号与扇区号都来自超级块自己，而名字来自目录条目的 UTF-16 码元。
@@ -374,6 +384,10 @@ console.log("信箱      " + (信行 ? 信行[1] : "(没跑到)")
   + "  " + (源行 ? "input from " + 源行[1] : "input from (没跑到)")
   + (信成 && 源成 ? "  —— 主机写进裸盘的那一行，被读出来、并且当成了 shell 的输入"
     : "  —— 不对：应当是 mailbox ok 且 input from mailbox"));
+console.log("异常      " + (idt行 ? "idt ok" : "idt (没装)")
+  + "  " + (陷行 ? "exception " + 陷行[1] : "exception (没抓到)")
+  + (陷成 ? "  —— ud2 触发的 #UD 被接住了，处理者没有返回"
+    : "  —— 不对：应当是 exception 6，且没有 handler returned"));
 console.log("文件系统  " + (fs行
   ? "v" + fs行[1] + "，根目录第 " + fs行[2] + " 号扇区，第一个名字 " + fs行[3]
   : "(没读出来)")
@@ -421,6 +435,7 @@ const 结构成 = 有种子
     && ata成
     && 信成
     && 源成
+    && 陷成
     && fs成
     && 打开成
     && 深成

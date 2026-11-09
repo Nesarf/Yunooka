@@ -494,6 +494,12 @@ long_entry:
     mov rsi, line5
     call puts64
 
+    ; ---- 三·零、IDT ----
+    ; 放在这一串测试之前：从这一刻起，任何一个异常都有名字，而不只是一次重启。
+    call build_idt
+    mov rsi, line_idt_ok
+    call puts64
+
     ; ---- 三块分配 ----
     ; 每一块分配到的地址都打到串口上，因为「分配器能不能用」这件事没有别的观测点：
     ; 不打印地址，就只能知道它没崩，而不知道它给了什么。
@@ -554,6 +560,7 @@ long_entry:
     call run_div_test
     call run_div_report
     call run_math
+    call run_trap_test
     jmp .hang64
 .heap_bad:
     mov rsi, line_heap_bad
@@ -1853,6 +1860,131 @@ bytes_eq:
     ret
 
 ; ======================================================================
+; 三·零、IDT：让异常有名字
+; ======================================================================
+;
+; 在这之前，任何一个异常都是三重故障：CPU 找不到处理者，用 #DF 再失败一次，然后重启。
+; 症状只有一种 —— 串口停住，什么也不说。加上 tcpserver 那个「一崩就静音」的教训，
+; 「没有输出」与「还没跑到」在这台机器上曾经分不开过。
+;
+; 所以这张表的第一价值不是「处理异常」，是「让错误有名字」。异常号是唯一能指向出错原因
+; 的线索，而它现在只值三条指令。
+;
+; 只填六个项：除零、断点、未定义指令、双重故障、通用保护、页不存在。其余留零（present=0），
+; 访问到会 #GP —— 而 #GP 已经填了，于是还有话说。
+;
+; 每项 16 字节，64 位布局：offset 低 16、段选择子、IST、类型、offset 中 16、offset 高 32。
+build_idt:
+    push rax
+    push rdi
+    push rsi
+    mov rdi, 0x5000
+    mov rsi, idt_stub_0
+    call idt_set
+    mov rdi, 0x5000 + 3 * 16
+    mov rsi, idt_stub_3
+    call idt_set
+    mov rdi, 0x5000 + 6 * 16
+    mov rsi, idt_stub_6
+    call idt_set
+    mov rdi, 0x5000 + 8 * 16
+    mov rsi, idt_stub_8
+    call idt_set
+    mov rdi, 0x5000 + 13 * 16
+    mov rsi, idt_stub_13
+    call idt_set
+    mov rdi, 0x5000 + 14 * 16
+    mov rsi, idt_stub_14
+    call idt_set
+    lidt [idt_desc]
+    pop rsi
+    pop rdi
+    pop rax
+    ret
+
+; rdi = 项地址，rsi = 处理器地址。类型 0x8E：present、DPL 0、64 位中断门。
+;
+; 选择子必须是 0x18（64 位代码段），不是 0x08（32 位那个）。这一处写错一次：填了 0x08
+; 之后 ud2 触发，CPU 试着调用那扇门、发现长模式下不能用 32 位代码段，于是 #GP；而 #GP
+; 走的是同一张表、同一处写错，再变成 #DF，然后三重故障 —— 表现是串口停在「trap test」
+; 上一行，连异常号都打不出来。一个错的选择子会把整张表一起废掉，这比「某个处理器写错」
+; 更值得记。
+idt_set:
+    mov rax, rsi
+    mov word [rdi], ax              ; offset 低 16
+    mov word [rdi + 2], 0x18        ; 64 位代码段（0x08 是 32 位那个，用错会三重故障）
+    mov byte [rdi + 4], 0           ; IST：不用
+    mov byte [rdi + 5], 0x8E
+    shr rax, 16
+    mov word [rdi + 6], ax          ; offset 中 16
+    shr rax, 16
+    mov dword [rdi + 8], eax        ; offset 高 32
+    mov dword [rdi + 12], 0
+    ret
+
+; 六个入口。号码由 stub 自己压 —— 有的异常会在栈上压错误码、有的不压，去数栈会把
+; 「号码」与「错误码」搞混，而这两样看起来都是小整数。
+idt_stub_0:
+    push 0
+    jmp idt_common
+idt_stub_3:
+    push 3
+    jmp idt_common
+idt_stub_6:
+    push 6
+    jmp idt_common
+idt_stub_8:
+    push 8
+    jmp idt_common
+idt_stub_13:
+    push 13
+    jmp idt_common
+idt_stub_14:
+    push 14
+    jmp idt_common
+
+; 打印号码与「栈上那一个数」，然后停机。
+;
+; 为什么要打第二个数：只打号码只能说「出的是哪一类」，说不出「出在哪里」。而没有位置
+; 的异常号在这台机器上帮助有限 —— 它会把一次崩溃变成一次猜测。
+;
+; 第二个数是什么取决于异常：不带错误码的（除零、断点、未定义指令）那里是 RIP；
+; 带错误码的（双重故障、通用保护、页不存在）那里是错误码，RIP 在再往上一格。
+; 两种都打是不必要的：看到号码就知道该按哪一种读。这一处含糊是故意的，写在这里
+; 是为了下一个读的人不必猜。
+;
+; 不恢复：这一版没有「异常之后继续跑」的地基（没有进程，也没有可以回到的干净状态），
+; 假装能继续会让错误在后面更远的地方出现，那时线索更少。
+idt_common:
+    mov r15, [rsp]                  ; 号码
+    mov r14, [rsp + 8]              ; 见上：RIP 或错误码
+    mov rsi, line_exception
+    call puts64
+    mov rax, r15
+    call put_num64
+    mov rsi, line_exception_at
+    call puts64
+    mov rax, r14
+    call put_hex64
+    call put_nl64
+.hang:
+    cli
+    hlt
+    jmp .hang
+
+; 故意的异常：证明那张表真的装上了、也真的被用上了。
+;
+; 选 ud2 而不是除零：除零的结果依赖浮点环境（x87 与 SSE 的处理不同），而未定义指令
+; 在任何 CPU 上都只有一个答案。判据要的是一个不会漂的数。
+run_trap_test:
+    mov rsi, line_trap_before
+    call puts64
+    ud2
+    mov rsi, line_trap_after
+    call puts64
+    ret
+
+; ======================================================================
 ; shell 的解释那一半
 ; ======================================================================
 ;
@@ -3106,6 +3238,20 @@ line_fs_preread: db "Yunooka: fs preread failed", 13, 10, 0
 line_mbox_ok: db "Yunooka: mailbox ok", 13, 10, 0
 line_mbox_bad: db "Yunooka: mailbox bad", 13, 10, 0
 line_mbox_fail: db "Yunooka: no mailbox", 13, 10, 0
+line_idt_ok: db "Yunooka: idt ok", 13, 10, 0
+line_exception: db "Yunooka: exception ", 0
+line_exception_at: db " at ", 0
+line_trap_before: db "Yunooka: trap test", 13, 10, 0
+; 这一行永远打不出来。留着它是因为「处理器没有返回」这件事需要一个名字 —— 否则
+; 判据只能靠「后面没有输出」这种否定式，而否定式分不清「没返回」与「还没跑到」。
+line_trap_after: db "Yunooka: handler returned", 13, 10, 0
+
+; IDT 的伪描述符，lidt 要的是「limit + base」，64 位下共 10 字节。
+; limit 4095 = 256 项乘 16 字节再减一。
+align 8
+idt_desc:
+    dw 4095
+    dq 0x5000
 line_serial_got: db "Yunooka: echo ", 0
 line_serial_none: db "Yunooka: no input", 13, 10, 0
 line_fs_open: db "Yunooka: open ", 0
