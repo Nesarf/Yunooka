@@ -60,6 +60,7 @@ const 全程 = [
   "Yunooka: open ",
   "Yunooka: open docs/",
   "Yunooka: open docs/sub/",
+  "Yunooka: second disk ok",
   "Yunooka: shell> ",
   "Yunooka: repl> ",
   "Yunooka: math> average -> ",
@@ -181,8 +182,13 @@ if (!fs.existsSync(信箱)) {
   if (造.status !== 0) 做不了("信箱盘造不出来：" + String(造.stderr || "").slice(0, 200));
 }
 // 挂到 primary slave。BIOS 那边它就成了盘号 0x81，stage2 按这个号读第一扇区。
+//
+// 条件要看「值是不是 none」，不是「键在不在」：showvminfo 对空槽位也输出
+// IDE-0-1="none"，所以只测键名会永远认为已经挂好 —— 而 attach 因此一次也没跑过。
+// 这个错很安静：盘造出来了、文件也在、就是没接到机器上。
 const 机器信息 = String(vbox(["showvminfo", 机名, "--machinereadable"]).stdout || "");
-if (!/^"IDE-0-1"=/m.test(机器信息)) {
+const 信槽 = /"IDE-0-1"="([^"]*)"/.exec(机器信息);
+if (!信槽 || 信槽[1] === "none") {
   const 挂 = vbox(["storageattach", 机名, "--storagectl", "IDE", "--port", "0", "--device", "1",
     "--type", "hdd", "--medium", 信箱, "--mtype", "normal"]);
   if (挂.status !== 0) 做不了("信箱挂不上去：" + String(挂.stderr || "").slice(0, 200));
@@ -206,6 +212,54 @@ try {
   fs.writeSync(信fd, 信格, 0, 512, 0);
 } finally {
   fs.closeSync(信fd);
+}
+
+// ---- 二·六、β 盘 ----
+//
+// 第二块盘：同一套文件系统格式，但自己的超块、自己的根目录、自己的文件。
+// 盘符 α 与 β 的分别就是「读哪一块盘」，不是「读哪一种格式」—— 格式一样、代码一样，
+// 变的只是 fs_base 与 fs_start 这两个数，而那两个数由盘符决定。
+//
+// 布局与主盘同形，只是从第 0 个扇区起：超块 0、根目录 1、数据 2。
+// 它挂在 secondary master（IDE 的 port 1 device 0），BIOS 那边就是盘号 0x82。
+const 二盘 = path.join(建, "disk2.raw");
+if (!fs.existsSync(二盘)) {
+  const 造 = vbox(["createmedium", "disk", "--filename", 二盘, "--size", "1",
+    "--format", "RAW", "--variant", "Fixed"]);
+  if (造.status !== 0) 做不了("β 盘造不出来：" + String(造.stderr || "").slice(0, 200));
+}
+const 机器信息2 = String(vbox(["showvminfo", 机名, "--machinereadable"]).stdout || "");
+const 二槽 = /"IDE-1-0"="([^"]*)"/.exec(机器信息2);
+if (!二槽 || 二槽[1] === "none") {
+  const 挂 = vbox(["storageattach", 机名, "--storagectl", "IDE", "--port", "1", "--device", "0",
+    "--type", "hdd", "--medium", 二盘, "--mtype", "normal"]);
+  if (挂.status !== 0) 做不了("β 盘挂不上去：" + String(挂.stderr || "").slice(0, 200));
+}
+const 二内容 = Buffer.from("Yunooka second disk ok\n", "utf8");
+const 二超 = Buffer.alloc(512);
+二超.write("YUNOFS", 0, "latin1");
+二超.writeUInt16LE(1, 6);               // 版本
+二超.writeUInt32LE(2048, 8);            // 1 MB，2048 个扇区
+二超.writeUInt32LE(1, 12);              // 根目录第 1 号扇区
+二超.writeUInt32LE(1, 16);              // 根目录占一个扇区
+二超.writeUInt32LE(2, 20);              // 数据从第 2 号扇区起
+二超.writeUInt32LE(2045, 24);           // 空闲扇区数（凑个数，这一版不写盘）
+const 二根 = Buffer.alloc(512);
+{
+  let 位 = 0;
+  二根.writeUInt16LE(9, 位); 位 += 2;                       // "hello.txt"
+  for (const 字 of "hello.txt") { 二根.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+  二根.writeUInt8(0, 位); 位 += 1;                          // 类型：文件
+  二根.writeUInt32LE(2, 位); 位 += 4;                       // 起始扇区
+  二根.writeUInt32LE(二内容.length, 位); 位 += 4;            // 字节数
+}
+const 二fd = fs.openSync(二盘, "r+");
+try {
+  fs.writeSync(二fd, 二超, 0, 512, 0);
+  fs.writeSync(二fd, 二根, 0, 512, 512);
+  fs.writeSync(二fd, 二内容, 0, 二内容.length, 1024);
+} finally {
+  fs.closeSync(二fd);
 }
 
 // ---- 三、跑 ----
@@ -409,6 +463,12 @@ const 深成 = 深行 !== null && 深行[1].trim() === "Yunooka subdirectory ok"
 // 段名各占一个变量，三层就要再加一个。现在按斜杠切段，深度只是循环多转一圈。
 const 更行 = /Yunooka: open docs\/sub\/deep\.txt -> (.+)/.exec(读到);
 const 更成 = 更行 !== null && 更行[1].trim() === "Yunooka three levels ok";
+// 第二块盘：同一个名字、同一段查找代码，读的却是另一块盘上的另一份字节。
+// 判据必须是那段内容本身 —— 「打开成功了」两行都有，只有内容分得开盘。
+const 二行 = /Yunooka: open hello\.txt -> (.+)/g;
+const 二集 = [...读到.matchAll(/Yunooka: open hello\.txt -> (.+)/g)].map((m) => m[1].trim());
+const 二成 = 二集.length === 2 && 二集[0] === "Yunooka filesystem ok"
+  && 二集[1] === "Yunooka second disk ok";
 // shell 的解释那一半：盘上的 cmd.txt 里写着一行 files，它要认出来并回答。
 // 判据是三步都在：提示符打出来、命令被回显、根目录的三个名字按顺序列出来。
 // 只验提示符的话，一个只会打字的实现照样能过。
@@ -500,6 +560,9 @@ console.log("两层      " + (深行 ? "docs/note.txt -> " + 深行[1].trim() : 
 console.log("三层      " + (更行 ? "docs/sub/deep.txt -> " + 更行[1].trim() : "(没走到)")
   + (更成 ? "  —— 按斜杠逐段查，深度只是循环转了几圈"
     : "  —— 不对：应当读到 Yunooka three levels ok"));
+console.log("第二块盘  " + (二集.length ? 二集.join("  /  ") : "(没走到)")
+  + (二成 ? "  —— 同一个名字，两次读到不同的字节：盘符决定读哪块盘，不是读哪种格式"
+    : "  —— 不对：应当是先 filesystem ok 再 second disk ok"));
 console.log("壳        " + (壳行 ? "shell> files" : "(没跑到)")
   + (列行 ? "  → " + 列行[0] : "  → (没列出来)")
   + (壳成 ? "  —— 那一行认得出来、回答得出（来源见上一行）"
@@ -545,6 +608,7 @@ const 结构成 = 有种子
     && 打开成
     && 深成
     && 更成
+    && 二成
     && 壳成
     && 重求成
     && 除成

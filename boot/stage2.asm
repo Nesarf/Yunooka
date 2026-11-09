@@ -165,6 +165,27 @@ stage2:
     call serial_print
 .mbox_done:
 
+    ; β 盘：另一块盘、另一个文件系统、同一个格式。挂成 secondary master，BIOS 盘号 0x82，
+    ; 预读扇区 0 到 0x60000。
+    ;
+    ; 为什么不与 α 共用「预读」那一段：两块盘的地址不能重叠，而 0x60000 与 0x40000 之间
+    ; 隔了 128 KB，α 那 11 个扇区（5.5 KB）碰不到它。读失败也照走 —— 盘没挂上时，
+    ; β:/… 会在查找那一步说 not found，而不是让整个启动停下来。
+    mov al, [drive]
+    mov [mbox_save], al
+    mov byte [drive], 0x82
+    mov dword [dap_lba], 0
+    mov word [dap_off], 0x0000
+    mov word [dap_seg], 0x6000
+    mov word [dap_count], 4
+    call read_batch
+    jnc .fs2_ok
+    mov si, line_fs2_fail
+    call serial_print
+.fs2_ok:
+    mov al, [mbox_save]
+    mov [drive], al
+
     ; A20 用 BIOS 的 int 0x15, ax=0x2401 来开，不走 8042 键盘控制器那一路。
     ; 原先那一版（out 0x64 / 0x60）在 VirtualBox 上直接把 out 卡住了 —— 串口停在
     ; 观测字节后面，看起来像挂在保护模式上。BIOS 调用失败了也不管：这块固件
@@ -571,6 +592,7 @@ long_entry:
     call run_fs_open
     call run_fs_open2
     call run_fs_open3
+    call run_fs_open4
     call run_shell
     call run_repl
     call run_div_test
@@ -1812,13 +1834,16 @@ ata_read:
     stc
     ret
 
-; 预读进来的那六份东西：扇区 1024 起，落在 0x40000，每扇区 512 字节。
-; 接口与 ata_read 一样（rdi = 扇区号），但它不读盘 —— 它只是算出地址。
-; 长模式下的文件系统一路都走这里，PIO 那条路只在 run_ata_test 里留作对照。
+; 把扇区号算成预读区里的地址。接口与 ata_read 一样（rdi = 扇区号），但它不读盘 ——
+; 它只是算地址。
+;
+; 两个变量而不是两个常量：α 盘的预读区在 0x40000、从第 1024 个扇区起；β 盘在 0x60000、
+; 从第 0 个扇区起。盘符不同，这两个数就不同 —— 而「盘符对一块盘」这件事在
+; design/FS.txt 二节里就是这么定的，所以地址该跟着盘符走，不该写死在代码里。
 fs_load:
-    sub rdi, 1024
+    sub rdi, [fs_start]
     shl rdi, 9
-    mov rsi, 0x40000
+    mov rsi, [fs_base]
     add rsi, rdi
     ret
 
@@ -3115,15 +3140,24 @@ fs_open_path:
     push r12
     push r13
     movzx eax, word [rdi]
-    cmp ax, 0x03B1                 ; α
+    cmp ax, 0x03B1                 ; α = 主盘，预读在 0x40000、第 1024 扇区起
+    je .alpha
+    cmp ax, 0x03B2                 ; β = 第二块盘，预读在 0x60000、第 0 扇区起
     jne .miss
+    mov qword [fs_base], 0x60000
+    mov qword [fs_start], 0
+    jmp .drive_ok
+.alpha:
+    mov qword [fs_base], 0x40000
+    mov qword [fs_start], 1024
+.drive_ok:
     add rdi, 2
     movzx eax, word [rdi]
     cmp ax, ':'
     jne .miss
     add rdi, 2
     push rdi
-    mov rdi, 1024
+    mov rdi, [fs_start]            ; 超块就在这一段的第一个扇区
     call fs_load
     mov [fs_buf], rsi
     mov rax, [fs_buf]
@@ -3178,6 +3212,10 @@ fs_open_path:
 .done:
     pop r13
     pop r12
+    ; 拨回 α。调用者接下来多半还是用主盘，而「上一次查的是 β」这种状态留在变量里，
+    ; 会让下一次 α 的读取落到第二块盘的地址上 —— 那种错很安静，读出来的是别人的字节。
+    mov qword [fs_base], 0x40000
+    mov qword [fs_start], 1024
     ret
 
 run_fs_open2:
@@ -3225,6 +3263,49 @@ run_fs_open3:
     mov rsi, line_fs_open
     call puts64
     lea rdi, [fs_path3 + 6]
+    call put_utf16_ascii
+    mov rsi, line_fs_arrow
+    call puts64
+    mov rsi, [fs_buf]
+    mov rcx, rbx
+.put:
+    test rcx, rcx
+    jz .put_done
+    mov al, [rsi]
+    push rsi
+    push rcx
+    call putc64
+    pop rcx
+    pop rsi
+    inc rsi
+    dec rcx
+    jmp .put
+.put_done:
+    call put_nl64
+    ret
+
+; 第二块盘：另一块盘、另一个文件系统、同一个格式。盘符的意义就在这里 ——
+; α:/hello.txt 与 β:/hello.txt 是两份不同的字节，而打开它们的是同一段代码。
+run_fs_open4:
+    mov rdi, fs_path4
+    call fs_open_path
+    test rax, rax
+    jz fs_open_miss
+    ; fs_open_path 返回前已经把基址拨回 α，而这一行要读的是 β 的文件 —— 所以自己再拨一次。
+    ;
+    ; 这一处踩过：拨回放在查找函数里，读文件却在调用者那儿，于是 fs_load(2) 用的是 α 的
+    ; 起点 1024，sub 2, 1024 借位成一个巨大的偏移，地址飞出映射，结果是 #PF at 0xA1B4 ——
+    ; 而不是「读错了内容」。一个状态什么时候失效，要由用完它的人决定，不是由产生它的人。
+    mov qword [fs_base], 0x60000
+    mov qword [fs_start], 0
+    mov rdi, r15
+    call fs_load
+    mov [fs_buf], rsi
+    mov qword [fs_base], 0x40000   ; 读完立刻拨回，别让后面的测试读错盘
+    mov qword [fs_start], 1024
+    mov rsi, line_fs_open
+    call puts64
+    lea rdi, [fs_path4 + 6]        ; 跳过 β:/ 三个码元（β 的低字节串口打不出来）
     call put_utf16_ascii
     mov rsi, line_fs_arrow
     call puts64
@@ -3640,6 +3721,10 @@ instr_offsets: times 64 dq 0
 test_arg: dq 1
 ata_buf: dq 0
 fs_buf: dq 0
+; 当前这个盘符对应哪一块盘：预读区的基址，与那一段从哪个扇区起。
+; 默认是 α（主盘）。fs_open_path 认盘符之后会把它们改成 β 的，用完拨回来。
+fs_base: dq 0x40000
+fs_start: dq 1024
 
 line_fn116: db "Yunooka: fn116 -> ", 0
 line_call: db "Yunooka: call -> ", 0
@@ -3679,6 +3764,7 @@ line_fs_preread: db "Yunooka: fs preread failed", 13, 10, 0
 line_mbox_ok: db "Yunooka: mailbox ok", 13, 10, 0
 line_mbox_bad: db "Yunooka: mailbox bad", 13, 10, 0
 line_mbox_fail: db "Yunooka: no mailbox", 13, 10, 0
+line_fs2_fail: db "Yunooka: beta preread failed", 13, 10, 0
 line_idt_ok: db "Yunooka: idt ok", 13, 10, 0
 line_exception: db "Yunooka: exception ", 0
 line_exception_at: db " at ", 0
@@ -3768,6 +3854,10 @@ fs_seg2: dw 0x006E, 0x006F, 0x0074, 0x0065, 0x002E, 0x0074, 0x0078, 0x0074, 0
 ; 所以这一行与两层那一行走的是同一段代码。
 fs_path3: dw 0x03B1, 0x003A, 0x002F, 0x0064, 0x006F, 0x0063, 0x0073, 0x002F
           dw 0x0073, 0x0075, 0x0062, 0x002F, 0x0064, 0x0065, 0x0065, 0x0070
+          dw 0x002E, 0x0074, 0x0078, 0x0074, 0
+; 第二块盘上的同一个名字：β:/hello.txt。盘符不同、盘不同、内容也不同，
+; 而打开它的是同一段 fs_open_path。
+fs_path4: dw 0x03B2, 0x003A, 0x002F, 0x0068, 0x0065, 0x006C, 0x006C, 0x006F
           dw 0x002E, 0x0074, 0x0078, 0x0074, 0
 
 ; shell 的两样：要从盘上找的文件名，与它认得的第一条命令。

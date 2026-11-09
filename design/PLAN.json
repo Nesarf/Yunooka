@@ -425,7 +425,7 @@
       "after": ["builtins", "widen-stage2", "ata-read", "fs-superblock", "fs-open", "fs-multilevel"],
       "verifiedBy": ["tools/run.mjs"],
       "touches": ["design/FS.txt", "README.md"],
-      "notes": "形状、路径、打开一条路径都做完了，写在 design/FS.txt。这一版新做完的是「路径被解析」：fs_open_path 按斜杠切段、逐段 fs_lookup，深度不再是限制 —— α:/docs/sub/deep.txt 那一条就是判据，而两层那一行在旧的写法下也能过（那时是两个手写的段名各占一个变量，三层就要再加一个）。剩下的两件：α 之后的盘符，以及写。盘符要第二块盘也有文件系统，而信箱那块是裸盘、没有；写要一个空闲扇区的账，而连续分配的意思是「写的时候就想清楚它多大」。原来这一条把三件捆在一起并说都留给「有进程之后」，那个说法对盘符与写是过严的 —— 三层拆出去之后，剩下两件各自的前置就看清了：盘符等一块被格式化的盘，写等一个分配器。"
+      "notes": "形状、路径、盘符、打开一条路径都做完了，写在 design/FS.txt。这一版新做完的是「按斜杠逐段解析」（fs_open_path，深度不再是限制，α:/docs/sub/deep.txt 是判据）与「盘符对一块盘」：α 是主盘，预读在 0x40000、从第 1024 个扇区起；β 是第二块盘，预读在 0x60000、从第 0 个扇区起，挂在 IDE 的 secondary master（BIOS 盘号 0x82）。fs_load 因此从两个常量变成两个变量（fs_base、fs_start），fs_open_path 认盘符之后拨它们。判据是同一个名字读两次：α:/hello.txt 给出 Yunooka filesystem ok，β:/hello.txt 给出 Yunooka second disk ok —— 内容不同才分得开盘，而「打开成功了」两行都有。路上踩了三个坑，都不是算错。一、run.mjs 判断「盘挂没挂」用的是键名在不在，而 showvminfo 对空槽位也输出 IDE-1-0=\"none\"，于是 attach 一次也没跑过；改成看值是不是 none。二、sts_open_path 返回前把基址拨回 α，而读文件在调用者那一侧 —— fs_load(2) 用 α 的起点 1024 做减法，借位成巨大偏移，表现是 #PF at 0xA1B4 而不是「读错了内容」。一个状态什么时候失效要由用完它的人决定。三、三层与两层的判据原来都想靠同一个打印函数，而它们现在各有一份 —— 那是可以合并的地方，留着是因为合并要动已通过的代码。只剩写没做：它要一个空闲扇区的账，而连续分配的意思是「写之前就想清楚它多大」；另外长模式下写盘要 PIO，而那条路只在测试里用过。"
     },
     {
       "id": "self-host",
