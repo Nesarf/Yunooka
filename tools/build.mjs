@@ -150,8 +150,14 @@ const 文件系统起 = 1024;
 const 根目录号 = 文件系统起 + 1;
 const 子目录号 = 文件系统起 + 2;
 const 数据起 = 文件系统起 + 3;
+// 三层那一层：docs 里再嵌一个 sub，sub 里放 deep.txt。
+// 两个扇区按顺序排在数据区之后 —— 数据区现在是 1027 到 1032 六个文件，所以 sub 在 1033、
+// deep.txt 在 1034。stage2 的预读要盖到 1034，所以那一边的扇区数也跟着加了。
+const 子目录2号 = 文件系统起 + 9;
+const 深层文件起 = 文件系统起 + 10;
 const 示例文件 = Buffer.from("Yunooka filesystem ok\n", "utf8");
 const 子文件 = Buffer.from("Yunooka subdirectory ok\n", "utf8");
+const 深层文件 = Buffer.from("Yunooka three levels ok\n", "utf8");
 // 盘上的第一条命令。shell 的「解释」那一半从它读起 —— 交互那一半要串口能收字节，
 // 而那条路还没通，所以命令先写在盘上，等能读行了再换成真的键盘。
 const 命令文件 = Buffer.from("files\n", "utf8");
@@ -198,7 +204,8 @@ for (const 字 of "main") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位
 const 程序字节 = 程序包.subarray(0, 位);
 const 示例扇区数 = Math.ceil(示例文件.length / 512) + Math.ceil(子文件.length / 512)
   + Math.ceil(命令文件.length / 512) + Math.ceil(求值输入.length / 512)
-  + Math.ceil(数学输入.length / 512) + Math.ceil(程序字节.length / 512);
+  + Math.ceil(数学输入.length / 512) + Math.ceil(程序字节.length / 512)
+  + 1 + Math.ceil(深层文件.length / 512);   // sub 目录自己占一个扇区，再加 deep.txt
 
 const 码元 = (s) => {
   const 列 = [];
@@ -236,13 +243,18 @@ let 根位 = 写条目(根目录, 0, "hello.txt", 0, 数据起, 示例文件.len
 写条目(根目录, 根位, "prog.hmtn", 0, 数据起 + 5, 程序字节.length);
 
 const 子目录 = Buffer.alloc(512);
-写条目(子目录, 0, "note.txt", 0, 数据起 + 1, 子文件.length);
+let 子位 = 写条目(子目录, 0, "note.txt", 0, 数据起 + 1, 子文件.length);
+写条目(子目录, 子位, "sub", 1, 子目录2号, 0);        // 第二层里的目录
+
+const 子目录2 = Buffer.alloc(512);
+写条目(子目录2, 0, "deep.txt", 0, 深层文件起, 深层文件.length);
 
 console.log("文件系统  超级块第 " + 文件系统起 + " 号扇区，根目录第 " + 根目录号
   + " 号扇区，docs 目录第 " + 子目录号 + " 号扇区；hello.txt（" + 示例文件.length
   + " 字节）、docs/note.txt（" + 子文件.length + " 字节）、cmd.txt（"
   + 命令文件.length   + " 字节）、repl.txt（" + 求值输入.length + " 字节，UTF-16）、math.txt（"
-  + 数学输入.length + " 字节，UTF-16）、prog.hmtn（" + 程序字节.length + " 字节，程序包）");
+  + 数学输入.length + " 字节，UTF-16）、prog.hmtn（" + 程序字节.length + " 字节，程序包）、"
+  + "docs/sub/deep.txt（" + 深层文件.length + " 字节，三层路径）");
 
 // 盘用稀疏文件建，不在内存里放一份整盘副本 —— Node 的 Buffer 上限是 2 GB，而这块盘
 // 将来会要 4 GB。ftruncate 造出来的空洞不占磁盘也不占内存，各段各自写在它该在的
@@ -262,6 +274,8 @@ try {
   fs.writeSync(fd, 求值输入, 0, 求值输入.length, (数据起 + 3) * 512);
   fs.writeSync(fd, 数学输入, 0, 数学输入.length, (数据起 + 4) * 512);
   fs.writeSync(fd, 程序字节, 0, 程序字节.length, (数据起 + 5) * 512);
+  fs.writeSync(fd, 子目录2, 0, 512, 子目录2号 * 512);
+  fs.writeSync(fd, 深层文件, 0, 深层文件.length, 深层文件起 * 512);
 } finally {
   fs.closeSync(fd);
 }

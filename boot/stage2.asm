@@ -114,7 +114,7 @@ stage2:
     mov dword [dap_lba], 1024
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x4000
-    mov word [dap_count], 9
+    mov word [dap_count], 11
     call read_batch
     jnc .fs_ready
     mov si, line_fs_preread
@@ -570,6 +570,7 @@ long_entry:
     call run_fs_test
     call run_fs_open
     call run_fs_open2
+    call run_fs_open3
     call run_shell
     call run_repl
     call run_div_test
@@ -3097,26 +3098,91 @@ fs_lookup:
     xor rax, rax
     ret
 
-run_fs_open2:
-    mov rdi, fs_path2
+; 按路径逐段查找。rdi = UTF-16 路径，以 0 码元结尾，形如 α:/docs/sub/deep.txt。
+;
+; 路径语法在 design/FS.txt 三节：盘符 α 起、斜杠分隔、全绝对。这里只做一件 ——
+; 从根目录起一段一段查下去。
+;
+; 为什么要有它：之前的两层是手写的，两个段名各占一个变量（fs_seg1、fs_seg2）。那证明的是
+; 「目录里的条目能指向另一个目录」，不是「路径能被解析」—— 三层的写法在那种形状里要再加
+; 一个变量，四层再加一个。按斜杠切段之后，深度只是循环转了几圈。
+;
+; 「当前在哪一层」是 r13 里的一个扇区号，不是全局的当前目录 —— 绝对路径不需要那东西，
+; 而当前目录要等有进程、有「谁记得自己站在哪」的时候才谈得上。
+;
+; 出：rax = 1 找到（r15 = 扇区、rbx = 字节数），0 = 没找到。
+fs_open_path:
+    push r12
+    push r13
     movzx eax, word [rdi]
-    cmp ax, 0x03B1
-    jne fs_open_drive
+    cmp ax, 0x03B1                 ; α
+    jne .miss
+    add rdi, 2
+    movzx eax, word [rdi]
+    cmp ax, ':'
+    jne .miss
+    add rdi, 2
+    push rdi
     mov rdi, 1024
     call fs_load
     mov [fs_buf], rsi
     mov rax, [fs_buf]
-    mov r13d, [rax + 12]          ; 根目录扇区
-    mov r8, fs_seg1               ; 第一段：docs
-    mov r9, 4
+    mov r13d, [rax + 12]           ; 从根目录起
+    pop rdi
+.segment:
+.skip_slash:
+    movzx eax, word [rdi]
+    cmp ax, '/'
+    jne .have_start
+    add rdi, 2
+    jmp .skip_slash
+.have_start:
+    test ax, ax
+    jz .miss                       ; 以斜杠收尾：那是一个目录，不是文件
+    mov r12, rdi                   ; 段首
+    xor rcx, rcx                   ; 段长
+.count:
+    movzx eax, word [rdi + rcx * 2]
+    test ax, ax
+    jz .at_end
+    cmp ax, '/'
+    je .at_slash
+    inc rcx
+    cmp rcx, 64
+    ja .miss                       ; 一段长过 64 个码元：不像一个名字
+    jmp .count
+.at_slash:
+    lea rax, [r12 + rcx * 2]       ; 下一轮的起点
+    push rax
+    mov r8, r12
+    mov r9, rcx
+    mov rsi, r13
+    call fs_lookup
+    mov r12, rax                   ; fs_lookup 的答案先收好，再取回起点
+    pop rdi
+    test r12, r12
+    jz .miss
+    mov r13, r15                   ; 这一段的扇区成为下一段的目录
+    jmp .segment
+.at_end:
+    mov r8, r12
+    mov r9, rcx
     mov rsi, r13
     call fs_lookup
     test rax, rax
-    jz fs_open_miss
-    mov r8, fs_seg2               ; 第二段：note.txt，在 docs 里面找
-    mov r9, 8
-    mov rsi, r15
-    call fs_lookup
+    jz .miss
+    mov rax, 1
+    jmp .done
+.miss:
+    xor eax, eax
+.done:
+    pop r13
+    pop r12
+    ret
+
+run_fs_open2:
+    mov rdi, fs_path2
+    call fs_open_path
     test rax, rax
     jz fs_open_miss
     mov rdi, r15
@@ -3124,11 +3190,41 @@ run_fs_open2:
     mov [fs_buf], rsi
     mov rsi, line_fs_open
     call puts64
-    mov rdi, fs_seg1
+    lea rdi, [fs_path2 + 6]        ; 跳过 α:/ 三个码元，只打路径那一段
     call put_utf16_ascii
-    mov al, '/'
+    mov rsi, line_fs_arrow
+    call puts64
+    mov rsi, [fs_buf]
+    mov rcx, rbx
+.put:
+    test rcx, rcx
+    jz .put_done
+    mov al, [rsi]
+    push rsi
+    push rcx
     call putc64
-    mov rdi, fs_seg2
+    pop rcx
+    pop rsi
+    inc rsi
+    dec rcx
+    jmp .put
+.put_done:
+    call put_nl64
+    ret
+
+; 三层：α:/docs/sub/deep.txt。深度到这里已经不靠新变量了 —— 与两层走的是同一个循环，
+; 只是多转一圈。这一行才是「路径被解析」的判据；两层那一行在旧的写法下也能过。
+run_fs_open3:
+    mov rdi, fs_path3
+    call fs_open_path
+    test rax, rax
+    jz fs_open_miss
+    mov rdi, r15
+    call fs_load
+    mov [fs_buf], rsi
+    mov rsi, line_fs_open
+    call puts64
+    lea rdi, [fs_path3 + 6]
     call put_utf16_ascii
     mov rsi, line_fs_arrow
     call puts64
@@ -3668,6 +3764,11 @@ fs_path2: dw 0x03B1, 0x003A, 0x002F, 0x0064, 0x006F, 0x0063, 0x0073, 0x002F
           dw 0x006E, 0x006F, 0x0074, 0x0065, 0x002E, 0x0074, 0x0078, 0x0074, 0
 fs_seg1: dw 0x0064, 0x006F, 0x0063, 0x0073, 0
 fs_seg2: dw 0x006E, 0x006F, 0x0074, 0x0065, 0x002E, 0x0074, 0x0078, 0x0074, 0
+; 三层那一条：α:/docs/sub/deep.txt。fs_open_path 用的就是这个 —— 它按斜杠切段，
+; 所以这一行与两层那一行走的是同一段代码。
+fs_path3: dw 0x03B1, 0x003A, 0x002F, 0x0064, 0x006F, 0x0063, 0x0073, 0x002F
+          dw 0x0073, 0x0075, 0x0062, 0x002F, 0x0064, 0x0065, 0x0065, 0x0070
+          dw 0x002E, 0x0074, 0x0078, 0x0074, 0
 
 ; shell 的两样：要从盘上找的文件名，与它认得的第一条命令。
 ; 命令是 ASCII（不是 UTF-16）—— 因为 cmd.txt 的内容就是 ASCII 字节，

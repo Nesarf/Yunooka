@@ -59,6 +59,7 @@ const 全程 = [
   "Yunooka: fs ",
   "Yunooka: open ",
   "Yunooka: open docs/",
+  "Yunooka: open docs/sub/",
   "Yunooka: shell> ",
   "Yunooka: repl> ",
   "Yunooka: math> average -> ",
@@ -404,6 +405,10 @@ const 打开成 = 打开行 !== null && 打开行[1] === "hello.txt"
 // 再在那个扇区里找下一个名字。一层与两层在代码上看起来一样，只有真的走两次才分得开。
 const 深行 = /Yunooka: open docs\/note\.txt -> (.+)/.exec(读到);
 const 深成 = 深行 !== null && 深行[1].trim() === "Yunooka subdirectory ok";
+// 三层那一行才是「路径被解析」的判据。两层在旧的写法里也能过 —— 那时是两个手写的
+// 段名各占一个变量，三层就要再加一个。现在按斜杠切段，深度只是循环多转一圈。
+const 更行 = /Yunooka: open docs\/sub\/deep\.txt -> (.+)/.exec(读到);
+const 更成 = 更行 !== null && 更行[1].trim() === "Yunooka three levels ok";
 // shell 的解释那一半：盘上的 cmd.txt 里写着一行 files，它要认出来并回答。
 // 判据是三步都在：提示符打出来、命令被回显、根目录的三个名字按顺序列出来。
 // 只验提示符的话，一个只会打字的实现照样能过。
@@ -492,6 +497,9 @@ console.log("打开      " + (打开行 ? 打开行[1] + " -> " + 打开行[2].t
 console.log("两层      " + (深行 ? "docs/note.txt -> " + 深行[1].trim() : "(没走到)")
   + (深成 ? "  —— 先拿到目录的扇区，再在它里面找下一个名字"
     : "  —— 不对：应当读到 Yunooka subdirectory ok"));
+console.log("三层      " + (更行 ? "docs/sub/deep.txt -> " + 更行[1].trim() : "(没走到)")
+  + (更成 ? "  —— 按斜杠逐段查，深度只是循环转了几圈"
+    : "  —— 不对：应当读到 Yunooka three levels ok"));
 console.log("壳        " + (壳行 ? "shell> files" : "(没跑到)")
   + (列行 ? "  → " + 列行[0] : "  → (没列出来)")
   + (壳成 ? "  —— 那一行认得出来、回答得出（来源见上一行）"
@@ -536,6 +544,7 @@ const 结构成 = 有种子
     && fs成
     && 打开成
     && 深成
+    && 更成
     && 壳成
     && 重求成
     && 除成

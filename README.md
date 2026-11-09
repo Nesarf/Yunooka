@@ -291,6 +291,23 @@ Yunooka: open hello.txt -> Yunooka filesystem ok
 「盘符被认出来了」由「找到了」间接证明：盘符不认识会走 `unknown drive`，名字不在会走
 `not found`，两条都是自己的声音。
 
+### 路径是解析出来的，不是手写的
+
+```
+Yunooka: open docs/note.txt -> Yunooka subdirectory ok
+Yunooka: open docs/sub/deep.txt -> Yunooka three levels ok
+```
+
+`fs_open_path` 从根目录起一段一段查：先认盘符与冒号，然后跳过斜杠、量出这一段的长度、
+拿它去查当前目录。找到了就是下一段的目录，没找到就说 `not found`。
+
+**三层那一行才是「路径被解析」的判据。** 两层在旧的写法里也能过 —— 那时是两个手写的
+段名各占一个变量（`fs_seg1`、`fs_seg2`），三层就要再加一个，四层再加一个。按斜杠切段
+之后，深度只是循环多转了一圈。
+
+「当前在哪一层」是一个寄存器里的扇区号，不是全局的当前目录。绝对路径不需要那种东西 ——
+而当前目录要等有进程、有「谁记得自己站在哪」的时候才谈得上。
+
 ### 一个间歇的坏法
 
 `rep insw` 在虚拟机模拟的 IDE 控制器上偶尔会挂住，而挂住只在「前一行的时序稍有不同」
