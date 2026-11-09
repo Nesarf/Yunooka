@@ -65,6 +65,7 @@ const 全程 = [
   // 交互式的那两行：客人机先打各自的一句，然后等主机把键送进来。
   "Yunooka: shell ready",
   "Yunooka: repl ready",
+  "Yunooka: prog main",
 ];
 const 种子三种 = ["Yunooka: seed ok", "Yunooka: seed bad", "Yunooka: seed unreadable"];
 const 留机 = process.argv.includes("--keep");
@@ -384,6 +385,11 @@ const 活成 = 活行 !== null;
 // 一个是运行时打进去的名字。
 const 求值活行 = /Yunooka: repl ready[\s\S]*?Yunooka: repl-live> letters[\s\S]*?string 53/.exec(读到);
 const 求值活成 = 求值活行 !== null;
+// 盘上的程序包：userland 的第一件 —— 一个程序从盘上的哪一份字节开始跑。
+// 判据是那个 7：它只存在于 prog.hmtn 的那两条指令里，别处没有，所以「读到了 7」
+// 就等于「那个包被读进来、入口被找到、指令流被跑过」。
+const 程行 = /Yunooka: prog main -> (\d+)/.exec(读到);
+const 程成 = 程行 !== null && 程行[1] === "7";
 // 文件系统：超级块的版本、根目录扇区号、以及第一个条目的名字。名字是 build 按
 // design/FS.txt 放进去的，所以这一条验的是「读得懂那份布局」，不是「读出了一行字」：
 // 版本号与扇区号都来自超级块自己，而名字来自目录条目的 UTF-16 码元。
@@ -472,6 +478,9 @@ console.log("交互      " + (活行 ? "shell ready -> shell> files" : "(没跑�
 console.log("求值活    " + (求值活行 ? "repl ready -> repl-live> letters -> string 53" : "(没跑到)")
   + (求值活成 ? "  —— 打进去的名字被找到、被跑过；那个 53 是 exec 算出来的"
     : "  —— 不对：应当是 repl ready 之后接上 repl-live> letters 与 string 53"));
+console.log("程序      " + (程行 ? "prog main -> " + 程行[1] : "(没跑到)")
+  + (程成 ? "  —— 包从盘上读进来、main 被找到、跑出了 7；7 只存在于那个包里"
+    : "  —— 不对：应当是 prog main -> 7"));
 console.log("文件系统  " + (fs行
   ? "v" + fs行[1] + "，根目录第 " + fs行[2] + " 号扇区，第一个名字 " + fs行[3]
   : "(没读出来)")
@@ -523,6 +532,7 @@ const 结构成 = 有种子
     && 键成
     && 活成
     && 求值活成
+    && 程成
     && fs成
     && 打开成
     && 深成

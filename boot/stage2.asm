@@ -114,7 +114,7 @@ stage2:
     mov dword [dap_lba], 1024
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x4000
-    mov word [dap_count], 8
+    mov word [dap_count], 9
     call read_batch
     jnc .fs_ready
     mov si, line_fs_preread
@@ -577,6 +577,7 @@ long_entry:
     call run_math
     call run_shell_live
     call run_repl_live
+    call run_program
     call run_trap_test
     jmp .hang64
 .heap_bad:
@@ -1456,7 +1457,10 @@ call_report:
 ; rdi = 名字的 UTF-16 码元，r8 = 码元数，r15 = 模式（0 走完整张表 / 1 第一个就停）
 ; 回来 rax = 1 找到 / 0 没有，rsi = 指令流起点，r13 = 指令数。
 find_fn_by_name:
-    mov rsi, 0x20000 + 9
+    ; 从哪个包开始扫：读 pkg_base，不是写死 0x20000。种子只是「启动时就在那里的那个包」，
+    ; 而盘上读进来的包住在别处 —— 同一段查找代码两处都用，靠这一个变量分。
+    mov rsi, [pkg_base]
+    add rsi, 9                     ; 头九个字节：HMYRB + 版本 u16 + 函数数 u16
     xor rbx, rbx
     xor r11, r11                   ; 还没找到
 .each:
@@ -2355,6 +2359,78 @@ print_value:
 .false:
     mov rsi, line_false_flat
     jmp puts64
+
+; ======================================================================
+; 从盘上加载一个程序，跑它
+; ======================================================================
+;
+; 这是 userland 的第一件：一个程序从盘上的哪一份字节开始跑。
+;
+; 答案很朴素 —— 一个与种子同格式的包（HMYRB 头 + 函数表），从文件系统读进预读区，
+; 在里面找 main，跑它。朴素但成立：包住在盘上、不在启动时的内存里，于是「程序是什么」
+; 与「种子是什么」分开了。种子是启动时就在的那一个包，prog.hmtn 是之后从盘上取的
+; 另一个 —— 而两者用同一段查找代码，靠 pkg_base 分。
+;
+; 没有做的：地址空间（包与系统共用同一片内存）、权限、多个程序同时存在。那些都要
+; 先有「一个程序占一块地方」的概念，而那要等进程。
+run_program:
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]
+    mov r8, fs_prog_name
+    mov r9, 9                       ; "prog.hmtn"
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz prog_missing
+    mov rdi, r15
+    call fs_load
+    mov r14, rsi                    ; 包在预读区里的地址
+    mov rdi, r14
+    mov rsi, seed_magic
+    mov rcx, 5
+    call bytes_eq
+    jc prog_bad
+    ; 这个包成为当前包，然后按名字找 main
+    mov [pkg_base], r14
+    mov rdi, name_main
+    mov r8, 4
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz prog_nomain
+    mov r12, rsi                    ; 指令流
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+    ; 结果先存进寄存器：恢复 pkg_base 那两句会用到 rax
+    mov r15, rax
+    mov r14, rdx
+    mov qword [pkg_base], 0x20000   ; 种子是默认的那个包，别让后面的测试读错地方
+    mov rsi, line_prog
+    call puts64
+    mov rax, r15
+    mov rdx, r14
+    call print_value
+    call put_nl64
+    ret
+prog_missing:
+    mov rsi, line_prog_missing
+    call puts64
+    ret
+prog_bad:
+    mov qword [pkg_base], 0x20000
+    mov rsi, line_prog_bad
+    call puts64
+    ret
+prog_nomain:
+    mov qword [pkg_base], 0x20000
+    mov rsi, line_prog_nomain
+    call puts64
+    ret
 
 ; ======================================================================
 ; repl 的前半：从盘上读一个名字，按名字调它，把值打出来
@@ -3534,6 +3610,13 @@ line_repl_live_to: db "Yunooka: no line", 13, 10, 0
 ; 不带换行的 true / false：print_value 不打换行，由调用者收尾，所以不能借用带换行那份。
 line_true_flat: db "true", 0
 line_false_flat: db "false", 0
+; 盘上那个程序包与它里面的入口。
+fs_prog_name: dw 0x0070, 0x0072, 0x006F, 0x0067, 0x002E, 0x0068, 0x006D, 0x0074, 0x006E, 0
+name_main: dw 0x006D, 0x0061, 0x0069, 0x006E
+line_prog: db "Yunooka: prog main -> ", 0
+line_prog_missing: db "Yunooka: no prog.hmtn", 13, 10, 0
+line_prog_bad: db "Yunooka: prog bad magic", 13, 10, 0
+line_prog_nomain: db "Yunooka: prog has no main", 13, 10, 0
 
 ; 扫描码集 1 → ASCII。索引就是扫描码，值是字符，0 表示「这个键不产字」。
 ;
@@ -3566,6 +3649,9 @@ line_buf: times 64 db 0
 line_len: dq 0
 ; 同一个名字的 UTF-16 版本：键盘给的是 ASCII 字节，而种子里存的是码元。
 line_buf16: times 128 db 0
+; 当前在扫哪一个包。种子的地址是 0x20000，而盘上读进来的包住在预读区里 ——
+; find_fn_by_name 靠这个变量就知道该从哪儿开始，不必写两份查找器。
+pkg_base: dq 0x20000
 line_fs_open: db "Yunooka: open ", 0
 line_fs_arrow: db " -> ", 0
 line_fs_nofile: db "Yunooka: not found", 13, 10, 0

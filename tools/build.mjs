@@ -171,9 +171,34 @@ const 求值输入 = Buffer.from("块长", "utf16le");
 // 九个数、六个整数、一个小数、两个常量，和是 262.48831980370736。
 const 数学输入 = Buffer.from(
   "average: 1,4,19,40,55,29,30.4,6π,24e\ny=1/x\nf(x)=1/x\nf x=1/x", "utf16le");
+// 盘上的第一个「程序」：与种子同一种格式的一个包，里面只有一个函数 main，它返回 7。
+//
+// 为什么是这种形状：userland 那一件要回答的是「一个程序从盘上的哪一份字节开始跑」。
+// 最小能成立的答案，就是一个包住在盘上、格式与种子相同、由同一段查找代码找入口 ——
+// 于是「程序」与「种子」分开了：种子是启动时就在的那个包，这个是从盘上取的另一个。
+//
+// 七个字节的头之后是函数表：名字（u16 长度 + 码元）、参数量、槽数、效果数、指令数、
+// 指令流。两条指令：常量 7.0、返回。返回 7 而不是别处能查到的数，是因为这一行要
+// 证明「值来自这个包」，而 7 在别处没有出现过。
+const 程序包 = Buffer.alloc(64);
+程序包.write("HMYRB", 0, "latin1");
+程序包.writeUInt16LE(1, 5);       // 版本
+程序包.writeUInt16LE(1, 7);       // 函数数
+let 位 = 9;
+程序包.writeUInt16LE(4, 位); 位 += 2;                      // 名字长度
+for (const 字 of "main") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包.writeUInt16LE(0, 位); 位 += 2;                      // 参数量
+程序包.writeUInt16LE(0, 位); 位 += 2;                      // 槽数
+程序包.writeUInt16LE(0, 位); 位 += 2;                      // 效果数
+程序包.writeUInt32LE(2, 位); 位 += 4;                      // 指令数
+程序包[位++] = 5;                                           // 常量
+程序包[位++] = 1;                                           // 种类：数
+程序包.writeDoubleLE(7.0, 位); 位 += 8;
+程序包[位++] = 28;                                          // 返回
+const 程序字节 = 程序包.subarray(0, 位);
 const 示例扇区数 = Math.ceil(示例文件.length / 512) + Math.ceil(子文件.length / 512)
   + Math.ceil(命令文件.length / 512) + Math.ceil(求值输入.length / 512)
-  + Math.ceil(数学输入.length / 512);
+  + Math.ceil(数学输入.length / 512) + Math.ceil(程序字节.length / 512);
 
 const 码元 = (s) => {
   const 列 = [];
@@ -207,7 +232,8 @@ let 根位 = 写条目(根目录, 0, "hello.txt", 0, 数据起, 示例文件.len
 根位 = 写条目(根目录, 根位, "docs", 1, 子目录号, 0);       // 目录的字节长度没有意义，写 0
 根位 = 写条目(根目录, 根位, "cmd.txt", 0, 数据起 + 2, 命令文件.length);
 根位 = 写条目(根目录, 根位, "repl.txt", 0, 数据起 + 3, 求值输入.length);
-写条目(根目录, 根位, "math.txt", 0, 数据起 + 4, 数学输入.length);
+根位 = 写条目(根目录, 根位, "math.txt", 0, 数据起 + 4, 数学输入.length);
+写条目(根目录, 根位, "prog.hmtn", 0, 数据起 + 5, 程序字节.length);
 
 const 子目录 = Buffer.alloc(512);
 写条目(子目录, 0, "note.txt", 0, 数据起 + 1, 子文件.length);
@@ -216,7 +242,7 @@ console.log("文件系统  超级块第 " + 文件系统起 + " 号扇区，根�
   + " 号扇区，docs 目录第 " + 子目录号 + " 号扇区；hello.txt（" + 示例文件.length
   + " 字节）、docs/note.txt（" + 子文件.length + " 字节）、cmd.txt（"
   + 命令文件.length   + " 字节）、repl.txt（" + 求值输入.length + " 字节，UTF-16）、math.txt（"
-  + 数学输入.length + " 字节，UTF-16）");
+  + 数学输入.length + " 字节，UTF-16）、prog.hmtn（" + 程序字节.length + " 字节，程序包）");
 
 // 盘用稀疏文件建，不在内存里放一份整盘副本 —— Node 的 Buffer 上限是 2 GB，而这块盘
 // 将来会要 4 GB。ftruncate 造出来的空洞不占磁盘也不占内存，各段各自写在它该在的
@@ -235,6 +261,7 @@ try {
   fs.writeSync(fd, 命令文件, 0, 命令文件.length, (数据起 + 2) * 512);
   fs.writeSync(fd, 求值输入, 0, 求值输入.length, (数据起 + 3) * 512);
   fs.writeSync(fd, 数学输入, 0, 数学输入.length, (数据起 + 4) * 512);
+  fs.writeSync(fd, 程序字节, 0, 程序字节.length, (数据起 + 5) * 512);
 } finally {
   fs.closeSync(fd);
 }
