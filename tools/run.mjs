@@ -56,6 +56,7 @@ const 全程 = [
   "Yunooka: open ",
   "Yunooka: open docs/",
   "Yunooka: shell> ",
+  "Yunooka: repl> ",
 ];
 const 种子三种 = ["Yunooka: seed ok", "Yunooka: seed bad", "Yunooka: seed unreadable"];
 const 留机 = process.argv.includes("--keep");
@@ -260,6 +261,11 @@ const 深成 = 深行 !== null && 深行[1].trim() === "Yunooka subdirectory ok"
 const 壳行 = /Yunooka: shell> files/.exec(读到);
 const 列行 = /hello\.txt docs cmd\.txt/.exec(读到);
 const 壳成 = 壳行 !== null && 列行 !== null;
+// repl 的前半：盘上 repl.txt 里是一个函数名（块长），按名字找它、跑它、把值打出来。
+// 判据是那个数：512 只有真的按名字找到了第二个定义、并且跑出它的常量才拿得到。
+// 名字本身在串口上打不出来（UTF-16 的汉字），所以那一行打的是码元数 —— 2。
+const 求值行 = /Yunooka: repl> 2 units -> (\d+)/.exec(读到);
+const 重求成 = 求值行 !== null && 求值行[1] === "512";
 console.log("第一个函数 " + (函数行
   ? 函数行[1] + "（参 " + 函数行[2] + "、槽 " + 函数行[3] + "、指令 " + 函数行[4] + "）"
   : "(没读出来)"));
@@ -301,6 +307,9 @@ console.log("壳        " + (壳行 ? "shell> files" : "(没跑到)")
   + (列行 ? "  → " + 列行[0] : "  → (没列出来)")
   + (壳成 ? "  —— 命令从盘上读、认得出来、回答得出"
     : "  —— 不对：应当认出 files 并列出 hello.txt docs cmd.txt"));
+console.log("求值      " + (求值行 ? "repl> 2 units -> " + 求值行[1] : "(没跑到)")
+  + (重求成 ? "  —— 按名字找到第二个定义，跑出它的常量"
+    : "  —— 不对：应当是 512"));
 // 结构这一条只在带种子时算：没有种子时机器不读种子头，那是对的，不该因此变红。
 const 有种子 = 读到.includes("Yunooka: seed ok");
 const 求值成 = 结果行 !== null && 结果行[1] === "string" && 结果行[2] === "53";
@@ -320,6 +329,8 @@ const 结构成 = 有种子
     && 打开成
     && 深成
     && 壳成
+    && 重求成
+    && 求值成
   : true;
 // 成败三条合成一条：缺行、分配、结构。放在这里算，因为它要用到上面那个结构成 ——
 // 这也是第一次把它写在前面时的报错原因（Cannot access before initialization）。

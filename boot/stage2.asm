@@ -111,7 +111,7 @@ stage2:
     mov dword [dap_lba], 1024
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x4000
-    mov word [dap_count], 6
+    mov word [dap_count], 7
     call read_batch
     jnc .fs_ready
     mov si, line_fs_preread
@@ -439,6 +439,7 @@ long_entry:
     call run_fs_open
     call run_fs_open2
     call run_shell
+    call run_repl
     jmp .hang64
 .heap_bad:
     mov rsi, line_heap_bad
@@ -1729,6 +1730,74 @@ shell_missing:
     call puts64
     ret
 
+; ======================================================================
+; repl 的前半：从盘上读一个名字，按名字调它，把值打出来
+; ======================================================================
+;
+; 这不是「读一行表达式」—— 那一半要编译器，属于 HMYR。它是「求一个东西并打出来」的
+; 最小形态，而按名字调用与把值打到串口这两件 exec 那一侧已经有了。盘上那份 repl.txt
+; 里就是一个函数名（UTF-16 码元，没有换行），所以读的人不必再切一行。
+run_repl:
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]          ; 根目录扇区
+    mov r8, fs_repl_name
+    mov r9, 8                     ; "repl.txt"
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz repl_missing
+    mov rdi, r15                  ; repl.txt 的扇区
+    call fs_load
+    mov r14, rsi                  ; 名字的 UTF-16 码元
+    mov rcx, rbx
+    shr rcx, 1                    ; 字节数折成码元数
+    push rcx
+    mov rsi, line_repl_prompt
+    call puts64
+    pop rcx
+    push rcx
+    mov rax, rcx
+    call put_num64                ; 打码元数而不是名字本身：块长 的低字节是 0x57 与 0x7F，
+    mov rsi, line_repl_units      ; 八位串口打出来是 W 加一个看不见的字符 —— 那是打印
+    call puts64                   ; 这一层的限制，不是名字错了
+    mov rsi, line_repl_arrow
+    call puts64
+    pop r8                        ; r8 = 名字长度，find_fn_by_name 要这个
+    mov rdi, r14
+    xor r15, r15                  ; 后者胜，与读程序 同一条规矩
+    call find_fn_by_name
+    test rax, rax
+    jz repl_unknown
+    mov r12, rsi                  ; 指令流
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+    cmp rax, 1                    ; 数
+    jne repl_badkind
+    mov rax, rdx
+    call f64_to_int
+    call put_num64
+    call put_nl64
+    ret
+repl_badkind:
+    mov rsi, line_bad_kind
+    call puts64
+    call put_num64
+    call put_nl64
+    ret
+repl_unknown:
+    mov rsi, line_repl_unknown
+    call puts64
+    ret
+repl_missing:
+    mov rsi, line_repl_missing
+    call puts64
+    ret
+
 run_ata_test:
     mov rax, 512
     call alloc64
@@ -2470,6 +2539,15 @@ fs_cmd_files: db "files"
 line_shell_prompt: db "Yunooka: shell> ", 0
 line_shell_unknown: db "Yunooka: unknown command", 13, 10, 0
 line_shell_missing: db "Yunooka: no cmd.txt", 13, 10, 0
+
+; repl 的那几样。文件名是 UTF-16（它是目录里的名字），而盘上那份输入也是 UTF-16 ——
+; 因为它是「一个 HMYR 里的名字」，而 HMYR 的串按码元算。
+fs_repl_name: dw 0x0072, 0x0065, 0x0070, 0x006C, 0x002E, 0x0074, 0x0078, 0x0074, 0
+line_repl_prompt: db "Yunooka: repl> ", 0
+line_repl_arrow: db " -> ", 0
+line_repl_units: db " units", 0
+line_repl_unknown: db "Yunooka: no such name", 13, 10, 0
+line_repl_missing: db "Yunooka: no repl.txt", 13, 10, 0
 line_bad_kind: db "  kind=", 0
 line_unknown_op: db "  unknown op ", 0
 line_got: db "Yunooka: fn116 returned", 13, 10, 0
