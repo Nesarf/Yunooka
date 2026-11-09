@@ -203,14 +203,14 @@
     },
     {
       "id": "browser",
-      "title": "默认浏览器：AikawaMei 与 VML 整合，底座装 Firefox 与 Chromium",
+      "title": "默认浏览器 AikawaMei（相川 冥）：VML 并进来，底座 Firefox 与 Chromium",
       "scope": "stage",
       "status": "open",
       "parent": "resident",
       "after": ["system-software"],
       "verifiedBy": [],
       "touches": ["README.md"],
-      "notes": "用户定的方向：AikawaMei（相川 冥）与 Vtuber's Monitor Link 整合成 Yunooka 的默认浏览器，底座同时装 Firefox 与 Chromium 两套引擎。这两个现在都不是浏览器 —— 相川 冥 是从 SilentCrystal 副本长出来的防御工具（会话卫生审计、内容规则、归因与下架），VML 是打包发布的监视器、带自己的 web 前端。整合的理由我读出来是「它们都在持续看着某些东西」，而浏览器是看着整个网络的那一个；这条理由是我读的，不是用户写的。还没回答的有三件：两套引擎是都要还是二选一；两套引擎在同一个系统里怎么并存；以及这个浏览器在「还没有操作系统」的那一层上占哪一块 —— 它与 Ichiwatashi 的像素层不是同一件事。"
+      "notes": "名字定了：默认浏览器就叫 AikawaMei（相川 冥），Vtuber's Monitor Link 的功能并进来，底座同时装 Firefox 与 Chromium 两套引擎。相川 冥 那个仓库现在还不是浏览器 —— 它是从 SilentCrystal 副本长出来的防御工具（会话卫生审计、内容规则、归因与下架），VML 是打包发布的监视器、带自己的 web 前端；把浏览器这个名字给它，等于说这条线往后长成浏览器的样子。整合的理由我读出来是「它们都在持续看着某些东西」，而浏览器是看着整个网络的那一个 —— 这条是我读的，不是用户写的。还没回答的有三件：两套引擎是都要还是二选一；两套引擎在同一个系统里怎么并存；以及这个浏览器在「还没有操作系统」的那一层上占哪一块 —— 它与 Ichiwatashi 的像素层不是同一件事。"
     },
     {
       "id": "fs-multilevel",
