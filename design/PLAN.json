@@ -169,6 +169,72 @@
       "notes": "用户点到 Windows 任务管理器。这一条比 SMART 远得多：它显示进程与它们的资源占用，而 Yunooka 现在没有进程 —— 只有一个执行流，连「当前目录」都因此没有主人（这一条在 filesystem 的 notes 里也写过）。所以它不是「实现一个列表」，而是「先有进程这个概念」：一个能被创建、被切换、被结束的东西，并且知道自己占了多少内存。在那之前它只能作为方向记着，写不出判据。"
     },
     {
+      "id": "palette",
+      "title": "第一标准色组：22 个色号，窗口与 UI 的取色来源",
+      "scope": "stage",
+      "status": "done",
+      "parent": "resident",
+      "after": [],
+      "verifiedBy": [],
+      "touches": ["design/palette.json"],
+      "notes": "22 个色号存在 design/palette.json，按用户给出的顺序，不重排。角色划分（背景、前景、强调）还没有定，文件里写的是 null 而不是编一个 —— 一份 22 色的清单不是一套配色。来源是 F:\\素材\\图\\brak 立绘\\kohane\\小一孁 琥珀音_info.jpg（字节其实是 PNG，扩展名写作 jpg）。它与 Ichiwatashi 的像素层是一对：色组定颜色，Ichiwatashi 定怎么画成像素。这一条之所以记成 done，是因为「色号被记下来并且可被代码读到」这件事已经完成；「它被用上」还没有。"
+    },
+    {
+      "id": "shell",
+      "title": "默认 shell / 终端 / 控制台",
+      "scope": "stage",
+      "status": "open",
+      "parent": "resident",
+      "after": ["fs-open", "math-console"],
+      "verifiedBy": ["tools/run.mjs"],
+      "touches": ["boot/stage2.asm"],
+      "notes": "用户点名的第一件。终端、控制台、shell 在别的系统里常被混着叫，这里也先按一件事记：一个能读一行、解释它、把结果写回来的东西。它排在文件系统之后，因为一个连文件都读不稳的 shell 只能做算术。真正要先定的是三件：命令从哪来（内置表还是按路径找）、错误怎么报、以及它与 HMYR 的关系 —— 如果命令就是 HMYR 的表达式，那 shell 与 REPL 是同一件事的两面。"
+    },
+    {
+      "id": "repl",
+      "title": "交互式解释器：给 exec 一个门",
+      "scope": "stage",
+      "status": "open",
+      "parent": "resident",
+      "after": ["shell"],
+      "verifiedBy": ["tools/run.mjs"],
+      "touches": ["boot/stage2.asm"],
+      "notes": "Yunooka 已经有能跑 HMYR 字节码的 exec（九条指令起步，后来补了调用、内置、索引与算术），所以这一条不是「写一个解释器」，而是给它一个门：读一行、查到或编出一份字节码、跑、把值打出来。用户说「如果需要直接在 HMYR 上面做就直接改 HMYR」—— 编译与求值那一侧确实属于 HMYR，Yunooka 这一侧只负责「读一行」和「打一个值」。REPL 与 shell 的边界在用户给的清单里没有画细，需要的时候再分。"
+    },
+    {
+      "id": "userland",
+      "title": "用户空间：程序住在哪、怎么被加载",
+      "scope": "stage",
+      "status": "open",
+      "parent": "resident",
+      "after": ["shell"],
+      "verifiedBy": [],
+      "touches": ["README.md"],
+      "notes": "程序住在哪、怎么被加载、怎么拿到内存与文件。它与「进程」是同一件事的两面 —— 任务管理器那一条正卡在这里。真正要先定的是一件：一个程序从盘上的哪一份字节开始跑；其余（权限、隔离、调度）都在那之后。现在连「谁占着多少内存」都答不出来，因为只有一个执行流。"
+    },
+    {
+      "id": "container-runtime",
+      "title": "容器运行时",
+      "scope": "stage",
+      "status": "open",
+      "parent": "resident",
+      "after": ["userland"],
+      "verifiedBy": [],
+      "touches": ["README.md"],
+      "notes": "用户点名的一项。在 Yunooka 上它比在别的系统上自然，因为这本来就是「一台只装自己东西的机器」；但它依赖用户空间先有形状 —— 没有进程就没有东西可以装进容器。记下来是为了不让它被忘掉，不是说现在能开工。"
+    },
+    {
+      "id": "math-console",
+      "title": "数学交互：1+1=x 输出 x=2，y=1/x 画出图像",
+      "scope": "stage",
+      "status": "open",
+      "parent": "resident",
+      "after": ["repl"],
+      "verifiedBy": ["tools/run.mjs"],
+      "touches": ["boot/stage2.asm"],
+      "notes": "两半分得很开，所以分开做。前一半是「等式左边求值、右边是名字」，本质是 REPL 加一条语法糖 —— 现在就能做，而且它正好是 exec 的一次真用：求值、给结果起个名字、把 x=2 打出来。后一半是绘图，要一块能画点的界面，所以它依赖窗口、像素层与色组 —— 排在它们之后。用户特别说了「回车（确认）」，所以这两半都不是实时预览，是一个动作完成之后给出结果。"
+    },
+    {
       "id": "widen-stage2",
       "title": "第二段从 8 KB 长到 16 KB：三个数字一起改",
       "scope": "stage",
