@@ -575,6 +575,7 @@ long_entry:
     call run_div_test
     call run_div_report
     call run_math
+    call run_shell_live
     call run_trap_test
     jmp .hang64
 .heap_bad:
@@ -1868,9 +1869,9 @@ run_serial_echo:
 ;
 ; 注意这里只读 0x64 与 0x60。当初 A20 那一版是往 0x64 写，把 out 卡住了；读是另一回事。
 ;
-; 扫描码集是 set 2（VirtualBox 的 BIOS 日志写着 scanning enabled）。所以主机送 0x2B
-; 表示按下 F，送来 0xAB 表示放开。这一版不翻译，只把收到的码打出来 —— 翻译表可以后加，
-; 而「收到了什么」是一张表替代不了的事实。
+; 扫描码集用集 1，与主机那一侧一致（理由写在 keymap 的注释里）。所以主机送 0x2D
+; 表示按下 X，送来 0xAD 表示放开。这一版不翻译，只把收到的码打出来 —— 翻译表可以后加，
+; 而「究竟收到了什么」是一张表替代不了的事实。
 run_key_poll:
     mov r10, 5000000               ; 大约几秒：够主机在这段窗口里送一个键
 .wait:
@@ -2149,6 +2150,97 @@ shell_unknown:
 shell_missing:
     mov rsi, line_shell_missing
     call puts64
+    ret
+
+; ======================================================================
+; 交互式的那一行：等键盘送来的键，攒成一行，回车之后解释它
+; ======================================================================
+;
+; 这是 shell 的第三半。前两半分别解决了「认一行」与「那一行从哪来」：认的部分从
+; fs_cmd_files 那几行开始就有，来源先是盘上的 cmd.txt，然后是信箱里的一行。可这两样
+; 都是事先写好的 —— 换一行要重建或重启。键盘是第一条真正在运行时进来的路。
+;
+; 为什么先打一行 shell ready：主机不知道客人机什么时候开始轮询，而猜错的代价是
+; 「没收到」，那看起来和「键盘不通」一模一样。让客人机先说一句、主机再送键，
+; 就把时序从猜测变成了握手。
+;
+; 超时也要说话：不说的话，一个没送到的键与一个坏掉的键盘在串口上是同一行空白。
+run_shell_live:
+    mov rsi, line_shell_ready
+    call puts64
+    mov qword [line_len], 0
+    mov r10, 20000000              ; 窗口：主机逐个送键，每个之间留五十毫秒，这里等着
+.key:
+    mov dx, 0x64
+    in al, dx
+    test al, 0x01
+    jz .next
+    mov dx, 0x60
+    in al, dx
+    movzx r14, al
+    cmp r14, 128
+    jae .next                      ; 集 1 的放开码是「按下码或上 0x80」，一律跳过
+    lea rax, [keymap]
+    movzx eax, byte [rax + r14]
+    test al, al
+    jz .next
+    cmp al, 13
+    je .line_done
+    mov rcx, [line_len]
+    cmp rcx, 63
+    jae .next                      ; 满了就丢：截断会变成另一条命令
+    lea rdi, [line_buf]
+    mov [rdi + rcx], al
+    inc rcx
+    mov [line_len], rcx
+    call putc64                    ; 回显：串口上看得出正在打字
+    jmp .next
+.next:
+    dec r10
+    jnz .key
+    mov rsi, line_shell_timeout
+    call puts64
+    ret
+.line_done:
+    call put_nl64
+    mov rcx, [line_len]
+    lea rdi, [line_buf]
+    mov byte [rdi + rcx], 0        ; 收尾的零：puts64 与 bytes_eq 都要它
+    mov rsi, line_shell_prompt
+    call puts64
+    lea rsi, [line_buf]
+    call puts64
+    call put_nl64
+    lea rdi, [line_buf]
+    mov rsi, fs_cmd_files
+    mov rcx, 5
+    call bytes_eq
+    jc shell_unknown
+    ; files：列根目录。与 run_shell 里那一段同一份形状 —— 两处都留一份，是因为
+    ; 抽成子程序要在两条路上各加一次调用与一次栈对齐，而这里只有十来行。
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov edi, [rax + 12]
+    call fs_load
+.entry:
+    movzx ecx, word [rsi]
+    test ecx, ecx
+    jz .list_done
+    push rsi
+    push rcx
+    mov rdi, rsi
+    add rdi, 2
+    call put_utf16_n
+    mov al, ' '
+    call putc64
+    pop rcx
+    pop rsi
+    lea rsi, [rsi + 11 + rcx * 2]
+    jmp .entry
+.list_done:
+    call put_nl64
     ret
 
 ; ======================================================================
@@ -3320,6 +3412,38 @@ line_serial_got: db "Yunooka: echo ", 0
 line_serial_none: db "Yunooka: no input", 13, 10, 0
 line_key: db "Yunooka: key ", 0
 line_key_none: db "Yunooka: no key", 13, 10, 0
+line_shell_ready: db "Yunooka: shell ready", 13, 10, 0
+line_shell_timeout: db "Yunooka: no line", 13, 10, 0
+
+; 扫描码集 1 → ASCII。索引就是扫描码，值是字符，0 表示「这个键不产字」。
+;
+; 为什么是集 1 而不是集 2：实测说了算。VirtualBox 的 BIOS 日志写着 keyboard 用 scan set 2，
+; 而 controlvm keyboardputscancode 送什么码 guest 就收到什么码（原样穿透）；可
+; controlvm keyboardputstring 送的是集 1 —— 用集 2 的表去读它，回显会是 c3：0x21 被当成 c、
+; 0x26 被当成 3。两条路只有一条能对上，于是选那个能一次送一整行的。
+;
+; 集 1 的放开码是「按下码或上 0x80」，所以 128 以上的码一律跳过 —— 这一版不需要知道
+; 哪个键放开了。
+;
+; 只填用得上的那些：二十六个字母、0 到 9、空格、回车、退格。其余留 0 不是偷懒 ——
+; 一张「部分认识」的表比一张猜出来的表诚实，遇到不认识的键就当没按过，而不是打出
+; 一个形状对、意思错的字符。
+align 8
+keymap:
+    db 0,0,"1","2","3","4","5","6", "7","8","9","0",0,0,0,0     ; 00-0F
+    db "q","w","e","r","t","y","u","i", "o","p",0,0,13,0,"a","s" ; 10-1F
+    db "d","f","g","h","j","k","l",0, 0,0,0,0,"z","x","c","v"    ; 20-2F
+    db "b","n","m",0,0,0,0,0, 0," ",0,0,0,0,0,0                  ; 30-3F
+    db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0                          ; 40-4F
+    db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0                          ; 50-5F
+    db 0,0,0,0,0,0,8,0, 0,0,0,0,0,0,0,0                          ; 60-6F
+    db 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0                          ; 70-7F
+
+; 键盘那一行的缓冲。64 字节够一条命令；超出的部分丢掉而不是截断成另一条命令 ——
+; 一条被悄悄截断的命令会在后面以「unknown command」的样子出现，而那不是真正的原因。
+align 8
+line_buf: times 64 db 0
+line_len: dq 0
 line_fs_open: db "Yunooka: open ", 0
 line_fs_arrow: db " -> ", 0
 line_fs_nofile: db "Yunooka: not found", 13, 10, 0

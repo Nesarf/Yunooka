@@ -61,9 +61,9 @@ const 全程 = [
   "Yunooka: open docs/",
   "Yunooka: shell> ",
   "Yunooka: repl> ",
-  // 键盘那一步在串口回显之后、文件系统之前。它要等到一个键才会往下走，所以放在这里
-  // 让等待循环覆盖到那一秒 —— 不放在这里的话循环会在数学那几行之后就收手。
-  "Yunooka: key ",
+  "Yunooka: math> average -> ",
+  // 交互式的那一行：客人机先打 shell ready，然后等主机把键送进来。
+  "Yunooka: shell ready",
 ];
 const 种子三种 = ["Yunooka: seed ok", "Yunooka: seed bad", "Yunooka: seed unreadable"];
 const 留机 = process.argv.includes("--keep");
@@ -209,24 +209,55 @@ try {
 const 起 = vbox(["startvm", 机名, "--type", "headless"]);
 if (起.status !== 0) 做不了("起不来：" + String(起.stderr || "").slice(0, 200));
 
-// 等串口文件里出现那些行，最多二十秒。同时每轮送一次按键。
+// 等串口文件里出现那些行，最多二十秒。同时按阶段送两次键。
 //
-// 为什么要反复送：客人机只在一小段窗口里轮询键盘（run_key_poll），而主机猜不准那一秒。
-// 送多次的代价是多几个字节，猜一次的代价是偶尔「没收到」—— 而后者看起来和「键盘不通」
-// 一模一样，会把一次成功读成失败。
+// 键盘那一步（run_key_poll）只抓一个字节，所以反复送同一个 F 的扫描码 —— 送多次的
+// 代价是多几个字节，猜一次的代价是偶尔「没收到」，而后者看起来和「键盘不通」一样。
+// 一旦那一行出现就停手：再送下去会落在后面交互式那一行里，被它当成真的按了 f。
 //
-// 2b 是 set 2 的 F 键按下；这一版不送放开码，因为判据只要一个字节。
+// 交互式那一行（run_shell_live）要的是握手，不是猜：客人机先打 shell ready，
+// 这里看到之后才把那一行送进去。
+// 送那一行用 keyboardputstring，不用一个个注码。
+//
+// 两件事是实测出来的。一是 keyboardputstring 送的是集 1 的扫描码（用集 2 的表去读，
+// 回显会是 c3：0x21 被当成 c、0x26 被当成 3），所以客人机的表也统一到集 1。
+// 二是测试键不能用 f：前面 run_key_poll 用 keyboardputscancode 21 按下过 f 却从没放开，
+// VBox 认为它一直按着，于是 keyboardputstring "f" 不产生新的按下 —— 送 gfiles 得到
+// giles，丢的永远是 f。换成 x（0x2D）之后这一条就通了。
+//
+// 还是一次一个字符：整行一次送时 8042 的缓冲装不下，头一个会被挤掉（回显 iles）。
+const 该行文字 = "files";
 const 睡 = (毫秒) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 毫秒);
 let 读到 = "";
+let 送过整行 = false;
 for (let i = 0; i < 40; i++) {
   睡(500);
-  if (i < 20) vbox(["controlvm", 机名, "keyboardputscancode", "2b"]);
+  if (!送过整行) {
+    if (!读到.includes("Yunooka: key ") && !读到.includes("Yunooka: no key")) {
+      vbox(["controlvm", 机名, "keyboardputscancode", "2d"]);
+    }
+  }
   if (fs.existsSync(串口)) {
     读到 = fs.readFileSync(串口, "utf8");
+    if (!送过整行 && 读到.includes("Yunooka: shell ready")) {
+      // 一个字符一次。一次送整行时 8042 的缓冲装不下，头一个被挤掉 —— 回显是 iles，
+      // 少的就是第一个。逐字符送的代价是每个约一百毫秒，而客人机的窗口有十几秒。
+      for (const 字 of 该行文字) {
+        vbox(["controlvm", 机名, "keyboardputstring", 字]);
+        睡(60);
+      }
+      睡(100);
+      vbox(["controlvm", 机名, "keyboardputscancode", "1c"]);   // 回车：集 1 的 0x1C
+      送过整行 = true;
+    }
     const 步数 = (读到.match(/Yunooka: op /g) || []).length;
     const 结果数 = (读到.match(/Yunooka: fn116 -> /g) || []).length;
     const 按名数 = (读到.match(/Yunooka: byname/g) || []).length;
-    if (全程.every((s) => 读到.includes(s)) && 步数 >= 4 && 结果数 >= 2 && 按名数 >= 2) break;
+    // 收手的条件里要有「交互那一行也走完了」：只等 shell ready 会在这儿就断电，
+    // 而键刚送出去、客人机还没处理。那样看到的是一行 ready 加一条空白 —— 与
+    // 「键没送到」一模一样。
+    const 交互完 = /Yunooka: shell ready[\s\S]*?Yunooka: shell> files/.test(读到);
+    if (交互完 && 全程.every((s) => 读到.includes(s)) && 步数 >= 4 && 结果数 >= 2 && 按名数 >= 2) break;
   }
 }
 
@@ -327,7 +358,15 @@ const 陷成 = idt行
 // 判据要那个字节本身，不是「有没有收到」—— 收到的码若不对，说明端口读在别处，而
 // 「收到一个数」这件事仍然成立，两者要分得开。
 const 键行 = /Yunooka: key ([0-9A-F]+)|Yunooka: (no key)/.exec(读到);
-const 键成 = 键行 !== null && 键行[1] === "000000000000002B";
+// 集 1 的 x 是 0x2D。测试键不用 f：run_key_poll 用 keyboardputscancode 按下过 f 却
+// 从没放开，VBox 会认为它一直按着，于是后面 keyboardputstring "f" 不产生新的按下 ——
+// 而那条路正是要送 files 的。
+const 键成 = 键行 !== null && 键行[1] === "000000000000002D";
+// 交互式的那一行：客人机先说 shell ready，主机看到之后才把 files 加回车送进去。
+// 判据要三件事连成一条链：ready 出现过、提示符与那一行接在它后面、目录真的列出来。
+// 只查「有 hello.txt」会被前面从信箱读的那一次占便宜 —— 那一行也是 files。
+const 活行 = /Yunooka: shell ready[\s\S]*?Yunooka: shell> files[\s\S]*?hello\.txt docs/.exec(读到);
+const 活成 = 活行 !== null;
 // 文件系统：超级块的版本、根目录扇区号、以及第一个条目的名字。名字是 build 按
 // design/FS.txt 放进去的，所以这一条验的是「读得懂那份布局」，不是「读出了一行字」：
 // 版本号与扇区号都来自超级块自己，而名字来自目录条目的 UTF-16 码元。
@@ -409,7 +448,10 @@ console.log("异常      " + (idt行 ? "idt ok" : "idt (没装)")
     : "  —— 不对：应当是 exception 6，且没有 handler returned"));
 console.log("键盘      " + (键行 ? (键行[1] ? "key " + 键行[1] : "no key") : "(没跑到)")
   + (键成 ? "  —— 主机注入的那一个扫描码，客人机从 0x60 读到了"
-    : "  —— 不对：应当是 key 000000000000002B"));
+    : "  —— 不对：应当是 key 000000000000002D"));
+console.log("交互      " + (活行 ? "shell ready -> shell> files" : "(没跑到)")
+  + (活成 ? "  —— 键是运行时送进去的：先说 ready，主机再送 files 加回车，然后它照做了"
+    : "  —— 不对：应当是 shell ready 之后接上 shell> files 与目录列表"));
 console.log("文件系统  " + (fs行
   ? "v" + fs行[1] + "，根目录第 " + fs行[2] + " 号扇区，第一个名字 " + fs行[3]
   : "(没读出来)")
@@ -459,6 +501,7 @@ const 结构成 = 有种子
     && 源成
     && 陷成
     && 键成
+    && 活成
     && fs成
     && 打开成
     && 深成
