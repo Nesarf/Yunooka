@@ -114,7 +114,7 @@ stage2:
     mov dword [dap_lba], 1024
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x4000
-    mov word [dap_count], 11
+    mov word [dap_count], 12
     call read_batch
     jnc .fs_ready
     mov si, line_fs_preread
@@ -593,6 +593,7 @@ long_entry:
     call run_fs_open2
     call run_fs_open3
     call run_fs_open4
+    call run_fs_write
     call run_shell
     call run_repl
     call run_div_test
@@ -3327,6 +3328,136 @@ run_fs_open4:
     call put_nl64
     ret
 
+; ======================================================================
+; 写一个文件：在根目录里追加一条，把数据拷进一个新扇区
+; ======================================================================
+;
+; 这一版写的是「文件系统这一层的写」：算出一个空闲扇区、在目录里加一条、把字节拷进去。
+; 它没有把扇区写回盘上 —— 数据落在预读区里，所以重启就没了。持久化是另一件（要 PIO 写），
+; 单独记着，不混进这一条。
+;
+; 为什么先做这一半：空闲扇区的账、目录条目的形状、数据落点，这三样是「写」的语义；
+; 而「有没有落到盘上」是 IO 那一层的性质。两件事混在一起做，出错时分不清是哪一层 ——
+; 而分不清的那一次，通常会把「没落盘」当成「写错了」。
+;
+; rdi = 文件名（UTF-16，0 码元结尾）、rsi = 数据、rcx = 字节数。出 rax = 1 成功 / 0 失败。
+fs_write_file:
+    push r12
+    push r13
+    push r14
+    push r15
+    push rbx
+    mov r12, rdi                   ; 文件名
+    mov r13, rsi                   ; 数据
+    mov r14, rcx                   ; 字节数
+    mov rdi, 1024
+    call fs_load
+    mov rbx, rsi                   ; 超级块
+    ; 新扇区号 = 数据起 + (总数 - 数据起 - 空闲)
+    mov eax, [rbx + 8]
+    sub eax, [rbx + 20]
+    sub eax, [rbx + 24]
+    add eax, [rbx + 20]
+    mov r15d, eax
+    ; 找根目录里的第一个空条目（名字长度为 0）
+    mov edi, [rbx + 12]
+    call fs_load
+    mov r9, rsi
+.find_free:
+    movzx eax, word [r9]
+    test eax, eax
+    jz .have_slot
+    lea r9, [r9 + 11 + rax * 2]
+    jmp .find_free
+.have_slot:
+    mov r10, r9
+    xor rcx, rcx
+.count_name:
+    cmp word [r12 + rcx * 2], 0
+    je .named
+    inc rcx
+    cmp rcx, 64
+    ja .fail
+    jmp .count_name
+.named:
+    mov [r10], cx
+    lea rdi, [r10 + 2]
+    xor rdx, rdx
+.copy_name:
+    cmp rdx, rcx
+    jae .copied
+    mov ax, [r12 + rdx * 2]
+    mov [rdi + rdx * 2], ax
+    inc rdx
+    jmp .copy_name
+.copied:
+    lea rdi, [r10 + 2 + rcx * 2]
+    mov byte [rdi], 0              ; 类型：文件
+    mov [rdi + 1], r15d            ; 起始扇区
+    mov [rdi + 5], r14d            ; 字节数
+    ; 数据拷到新扇区
+    mov rdi, r15
+    call fs_load
+    mov rdi, rsi
+    mov rsi, r13
+    mov rcx, r14
+    rep movsb
+    dec dword [rbx + 24]           ; 空闲数减一
+    mov rax, 1
+    jmp .done
+.fail:
+    xor eax, eax
+.done:
+    pop rbx
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    ret
+
+; 写一次再读回来。判据是读到的内容 —— 「写了」这件事没有别的观测点。
+run_fs_write:
+    mov rdi, fs_write_name
+    mov rsi, fs_write_data
+    mov rcx, fs_write_len
+    call fs_write_file
+    test rax, rax
+    jz fs_write_failed
+    mov rdi, fs_write_path
+    call fs_open_path
+    test rax, rax
+    jz fs_write_lost
+    mov rdi, r15
+    call fs_load
+    mov [fs_buf], rsi              ; 先存：下一句要拿 rsi 去打提示词
+    mov rsi, line_fs_write
+    call puts64
+    mov rsi, [fs_buf]
+    mov rcx, rbx
+.put:
+    test rcx, rcx
+    jz .put_done
+    mov al, [rsi]
+    push rsi
+    push rcx
+    call putc64
+    pop rcx
+    pop rsi
+    inc rsi
+    dec rcx
+    jmp .put
+.put_done:
+    call put_nl64
+    ret
+fs_write_failed:
+    mov rsi, line_fs_write_fail
+    call puts64
+    ret
+fs_write_lost:
+    mov rsi, line_fs_write_lost
+    call puts64
+    ret
+
 ; 打一串 UTF-16 码元，只取低字节。这一版的名字都是 ASCII，够用；非 ASCII 的名字会
 ; 在这里变成别的字节，而那是「打印」这一层的限制，不是名字本身的。
 put_utf16_ascii:
@@ -3859,6 +3990,15 @@ fs_path3: dw 0x03B1, 0x003A, 0x002F, 0x0064, 0x006F, 0x0063, 0x0073, 0x002F
 ; 而打开它的是同一段 fs_open_path。
 fs_path4: dw 0x03B2, 0x003A, 0x002F, 0x0068, 0x0065, 0x006C, 0x006C, 0x006F
           dw 0x002E, 0x0074, 0x0078, 0x0074, 0
+; 写的判据：造一个不存在的名字，写一段只有这里才有的字节，再按路径打开它。
+fs_write_name: dw 0x006E, 0x0065, 0x0077, 0x002E, 0x0074, 0x0078, 0x0074, 0   ; "new.txt"
+fs_write_path: dw 0x03B1, 0x003A, 0x002F, 0x006E, 0x0065, 0x0077, 0x002E
+               dw 0x0074, 0x0078, 0x0074, 0                                  ; α:/new.txt
+fs_write_data: db "Yunooka wrote this", 10
+fs_write_len: equ $ - fs_write_data
+line_fs_write: db "Yunooka: wrote -> ", 0
+line_fs_write_fail: db "Yunooka: write failed", 13, 10, 0
+line_fs_write_lost: db "Yunooka: wrote but lost", 13, 10, 0
 
 ; shell 的两样：要从盘上找的文件名，与它认得的第一条命令。
 ; 命令是 ASCII（不是 UTF-16）—— 因为 cmd.txt 的内容就是 ASCII 字节，

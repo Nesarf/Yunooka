@@ -61,6 +61,7 @@ const 全程 = [
   "Yunooka: open docs/",
   "Yunooka: open docs/sub/",
   "Yunooka: second disk ok",
+  "Yunooka: wrote -> ",
   "Yunooka: shell> ",
   "Yunooka: repl> ",
   "Yunooka: math> average -> ",
@@ -469,6 +470,12 @@ const 二行 = /Yunooka: open hello\.txt -> (.+)/g;
 const 二集 = [...读到.matchAll(/Yunooka: open hello\.txt -> (.+)/g)].map((m) => m[1].trim());
 const 二成 = 二集.length === 2 && 二集[0] === "Yunooka filesystem ok"
   && 二集[1] === "Yunooka second disk ok";
+// 写：造一个不存在的名字、写一段只有这里才有的字节、再按路径打开它。
+// 判据是那段内容本身 —— 而且 files 的列表里也要多出这个名字，因为「目录里多了一条」
+// 与「数据落对了地方」是两件事，两件都得成立。
+const 写行 = /Yunooka: wrote -> (.+)/.exec(读到);
+const 写成 = 写行 !== null && 写行[1].trim() === "Yunooka wrote this"
+  && /hello\.txt docs cmd\.txt repl\.txt math\.txt prog\.hmtn new\.txt/.test(读到);
 // shell 的解释那一半：盘上的 cmd.txt 里写着一行 files，它要认出来并回答。
 // 判据是三步都在：提示符打出来、命令被回显、根目录的三个名字按顺序列出来。
 // 只验提示符的话，一个只会打字的实现照样能过。
@@ -563,6 +570,9 @@ console.log("三层      " + (更行 ? "docs/sub/deep.txt -> " + 更行[1].trim(
 console.log("第二块盘  " + (二集.length ? 二集.join("  /  ") : "(没走到)")
   + (二成 ? "  —— 同一个名字，两次读到不同的字节：盘符决定读哪块盘，不是读哪种格式"
     : "  —— 不对：应当是先 filesystem ok 再 second disk ok"));
+console.log("写        " + (写行 ? "wrote -> " + 写行[1].trim() : "(没跑到)")
+  + (写成 ? "  —— 空闲扇区的账、目录条目、数据落点三样都对，再按路径读回来"
+    : "  —— 不对：应当读到 Yunooka wrote this，且 files 里有 new.txt"));
 console.log("壳        " + (壳行 ? "shell> files" : "(没跑到)")
   + (列行 ? "  → " + 列行[0] : "  → (没列出来)")
   + (壳成 ? "  —— 那一行认得出来、回答得出（来源见上一行）"
@@ -609,6 +619,7 @@ const 结构成 = 有种子
     && 深成
     && 更成
     && 二成
+    && 写成
     && 壳成
     && 重求成
     && 除成

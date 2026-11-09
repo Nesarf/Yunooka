@@ -425,7 +425,18 @@
       "after": ["builtins", "widen-stage2", "ata-read", "fs-superblock", "fs-open", "fs-multilevel"],
       "verifiedBy": ["tools/run.mjs"],
       "touches": ["design/FS.txt", "README.md"],
-      "notes": "形状、路径、盘符、打开一条路径都做完了，写在 design/FS.txt。这一版新做完的是「按斜杠逐段解析」（fs_open_path，深度不再是限制，α:/docs/sub/deep.txt 是判据）与「盘符对一块盘」：α 是主盘，预读在 0x40000、从第 1024 个扇区起；β 是第二块盘，预读在 0x60000、从第 0 个扇区起，挂在 IDE 的 secondary master（BIOS 盘号 0x82）。fs_load 因此从两个常量变成两个变量（fs_base、fs_start），fs_open_path 认盘符之后拨它们。判据是同一个名字读两次：α:/hello.txt 给出 Yunooka filesystem ok，β:/hello.txt 给出 Yunooka second disk ok —— 内容不同才分得开盘，而「打开成功了」两行都有。路上踩了三个坑，都不是算错。一、run.mjs 判断「盘挂没挂」用的是键名在不在，而 showvminfo 对空槽位也输出 IDE-1-0=\"none\"，于是 attach 一次也没跑过；改成看值是不是 none。二、sts_open_path 返回前把基址拨回 α，而读文件在调用者那一侧 —— fs_load(2) 用 α 的起点 1024 做减法，借位成巨大偏移，表现是 #PF at 0xA1B4 而不是「读错了内容」。一个状态什么时候失效要由用完它的人决定。三、三层与两层的判据原来都想靠同一个打印函数，而它们现在各有一份 —— 那是可以合并的地方，留着是因为合并要动已通过的代码。只剩写没做：它要一个空闲扇区的账，而连续分配的意思是「写之前就想清楚它多大」；另外长模式下写盘要 PIO，而那条路只在测试里用过。"
+      "notes": "形状、路径、盘符、打开一条路径都做完了，写在 design/FS.txt。这一版新做完的是「按斜杠逐段解析」（fs_open_path，深度不再是限制，α:/docs/sub/deep.txt 是判据）与「盘符对一块盘」：α 是主盘，预读在 0x40000、从第 1024 个扇区起；β 是第二块盘，预读在 0x60000、从第 0 个扇区起，挂在 IDE 的 secondary master（BIOS 盘号 0x82）。fs_load 因此从两个常量变成两个变量（fs_base、fs_start），fs_open_path 认盘符之后拨它们。判据是同一个名字读两次：α:/hello.txt 给出 Yunooka filesystem ok，β:/hello.txt 给出 Yunooka second disk ok —— 内容不同才分得开盘，而「打开成功了」两行都有。路上踩了三个坑，都不是算错。一、run.mjs 判断「盘挂没挂」用的是键名在不在，而 showvminfo 对空槽位也输出 IDE-1-0=\"none\"，于是 attach 一次也没跑过；改成看值是不是 none。二、sts_open_path 返回前把基址拨回 α，而读文件在调用者那一侧 —— fs_load(2) 用 α 的起点 1024 做减法，借位成巨大偏移，表现是 #PF at 0xA1B4 而不是「读错了内容」。一个状态什么时候失效要由用完它的人决定。三、三层与两层的判据原来都想靠同一个打印函数，而它们现在各有一份 —— 那是可以合并的地方，留着是因为合并要动已通过的代码。写也做了，但只做到一半：fs_write_file 会算空闲扇区、在根目录追加条目、把数据拷进新扇区 —— 那是「文件系统这一层的写」，而数据落在预读区里，重启就没了。持久化是另一层（要 PIO 写回盘上），单独记成 fs-persist。判据是写一段只有这里才有的字节、再按路径读回来，同时 files 的列表里要多出那个名字 —— 目录里多了一条与数据落对地方是两件事，两件都得成立。踩过一个坑：fs_load 把地址交在 rsi，而下一句拿 rsi 去打提示词，于是打出来的是数据段里的字符串（wrote -> Yunooka: write fail）；先存进 fs_buf 就好了。这个坑与「puts64 的最后一个 lodsb 会改 al」是同一类 —— 打印函数会占用它碰到的寄存器，而这两次都发生在「刚拿到一个地址、马上要打印」的地方。"
+    },
+    {
+      "id": "fs-persist",
+      "title": "把写下去的字节落到盘上：PIO 写与它的判据",
+      "scope": "stage",
+      "status": "open",
+      "parent": "resident",
+      "after": ["filesystem", "ata-read"],
+      "verifiedBy": [],
+      "touches": ["boot/stage2.asm", "tools/run.mjs"],
+      "notes": "fs_write_file 现在只改内存里的预读区：算空闲扇区、追加目录条目、拷数据，全对，而重启就没了。这一条要的是把同一批字节写回盘上。两件前置都欠着。一是 ata_write 不存在 —— ata_read 的写法在那儿（LBA28、等 BSY、等 DRQ、逐 word），写是它的镜像（0x1F7 送 0x30、再 256 个 out），但没写过。二是盘号参数：ata_read 的 0x1F6 硬编码主盘，而 β 是 secondary master、DEV 位不同 —— 要写盘而且能选盘，这个参数得先加。判据大概只能跨启动：写一次、重启、再读 —— 因为同一次运行里读到的永远是内存里那一份，而那一份证明不了盘上有没有。「跨两次启动」与「一次运行退出码零」是两条不同的纪律，怎么记要先定下来，不然后面每一步都会被它绊住。"
     },
     {
       "id": "self-host",
