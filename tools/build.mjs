@@ -8,6 +8,7 @@
 // 产出：build/boot.img（512 字节，引导扇区原文）、build/disk.vdi（可挂的盘）
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -355,22 +356,57 @@ const fnv1a = (buf) => {
 // 这是这一层唯一的验红手段，而它必须改盘、不能改内存里的变量：
 // 判据要能看出「内容与清单不符」，而不是「清单跟着内容一起变了」。
 const 破 = process.argv.includes("--break");
+// --forge：盘上那份改了，而 core.bin 里那一条的 FNV-1a **也跟着重算对**。
+//
+// 这是「有人故意改了并把校验和也重算了」那个场景 —— GUARD.txt 说过，只有校验和的时候
+// 那场景是零防护。它也是 sign.bin 存在的唯一理由：--break 验的是第一环（文件与清单是否
+// 一致），--forge 让第一环是绿的，于是只有第二环（清单自己有没有被动过）能看出来。
+// 两个开关各自对应一个层次，没有一个是多余的。
+const 伪造 = process.argv.includes("--forge");
 const 盘上示例 = Buffer.from(示例文件);
-if (破) 盘上示例[0] ^= 0xFF;
+if (破 || 伪造) 盘上示例[0] ^= 0xFF;
 const 核心项 = [
   ["hello.txt", 示例文件],
   ["prog.hmtn", 程序字节],
   ["cmd.txt", 命令文件],
 ];
+// 清单按什么算：--forge 时按**盘上那份**算，于是 FNV-1a 那一层是绿的。
+const 清单项 = 伪造
+  ? 核心项.map(([名, 内容]) => [名, 名 === "hello.txt" ? 盘上示例 : 内容])
+  : 核心项;
+// SHA-256 清单永远按**原始内容**算。它记的是「该有什么」，不跟着盘上的变化走 ——
+// 一旦它也跟着写坏的那一份算，第二环就退化成了第一环的复制品。
 const 核心清单 = Buffer.alloc(512);
-核心清单.writeUInt32LE(核心项.length, 0);
+核心清单.writeUInt32LE(清单项.length, 0);
 let 清位 = 4;
-for (const [名, 内容] of 核心项) {
+for (const [名, 内容] of 清单项) {
   核心清单.writeUInt8(名.length, 清位); 清位 += 1;
   核心清单.write(名, 清位, "latin1"); 清位 += 名.length;
   核心清单.writeUInt32LE(fnv1a(内容), 清位); 清位 += 4;
 }
 const 核心清单起 = 假样本起 + 1;
+
+// ---- 三·三·二、SHA-256 清单：OnlySign 的第二环 ----
+//
+// 设计在 design/SIGN.txt。它与 core.bin 同形，换掉哈希长度、加一个算法字节 ——
+// 那个字节是为「将来换算法不必改魔数」留的，而现在只有 1 这一个取值。
+//
+// 它回答的问题与 core.bin 不同：core.bin 说「文件与清单是否一致」，这一份说
+// 「清单自己有没有被动过」。所以它按原始内容算，即使 --forge 让 core.bin 跟着变。
+const 签名清单 = Buffer.alloc(512);
+签名清单.write("YUNOSIG\0", 0, "latin1");
+签名清单.writeUInt16LE(1, 8);        // 版本
+签名清单.writeUInt8(1, 10);          // 算法：1 = SHA-256
+签名清单.writeUInt8(0, 11);          // 留白
+签名清单.writeUInt32LE(核心项.length, 12);
+let 签位 = 16;
+for (const [名, 内容] of 核心项) {
+  const 摘 = crypto.createHash("sha256").update(内容).digest();
+  签名清单.writeUInt8(名.length, 签位); 签位 += 1;
+  签名清单.write(名, 签位, "latin1"); 签位 += 名.length;
+  摘.copy(签名清单, 签位); 签位 += 32;
+}
+const 签名起 = 核心清单起 + 1;
 
 // ---- 三·四、别的系统的五个样本 ----
 //
@@ -411,7 +447,7 @@ const 造DEX = () => {
   b.write("dex\n035\0", 0, "latin1");
   return b;
 };
-const 外五起 = 核心清单起 + 1;
+const 外五起 = 签名起 + 1;
 const 外五件 = [
   ["pe.bin", 造PE()],
   ["elf.bin", 造ELF()],
@@ -431,6 +467,7 @@ const 示例扇区数 = Math.ceil(示例文件.length / 512) + Math.ceil(子文�
   + Math.ceil(绘图文件.length / 512)
   + Math.ceil(假样本.length / 512)
   + 1                                     // 核心清单自己占一个扇区
+  + 1                                     // SHA-256 清单（sign.bin）也占一个
   + 外五件.length;                        // 五个头部样本，每个一个扇区
 
 const 码元 = (s) => {
@@ -535,6 +572,7 @@ let 根位 = 条目(根目录, 0, "hello.txt", 0, 数据起, 示例文件.length
 根位 = 条目(根目录, 根位, "plot.txt", 0, 绘图起, 绘图文件.length);
 根位 = 条目(根目录, 根位, "fake.txt", 0, 假样本起, 假样本.length);
 根位 = 条目(根目录, 根位, "core.bin", 0, 核心清单起, 清位);
+根位 = 条目(根目录, 根位, "sign.bin", 0, 签名起, 签位);
 for (let i = 0; i < 外五件.length; i++) {
   根位 = 条目(根目录, 根位, 外五件[i][0], 0, 外五起 + i, 外五件[i][1].length);
 }
@@ -580,6 +618,7 @@ try {
   fs.writeSync(fd, 绘图文件, 0, 绘图文件.length, 绘图起 * 512);
   fs.writeSync(fd, 假样本, 0, 假样本.length, 假样本起 * 512);
   fs.writeSync(fd, 核心清单, 0, 512, 核心清单起 * 512);
+  fs.writeSync(fd, 签名清单, 0, 512, 签名起 * 512);
   for (let i = 0; i < 外五件.length; i++) {
     fs.writeSync(fd, 外五件[i][1], 0, 外五件[i][1].length, (外五起 + i) * 512);
   }

@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 66
+stage2_sectors equ 72
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -188,7 +188,7 @@ stage2:
     mov dword [dap_lba], 1024
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x4000
-    mov word [dap_count], 22       ; preread-sectors: 预读几个扇区，这个数由 build 核对
+    mov word [dap_count], 23       ; preread-sectors: 预读几个扇区，这个数由 build 核对
     call read_batch
     jnc .fs_ready
     mov si, line_fs_preread
@@ -688,6 +688,7 @@ long_entry:
     ; 读数看到的都是修好那份盘；放在后面，前面几条会先撞上缺的那一份，而它们的红与
     ; 保护这一块无关，只是被时序牵连。一条因为别的原因变红的判据比没有判据更费人。
     call run_core_test
+    call run_sign_test
     call run_ata_test
     call run_fs_test
     call run_fs_open
@@ -3800,6 +3801,281 @@ fnv1a:
     ret
 
 ; ======================================================================
+; SHA-256
+; ======================================================================
+;
+; 为什么它在这一块里：这一层要防的是「有人改了并把校验和也重算了」，所以哈希必须是
+; 抗碰撞的那一种。FNV-1a 连碰撞都不防 —— 它为「一个字节变了就报」设计的，而那是另一
+; 件事。S.M.Y.T. 那一侧对没有内嵌签名位置的格式用的也是 SHA-256 清单（design/SIGN.txt
+; 第一节），所以这里用同一个函数，不是另立一套。
+;
+; rdi = 数据，rcx = 字节数。出 [sha_out] 的 32 字节，大端。
+sha256:
+    push rbx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    ; 方向标志要在这里清一次。下面两次 rep（stosd 清补齐区、movsb 拷剩下的字节）
+    ; 都按 DF 走，而 DF 不是自己的：别人设过它，自己没清，症状是补齐区**反向**被填 ——
+    ; 于是哈希完全不对，而「不对」这个症状与「算法写错」分不开。
+    ; fs_write_file 里也踩过同一处。
+    cld
+    mov [sha_ptr], rdi
+    mov [sha_len], rcx
+    mov dword [sha_h + 0],  0x6a09e667
+    mov dword [sha_h + 4],  0xbb67ae85
+    mov dword [sha_h + 8],  0x3c6ef372
+    mov dword [sha_h + 12], 0xa54ff53a
+    mov dword [sha_h + 16], 0x510e527f
+    mov dword [sha_h + 20], 0x9b05688c
+    mov dword [sha_h + 24], 0x1f83d9ab
+    mov dword [sha_h + 28], 0x5be0cd19
+    xor r8, r8                     ; 已经处理了多少字节
+.full:
+    mov rax, [sha_len]
+    sub rax, r8
+    cmp rax, 64
+    jb .tail
+    mov rdi, [sha_ptr]
+    add rdi, r8
+    call sha256_block
+    add r8, 64
+    jmp .full
+.tail:
+    lea rdi, [sha_pad]
+    xor eax, eax
+    mov ecx, 32                    ; 128 字节 = 32 个 dword
+    rep stosd
+    mov rsi, [sha_ptr]
+    add rsi, r8
+    mov rcx, [sha_len]
+    sub rcx, r8
+    mov r9, rcx                    ; 剩下几个字节
+    lea rdi, [sha_pad]
+    rep movsb
+    mov byte [sha_pad + r9], 0x80
+    mov rax, [sha_len]
+    shl rax, 3                     ; 总长按位算
+    bswap rax                      ; 末尾那八字节是大端
+    cmp r9, 56
+    jb .one
+    ; 剩下 56 到 63 字节：长度装不进同一块，所以要补两块
+    mov [sha_pad + 120], rax
+    lea rdi, [sha_pad]
+    call sha256_block
+    lea rdi, [sha_pad + 64]
+    call sha256_block
+    jmp .out
+.one:
+    mov [sha_pad + 56], rax
+    lea rdi, [sha_pad]
+    call sha256_block
+.out:
+    ; 加回初值。SHA-256 的最后一步是 h0..h7 与初始值逐个相加 —— 漏掉它，六十四轮全对
+    ; 而摘要全错，那个症状与「压缩函数算错」完全分不开。这一处就是这样错了一次：
+    ; 前两轮的中间值与主机一模一样，而最后的 32 字节一个字也不对。
+    mov eax, [sha_h + 0]
+    add eax, 0x6a09e667
+    mov [sha_h + 0], eax
+    mov eax, [sha_h + 4]
+    add eax, 0xbb67ae85
+    mov [sha_h + 4], eax
+    mov eax, [sha_h + 8]
+    add eax, 0x3c6ef372
+    mov [sha_h + 8], eax
+    mov eax, [sha_h + 12]
+    add eax, 0xa54ff53a
+    mov [sha_h + 12], eax
+    mov eax, [sha_h + 16]
+    add eax, 0x510e527f
+    mov [sha_h + 16], eax
+    mov eax, [sha_h + 20]
+    add eax, 0x9b05688c
+    mov [sha_h + 20], eax
+    mov eax, [sha_h + 24]
+    add eax, 0x1f83d9ab
+    mov [sha_h + 24], eax
+    mov eax, [sha_h + 28]
+    add eax, 0x5be0cd19
+    mov [sha_h + 28], eax
+    lea rsi, [sha_h]
+    lea rdi, [sha_out]
+    mov ecx, 8
+.emit:
+    mov eax, [rsi]
+    bswap eax
+    mov [rdi], eax
+    add rsi, 4
+    add rdi, 4
+    dec ecx
+    jnz .emit
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+
+; 一个 64 字节块。rdi = 块地址。
+;
+; 逻辑函数一律就地展开，不跳小函数：那一个小跳会把 rcx（轮次）用掉，而它是整个循环里
+; 唯一不能丢的东西。踩过一次同类 —— puts64 里的 lodsb 改 al 而 al 是循环变量。
+sha256_block:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    ; W[0..15]：从大端读进来
+    xor ecx, ecx
+.load:
+    mov eax, [rdi + rcx * 4]
+    bswap eax
+    mov [sha_w + rcx * 4], eax
+    inc ecx
+    cmp ecx, 16
+    jb .load
+    ; W[16..63] = σ1(W[t-2]) + W[t-7] + σ0(W[t-15]) + W[t-16]
+    mov ecx, 16
+.expand:
+    mov eax, [sha_w + rcx * 4 - 8]     ; W[t-2]
+    mov ebx, eax
+    ror eax, 17
+    ror ebx, 19
+    xor eax, ebx
+    mov ebx, [sha_w + rcx * 4 - 8]
+    shr ebx, 10
+    xor eax, ebx                       ; σ1
+    add eax, [sha_w + rcx * 4 - 28]    ; + W[t-7]
+    mov ebx, [sha_w + rcx * 4 - 60]    ; W[t-15]
+    mov edx, ebx
+    ror ebx, 7
+    ror edx, 18
+    xor ebx, edx
+    mov edx, [sha_w + rcx * 4 - 60]
+    shr edx, 3
+    xor ebx, edx                       ; σ0
+    add eax, ebx
+    add eax, [sha_w + rcx * 4 - 64]    ; + W[t-16]
+    mov [sha_w + rcx * 4], eax
+    inc ecx
+    cmp ecx, 64
+    jb .expand
+    ; 六十四轮
+    xor ecx, ecx
+.round:
+    ; T1 = h + Σ1(e) + Ch(e,f,g) + K[t] + W[t]
+    mov eax, [sha_h + 16]              ; e
+    mov ebx, eax
+    ror eax, 6
+    ror ebx, 11
+    xor eax, ebx
+    mov ebx, [sha_h + 16]
+    mov edx, ebx
+    ror ebx, 25
+    xor eax, ebx                       ; Σ1(e)
+    mov ebx, [sha_h + 16]
+    and ebx, [sha_h + 20]              ; e & f
+    mov edx, [sha_h + 16]
+    not edx
+    and edx, [sha_h + 24]              ; ~e & g
+    xor ebx, edx                       ; Ch
+    add eax, ebx
+    add eax, [sha_h + 28]              ; + h
+    add eax, [sha_k + rcx * 4]
+    add eax, [sha_w + rcx * 4]
+    mov r8d, eax                       ; T1
+    ; T2 = Σ0(a) + Maj(a,b,c)
+    mov eax, [sha_h + 0]
+    mov ebx, eax
+    ror eax, 2
+    ror ebx, 13
+    xor eax, ebx
+    mov ebx, [sha_h + 0]
+    mov edx, ebx
+    ror ebx, 22
+    xor eax, ebx                       ; Σ0(a)
+    mov ebx, [sha_h + 0]
+    and ebx, [sha_h + 4]
+    mov edx, [sha_h + 0]
+    and edx, [sha_h + 8]
+    xor ebx, edx
+    mov edx, [sha_h + 4]
+    and edx, [sha_h + 8]
+    xor ebx, edx                       ; Maj
+    add eax, ebx
+    mov r9d, eax                       ; T2
+    ; 移位。x86 没有内存到内存的 mov，所以一律经由 eax —— 而 T1/T2 已经在 r8d/r9d 里，
+    ; 所以这两个寄存器在这一段里不能碰。
+    mov eax, [sha_h + 24]
+    mov [sha_h + 28], eax              ; h = g
+    mov eax, [sha_h + 20]
+    mov [sha_h + 24], eax              ; g = f
+    mov eax, [sha_h + 16]
+    mov [sha_h + 20], eax              ; f = e
+    mov eax, [sha_h + 12]
+    add eax, r8d
+    mov [sha_h + 16], eax              ; e = d + T1
+    mov eax, [sha_h + 8]
+    mov [sha_h + 12], eax              ; d = c
+    mov eax, [sha_h + 4]
+    mov [sha_h + 8], eax               ; c = b
+    mov eax, [sha_h + 0]
+    mov [sha_h + 4], eax               ; b = a
+    mov eax, r8d
+    add eax, r9d
+    mov [sha_h + 0], eax               ; a = T1 + T2
+    inc ecx
+    cmp ecx, 64
+    jb .round
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; rdi = 字节串，rcx = 字节数。每字节两个十六进制字符（大写）。
+;
+; 判据用得上它：一个哈希对不对，只能与另一个地方算出来的同一个哈希比 —— 而那个地方
+; 是主机上的 node。打十进制太短、打 base64 太绕，十六进制是唯一能一眼对照的形状。
+put_hex_bytes:
+    push rsi
+    push rdi
+    push rcx
+.put:
+    test rcx, rcx
+    jz .done
+    movzx eax, byte [rdi]
+    push rax
+    shr eax, 4
+    call put_hex_digit
+    pop rax
+    and eax, 0x0F
+    call put_hex_digit
+    inc rdi
+    dec rcx
+    jmp .put
+.done:
+    pop rcx
+    pop rdi
+    pop rsi
+    ret
+put_hex_digit:
+    cmp al, 10
+    jb .num
+    add al, 'A' - 10
+    jmp putc64
+.num:
+    add al, '0'
+    jmp putc64
+
+; ======================================================================
 ; 系统保护的第二层：核心清单与校验和
 ; ======================================================================
 ;
@@ -4126,6 +4402,136 @@ run_repair_patch:
     ret
 .nopatch:
     mov rsi, line_repair_nopatch
+    call puts64
+    ret
+
+; ======================================================================
+; OnlySign 的第二环：SHA-256 清单
+; ======================================================================
+;
+; 设计在 design/SIGN.txt。它回答的问题与 run_core_test 不同：那一条说「文件与清单是否
+; 一致」，这一条说「清单自己有没有被动过」。
+;
+; 它唯一的理由是这个场景：有人改了盘上的 hello.txt，**并且**把 core.bin 里那一条的
+; FNV-1a 也重算对了。run_core_test 看到的是它自己那份清单，于是它报 3 0 —— 绿的。
+; 而这一条按 sign.bin 里那份 SHA-256 比，红，并且点出名字。
+; build 的 --forge 造的正是这个处境，而它是这一条唯一的验红手段。
+;
+; 三条读数分开：ok（逐项一致）、bad（点出名字）、nosign（盘上没有 sign.bin）。
+; 第三条不是「验过了」，是「没东西可验」—— 那两件事在串口上必须不一样，否则一台
+; 没有清单的机器与一台清单全对的机器长得一样。
+run_sign_test:
+    mov rdi, fs_sign_path
+    call fs_open_path
+    test rax, rax
+    jz .nosign
+    mov rdi, [last_addr]
+    mov rsi, sign_magic
+    mov rcx, 8
+    call bytes_eq
+    jc .nomagic
+    mov rsi, [last_addr]
+    mov eax, [rsi + 12]            ; 项数
+    mov [sign_left], rax
+    mov qword [sign_n], 0
+    mov qword [sign_bad], 0
+    mov qword [sign_dbg], 0
+    add rsi, 16                    ; 第一项
+    mov [sign_ptr], rsi
+.one:
+    cmp qword [sign_left], 0
+    je .report
+    mov rsi, [sign_ptr]
+    movzx ecx, byte [rsi]          ; 名字长（ASCII 字节数）
+    mov [sign_namelen], rcx
+    inc rsi
+    ; 拼路径 α:/名字。这一段的游标要一次推到位：下面 fs_open_path 会覆盖 last_addr。
+    lea rdi, [sign_path]
+    mov word [rdi], 0x03B1
+    mov word [rdi + 2], 0x003A
+    mov word [rdi + 4], 0x002F
+    add rdi, 6
+    xor rdx, rdx
+.copy:
+    cmp rdx, [sign_namelen]
+    jae .copied
+    movzx eax, byte [rsi + rdx]
+    mov [rdi + rdx * 2], ax
+    inc rdx
+    jmp .copy
+.copied:
+    mov word [rdi + rdx * 2], 0
+    lea rax, [rsi + rdx]
+    mov [sign_hash_ptr], rax       ; 32 字节 SHA-256 就在名字之后
+    lea rax, [rsi + rdx + 32]
+    mov [sign_ptr], rax
+    dec qword [sign_left]
+    ; 算盘上那份的 SHA-256，与清单里的比
+    lea rdi, [sign_path]
+    call fs_open_path
+    test rax, rax
+    jz .missing
+    mov rdi, [last_addr]
+    mov rcx, rbx
+    call sha256
+    ; 第一项的摘要打一次。判据要与主机上 node 算的同一个值比，而串口是唯一能把它拿出来
+    ; 的地方 —— 一个算错的哈希只会说「不对」，说不出「错成什么样」，而后者才定位得了。
+    cmp qword [sign_dbg], 0
+    jne .nodb
+    mov qword [sign_dbg], 1
+    mov rsi, line_sign_sha
+    call puts64
+    lea rdi, [sha_out]
+    mov rcx, 32
+    call put_hex_bytes
+    call put_nl64
+.nodb:
+    lea rdi, [sha_out]
+    mov rsi, [sign_hash_ptr]
+    mov rcx, 32
+    call bytes_eq
+    jc .mismatch
+    inc qword [sign_n]
+    jmp .one
+.mismatch:
+    inc qword [sign_bad]
+    mov rsi, line_sign_bad
+    call puts64
+    lea rdi, [sign_path + 6]
+    call put_utf16_ascii
+    call put_nl64
+    jmp .one
+.missing:
+    inc qword [sign_bad]
+    mov rsi, line_sign_bad
+    call puts64
+    lea rdi, [sign_path + 6]
+    call put_utf16_ascii
+    call put_nl64
+    jmp .one
+.report:
+    cmp qword [sign_bad], 0
+    je .clean
+    ; 名字已经由 bad 那几行点过了，这里只报坏几条 —— 「哪一条」与「几条」是两件事。
+    mov rsi, line_sign_bad_n
+    call puts64
+    mov rax, [sign_bad]
+    call put_num64
+    call put_nl64
+    ret
+.clean:
+    mov rsi, line_sign_ok
+    call puts64
+    mov rax, [sign_n]
+    call put_num64
+    call put_nl64
+    ret
+.nomagic:
+    mov rsi, line_sign_nomagic
+    call puts64
+    ret
+.nosign:
+    mov rsi, line_sign_nosign
     call puts64
     ret
 
@@ -8249,6 +8655,54 @@ pat_len: dq 0
 rep_fixed: dq 0
 rep_verified: dq 0
 rep_refused: dq 0
+
+; ---- OnlySign 的第二环：SHA-256 清单（design/SIGN.txt）----
+;
+; 三条读数分开：ok（逐项一致）、bad（点出名字）、nosign（盘上没有 sign.bin）。
+; 第三条不是「验过了」，是「没东西可验」—— 那两件事在串口上必须不一样。
+sign_magic: db "YUNOSIG", 0
+fs_sign_path: dw 0x03B1, 0x003A, 0x002F, 0x0073, 0x0069, 0x0067, 0x006E, 0x002E, 0x0062, 0x0069, 0x006E, 0
+sign_path: times 128 dw 0
+sign_ptr: dq 0
+sign_left: dq 0
+sign_namelen: dq 0
+sign_hash_ptr: dq 0
+sign_n: dq 0
+sign_bad: dq 0
+sign_dbg: dq 0
+line_sign_ok: db "Yunooka: event=onlysign ok items=", 0
+line_sign_sha: db "Yunooka: event=onlysign sha256=", 0
+line_sign_bad: db "Yunooka: event=onlysign bad name=", 0
+line_sign_bad_n: db "Yunooka: event=onlysign badcount=", 0
+line_sign_nosign: db "Yunooka: event=onlysign nosign", 13, 10, 0
+line_sign_nomagic: db "Yunooka: event=onlysign nomagic", 13, 10, 0
+; SHA-256 的工作区。a..h 就放在 sha_h 里原地更新，W[0..63] 放 sha_w。
+;
+; 为什么全部用内存而不是寄存器：寄存器分配的错会表现为「哈希不对」，而那个症状与
+; 「算法写错」分不开。内存版只有一种错法，而慢三个文件加起来不到一百字节，不是问题。
+sha_ptr: dq 0
+sha_len: dq 0
+sha_h: times 8 dd 0
+sha_w: times 64 dd 0
+sha_pad: times 128 db 0
+sha_out: times 32 db 0
+sha_k:
+    dd 0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5
+    dd 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5
+    dd 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3
+    dd 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174
+    dd 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc
+    dd 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da
+    dd 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7
+    dd 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967
+    dd 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13
+    dd 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85
+    dd 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3
+    dd 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070
+    dd 0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5
+    dd 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3
+    dd 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208
+    dd 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
 ; 家庭组第一步的那几样。
 fs_share_path: dw 0x03B1, 0x003A, 0x002F, 0x0064, 0x006F, 0x0063, 0x0073, 0  ; α:/docs
 ; 第二块盘上的一个文件与它的盘符 —— 共享与边界见面那一条用的。
