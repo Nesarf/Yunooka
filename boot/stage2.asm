@@ -4934,6 +4934,32 @@ ata_identify:
     jnz .busy
     jmp .retry
 .idle:
+    ; 等 DRDY 起来，并在每次读状态之后补 400ns。
+    ;
+    ; 这两件是 ATA 规范里明写的，而第一版都没做：第一版只查 BSY 就往下走，于是可能在
+    ; 「盘还没就绪」的时候把命令送进去。读 0x3F6（alt status）四次是那个 400ns 的常用近似 ——
+    ; 它读的是同一组寄存器，但不会清中断，所以可以随便读。
+    ;
+    ; 读回来一页零这件事，先怀疑这两处，再怀疑盘 —— 因为「盘不答」是一个代价很大的结论，
+    ; 它会让一条目标被挂起来；而这两处是可以改的。
+    mov r10, 200000
+.drdy:
+    mov dx, 0x3F6
+    in al, dx
+    in al, dx
+    in al, dx
+    in al, dx
+    mov dx, 0x1F7
+    in al, dx
+    test al, 0x80
+    jnz .drdy_dec
+    test al, 0x40                  ; DRDY
+    jnz .drdy_ok
+.drdy_dec:
+    dec r10
+    jnz .drdy
+    jmp .retry
+.drdy_ok:
     mov dx, 0x1F6
     mov al, 0xE0                   ; 主盘、LBA 模式
     out dx, al
