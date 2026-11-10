@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 64
+stage2_sectors equ 66
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -35,6 +35,17 @@ seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 
 ; 少一个的症状是「甲盘条目数与索引不一致」：层三列得出二十条，而索引在十六条那里
 ; 截断了 —— 那个诊断是对的，因为截断是这一层自己做的决定。
 index_cap      equ 24
+
+; 信箱盘一次读几个扇区。第 0 个是头（YUNOMBX：主机送进来的那一行），第 1 个往后
+; 是补丁包（YUNOPAT：补完界面拿来修的那一份字节）。
+;
+; 四个而不是一个，因为补丁包要与头住在同一次读里 —— 长模式下的 ATA PIO 只碰过主盘，
+; 信箱是实模式读进来的，多读三个扇区就没有第二套读盘代码要维护。0x50000 到 0x50800
+; 落在同一个 64 KB DMA 段内（0x50000 正好是 64 KB 的倍数），不跨边界。
+;
+; 补丁容量 = (mailbox_sectors - 1) * 512 = 1536 字节，build.mjs 会核对它盖得住
+; 它自己写出的补丁包。改这个数要同时看那一处。
+mailbox_sectors equ 4
 
 ; ======================================================================
 ; 一、实模式：读种子、验魔数
@@ -193,13 +204,20 @@ stage2:
     ; 三条读数分开，因为它们指向三种不同的坏法：no mailbox 是盘都读不到（没挂上、或盘号
     ; 不对），mailbox bad 是读到了但魔数不对（主机没写、或写到了别的偏移），
     ; mailbox ok 才是这条通道成立。
+    ; 一次读四个扇区：头（YUNOMBX）在前 512 字节，补丁包（YUNOPAT）从第 512 字节起。
+    ; 四个扇区落在同一个 64 KB 段内（0x50000 正好是那一段的起点），所以不跨 int 0x13
+    ; 那条 DMA 边界 —— 那条界在引导扇区那一层已经咬过一次，主体原先 64 扇区的上限就是它。
+    ;
+    ; 曾经有一次运行死在这一段之后：串口停在「protected mode ok」的第一个字后面，
+    ; 既不报错也不重启；而同样的代码在两次重跑里都正常跑完全程。所以那一次当成偶发
+    ; 记着，不当成结论。形状留在这里，证据留在 design/GUARD.txt 的后记里。
     mov al, [drive]
     mov [mbox_save], al
     mov byte [drive], 0x81
     mov dword [dap_lba], 0
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x5000
-    mov word [dap_count], 1
+    mov word [dap_count], mailbox_sectors
     call read_batch
     setc al
     mov [mbox_carry], al
@@ -663,6 +681,13 @@ long_entry:
     ; 后来查到根因不在 PIO —— 是长模式下一直开着中断，BIOS 的 PIC 仍在送定时器中断，
     ; 而 IDT 里 32 号往后全是 0。long_entry 加了一句 cli 之后，三趟连着都是 same 512。
     ; 所以它回到主链上，无条件跑。
+    ; 自查自修放在一切文件读取之前。
+    ;
+    ; 这不只是顺序偏好。修补真的要写文件系统，而 fs_write_file 是把新条目追加到目录
+    ; 末尾的 —— 于是「修好之后」与「修好之前」的目录顺序不同。放在前面，后面每一条
+    ; 读数看到的都是修好那份盘；放在后面，前面几条会先撞上缺的那一份，而它们的红与
+    ; 保护这一块无关，只是被时序牵连。一条因为别的原因变红的判据比没有判据更费人。
+    call run_core_test
     call run_ata_test
     call run_fs_test
     call run_fs_open
@@ -670,7 +695,6 @@ long_entry:
     call run_fs_open3
     call run_fs_write
     call run_guard_test
-    call run_core_test
     call run_share_test
     call run_home_test
     call run_gate_blocked
@@ -3868,14 +3892,240 @@ run_core_test:
     mov rax, [core_bad]
     call put_num64
     call put_nl64
-    ; 有缺就进补完界面。骨架只接上「知道了」与「说得出」—— 真正去修是下一块砖。
+    ; 有缺先试着自己修，修不了才摆补完界面。
+    ;
+    ; 顺序本身就是判据：能修的那一趟不该看见那个界面。它回答的是「现在修不了」，
+    ; 而一台能自己修好的机器不该被问那个问题。
     cmp qword [core_bad], 0
     je .clean
+    call run_repair_patch
+    cmp qword [core_bad], 0
+    je .repaired
     call run_repair_screen
+    jmp .clean
+.repaired:
+    ; 修好了，重新数一遍再报一次。
+    ;
+    ; 上面那一行说的是修补**之前**的状态（缺一条），而判据要的是现在的状态。两行都
+    ; 留在串口上，读的人才看得出来「修之前是几条、修之后是几条」—— 只报后一行的话，
+    ; 「本来就全对」与「修好了」在串口上长得一样。
+    mov rsi, line_core_ok
+    call puts64
+    mov rax, [core_n]
+    call put_num64
+    mov al, ' '
+    call putc64
+    mov rax, [core_bad]
+    call put_num64
+    call put_nl64
 .clean:
     ret
 .nomanifest:
     mov rsi, line_core_nocore
+    call puts64
+    ret
+
+; ======================================================================
+; 补丁包：按名字找一项
+; ======================================================================
+;
+; 形状（YUNOPAT，从信箱盘第 1 个扇区起）：魔数八字节、u32 项数；然后每项
+; u16 名字长（码元数）、名字 UTF-16、u32 字节数、内容。项与项之间不补齐 ——
+; 补位是给「按下标取数组」的实现省事的，而这里从头到尾是顺读。
+;
+; 为什么按名字找、不按清单的顺序对：补丁只该带「真的缺了的那几条」，而清单的顺序与
+; 补丁的顺序不该被绑在一起。绑了之后清单里加一项就会让补丁那一份错位，而错位的症状
+; 是「补丁里有它，写进去的却是别人的字节」—— 那是把一份好的东西悄悄换成坏的。
+;
+; rdi = 要找的名字（UTF-16，0 码元结尾）。出 rax = 1 找到 / 0 没有。
+;    找到时 [pat_data] 是内容地址、[pat_len] 是字节数。
+patch_find:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r12, rdi
+    mov r13, 0x5020C               ; 第一个项：0x50200 + 8（魔数）+ 4（项数）
+    mov r14d, [0x50200 + 8]        ; 项数
+.one:
+    test r14, r14
+    jz .miss
+    cmp r13, 0x50800               ; 读进来的上界。越界就当没有 —— 补丁写到读进来之后再
+    jae .miss                      ; 的那些字节是别的什么，不是这一份补丁的项
+    movzx r15d, word [r13]         ; 这一项的名字长
+    lea rbx, [r13 + 2]             ; 名字起点
+    xor rdx, rdx
+.cmp:
+    cmp rdx, r15
+    jae .tail
+    mov ax, [rbx + rdx * 2]
+    cmp ax, [r12 + rdx * 2]
+    jne .next
+    inc rdx
+    jmp .cmp
+.tail:
+    cmp word [r12 + r15 * 2], 0    ; 要找的名字也要在同一处结束，才算同名
+    jne .next
+    lea rax, [rbx + r15 * 2]
+    mov ecx, [rax]                 ; 字节数
+    mov [pat_len], rcx
+    add rax, 4
+    mov [pat_data], rax
+    mov rax, 1
+    jmp .done
+.next:
+    lea r13, [rbx + r15 * 2]
+    mov eax, [r13]                 ; 跳过这一项的内容
+    lea r13, [r13 + 4 + rax]
+    dec r14
+    jmp .one
+.miss:
+    xor eax, eax
+.done:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; ======================================================================
+; 修补：从补丁包把缺的那几条搬回来
+; ======================================================================
+;
+; 位置很要紧：这一步在「查到有缺」之后、在补完界面之前。也就是说 —— 能修的时候
+; 不该看见补完界面。那个界面是「修不了」的地方，不是每次启动都路过的地方。
+; 放在这里，两条判据就自然分开了：有补丁的那一趟没有 event=guard.entry，
+; 没有补丁的那一趟有。
+;
+; 三道门，每一道都必要：
+;   一、补丁里要有这一条（按名字找）。没有就跳过 —— 一条补丁修一条，不猜。
+;   二、补丁给的那份字节算出的哈希要与清单里记的一致。这是整块砖的门：补丁包不是
+;       「随便什么字节都能写进去」，它只能把文件恢复成清单记的那一份。少了它，
+;       这条通道就成了「谁写得了信箱盘，谁就改得动核心文件」。
+;   三、写完再从盘上读回来重算一次。读不到或对不上都不算修好 —— 报 fixed 而不报
+;       verified，就是把「写了」当成了「写对了」，而那正是这一层要防的东西。
+;
+; 进的时候 [core_bad] 非零，出来的时候它可能变成零 —— 那是「修好了」唯一的凭据。
+run_repair_patch:
+    mov rdi, 0x50200
+    mov rsi, pat_magic
+    mov rcx, 8
+    call bytes_eq
+    jc .nopatch                    ; 魔数不对 = 这一趟没带补丁。不是错，只是修不了
+    ; 清单重新读一遍。run_core_test 的游标已经走到头了，复用它会读到空清单，
+    ; 于是「一条都没缺」—— 那正好是这一层最怕的那种假绿。
+    mov rdi, fs_core_path
+    call fs_open_path
+    test rax, rax
+    jz .nopatch
+    mov rsi, [last_addr]
+    mov eax, [rsi]
+    mov [core_left], rax
+    add rsi, 4
+    mov [core_ptr], rsi
+    mov qword [rep_fixed], 0
+    mov qword [rep_verified], 0
+    mov qword [rep_refused], 0
+.one:
+    cmp qword [core_left], 0
+    je .report
+    mov rsi, [core_ptr]
+    movzx ecx, byte [rsi]          ; 名字长（ASCII 字节数）
+    mov [core_namelen], rcx
+    inc rsi
+    lea rdi, [core_path]
+    mov word [rdi], 0x03B1
+    mov word [rdi + 2], 0x003A
+    mov word [rdi + 4], 0x002F
+    add rdi, 6
+    xor rdx, rdx
+.copy:
+    cmp rdx, [core_namelen]
+    jae .copied
+    movzx eax, byte [rsi + rdx]
+    mov [rdi + rdx * 2], ax
+    inc rdx
+    jmp .copy
+.copied:
+    mov word [rdi + rdx * 2], 0
+    ; 游标一次推到位：下面那次 fs_open_path 会把 last_addr 覆盖掉。
+    lea rax, [rsi + rdx]
+    mov eax, [rax]
+    mov [core_hash], rax
+    lea rax, [rsi + rdx + 4]
+    mov [core_ptr], rax
+    dec qword [core_left]
+    ; 这一项现在好不好？好就跳过 —— 补丁不覆盖好的那一份。
+    lea rdi, [core_path]
+    call fs_open_path
+    test rax, rax
+    jz .try
+    mov rdi, [last_addr]
+    mov rcx, rbx
+    call fnv1a
+    cmp eax, dword [core_hash]
+    je .one
+.try:
+    lea rdi, [core_path + 6]       ; 跳过 α:/ 三个码元：名字部分
+    call patch_find
+    test rax, rax
+    jz .one                        ; 补丁里没有这一条：修不了，留给补完界面说
+    ; 第二道门：补丁给的字节与清单要一致。不一致就拒绝，并且说得出是哪一个名字。
+    mov rdi, [pat_data]
+    mov rcx, [pat_len]
+    call fnv1a
+    cmp eax, dword [core_hash]
+    jne .refuse
+    lea rdi, [core_path + 6]
+    mov rsi, [pat_data]
+    mov rcx, [pat_len]
+    call fs_write_file
+    test rax, rax
+    jz .one                        ; 写不进去（同名的带只读位，或目录满了）
+    ; 第三道门：从盘上读回来再算一次。它与 run_core_test 走同一条路
+    ; （fs_open_path + fnv1a），所以证的是「现在这一份与清单一致」，
+    ; 而不是「我刚拷进去的东西我记得是对的」。
+    lea rdi, [core_path]
+    call fs_open_path
+    test rax, rax
+    jz .one
+    mov rdi, [last_addr]
+    mov rcx, rbx
+    call fnv1a
+    cmp eax, dword [core_hash]
+    jne .one
+    inc qword [rep_verified]
+    inc qword [rep_fixed]
+    dec qword [core_bad]           ; 这一条不再是「缺的」
+    inc qword [core_n]
+    jmp .one
+.refuse:
+    inc qword [rep_refused]
+    mov rsi, line_repair_refused
+    call puts64
+    lea rdi, [core_path + 6]
+    call put_utf16_ascii
+    call put_nl64
+    jmp .one
+.report:
+    mov rsi, line_repair_fixed
+    call puts64
+    mov rax, [rep_fixed]
+    call put_num64
+    mov rsi, line_repair_verified
+    call puts64
+    mov rax, [rep_verified]
+    call put_num64
+    mov rsi, line_repair_refused_n
+    call puts64
+    mov rax, [rep_refused]
+    call put_num64
+    call put_nl64
+    ret
+.nopatch:
+    mov rsi, line_repair_nopatch
     call puts64
     ret
 
@@ -7977,6 +8227,28 @@ line_core_nocore: db "Yunooka: guard core no manifest", 13, 10, 0
 ; 那条「新写的事件行」的第一个样本。旧的散文不动（判据已经与它们绑在一起）。
 line_repair_entry: db "Yunooka: event=guard.entry bad=", 0
 line_repair_where: db " repair=mailbox version=1", 13, 10, 0
+; 修补那一层的事件行，三行都是 event= 开头、键值对、顺序固定（design/GUARD.txt 第六节）。
+;
+;   event=guard.nopatch source=none                    这一趟没带补丁
+;   event=guard.repair refused name=X                  补丁里有 X，但内容与清单不符 —— 拒绝并点名
+;   event=guard.repair fixed=N verified=M refused=K    收尾的三个数
+;
+; 三个数分开报，因为它们指向三种不同的处境：写了但没验上、验上了但没写、以及补丁里
+; 有那一项却被校验挡下来。只报一个的话，「写了」与「写对了」在串口上长得一样，
+; 而这正是 fs_write_file 那一层从来分不清的那件事。
+line_repair_fixed: db "Yunooka: event=guard.repair fixed=", 0
+line_repair_verified: db " verified=", 0
+line_repair_refused_n: db " refused=", 0
+line_repair_refused: db "Yunooka: event=guard.repair refused name=", 0
+line_repair_nopatch: db "Yunooka: event=guard.nopatch source=none", 13, 10, 0
+; 补丁包的魔数。它与 tools/build.mjs 里那句 "YUNOPAT\0" 是同一份约定 —— 两处
+; 各写一遍是可以接受的，因为它们分别处在「造」与「认」两侧；build 会核对这一行。
+pat_magic: db "YUNOPAT", 0
+pat_data: dq 0
+pat_len: dq 0
+rep_fixed: dq 0
+rep_verified: dq 0
+rep_refused: dq 0
 ; 家庭组第一步的那几样。
 fs_share_path: dw 0x03B1, 0x003A, 0x002F, 0x0064, 0x006F, 0x0063, 0x0073, 0  ; α:/docs
 ; 第二块盘上的一个文件与它的盘符 —— 共享与边界见面那一条用的。

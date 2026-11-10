@@ -468,6 +468,45 @@ const 条目 = (buf, at, 名字, 类型, 起始, 长度) => {
   return 写条目(buf, at, 名字, 类型, 起始, 长度);
 };
 
+// ---- 三·三·一、补丁包：被落下的那一份，装成客人机能读的形状 ----
+//
+// 补完界面要能真的修，就必须有「该修成什么样」的那一份字节。这一份不能由客人机自己造
+// （它正是缺的那一侧），也不该由 run.mjs 另抄一遍（两份内容会分家，而分家的那一天
+// 「补丁对不上清单」与「补丁抄错了」会看起来一模一样）。所以它从 build 这一侧出，
+// 来源就是上面那份 核心项 —— 与清单里算哈希用的是同一份字节。
+//
+// 格式 YUNOPAT：魔数八字节、u32 项数；然后每项 u16 名字长、名字 UTF-16 码元、
+// u32 字节数、内容。魔数与 stage2.asm 的 pat_magic 同源，改一处就要改两处。
+//
+// 没有 --drop 时不留这个文件。上一趟留下的那份会让「没有补丁」那一条判据假绿 ——
+// 而那一趟验的恰恰是「没有补丁时进补完界面」。
+const 补丁路径 = path.join(建, "patch-drop.bin");
+if (落名) {
+  const 补丁项 = 核心项.filter(([名]) => 名 === 落名);
+  if (补丁项.length === 0)
+    失败("--drop " + 落名 + " 不在核心清单里（清单是 " + 核心项.map(([n]) => n).join(" ") + "）");
+  const 头 = Buffer.alloc(12);
+  头.write("YUNOPAT\0", 0, "latin1");
+  头.writeUInt32LE(补丁项.length, 8);
+  const 块 = [头];
+  for (const [名, 内容] of 补丁项) {
+    const 列 = Buffer.alloc(2 + 名.length * 2 + 4);
+    列.writeUInt16LE(名.length, 0);
+    for (let i = 0; i < 名.length; i++) 列.writeUInt16LE(名.charCodeAt(i), 2 + i * 2);
+    列.writeUInt32LE(内容.length, 2 + 名.length * 2);
+    块.push(列, Buffer.from(内容));
+  }
+  const 补丁 = Buffer.concat(块);
+  if (补丁.length > 1536)
+    失败("补丁包 " + 补丁.length + " 字节，超过信箱给补丁的那三个扇区（1536）");
+  fs.writeFileSync(补丁路径, 补丁);
+  console.log("补丁包    " + 补丁路径 + "（" + 补丁.length + " 字节，" + 补丁项.length
+    + " 项；run.mjs 会把它写进信箱第 1 个扇区，补完界面拿它来修）");
+} else if (fs.existsSync(补丁路径)) {
+  fs.unlinkSync(补丁路径);
+  console.log("补丁包    没有 --drop，上一趟那份删掉了（留着会让「没有补丁」那一条假绿）");
+}
+
 const 超级块 = Buffer.alloc(512);
 超级块.write("YUNOFS", 0, "latin1");
 超级块.writeUInt16LE(1, 6);                        // 版本
