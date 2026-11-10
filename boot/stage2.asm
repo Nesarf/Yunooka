@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 64
+stage2_sectors equ 62
 seed_lba       equ 1 + stage2_sectors   ; 引导占 1 个扇区，种子紧跟着第二段
 
 ; ======================================================================
@@ -129,7 +129,7 @@ stage2:
     int 0x10
     ; 文件系统的扇区先读进来：超级块、根目录、docs 目录、docs/sub、hello.txt、
     ; note.txt、cmd.txt、repl.txt、math.txt、prog.hmtn、eicar.txt、clean.txt、
-    ; rules.txt、plot.txt、fake.txt —— 一共十六个，从第 1024 号起。
+    ; rules.txt、plot.txt、fake.txt、core.bin —— 一共十七个，从第 1024 号起。
     ;
     ; 这个数曾经是十五，而盘上那时已经有十六份了：fake.txt 落在第 1039 号扇区，
     ; 而预读只盖到 1038。于是 fs_load(1039) 照样算出地址，只是那个地址在预读区之外，
@@ -148,7 +148,7 @@ stage2:
     mov dword [dap_lba], 1024
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x4000
-    mov word [dap_count], 16
+    mov word [dap_count], 17
     call read_batch
     jnc .fs_ready
     mov si, line_fs_preread
@@ -628,6 +628,7 @@ long_entry:
     call run_fs_open3
     call run_fs_write
     call run_guard_test
+    call run_core_test
     call run_share_test
     call run_home_test
     call run_gate_blocked
@@ -3709,6 +3710,128 @@ run_guard_test:
     call puts64
     ret
 
+; FNV-1a 32 位。rdi = 数据，rcx = 字节数，出 eax。
+;
+; 为什么是它而不是 CRC32：一条异或、一条乘法，两条指令的量，不需要表。它不防碰撞，
+; 而这一层要防的不是碰撞，是「文件被改过而没人知道」。
+fnv1a:
+    push rsi
+    push rdx
+    mov eax, 0x811C9DC5
+    mov rsi, rdi
+    xor rdx, rdx
+.loop:
+    cmp rdx, rcx
+    jae .done
+    movzx r10d, byte [rsi + rdx]
+    xor eax, r10d
+    imul eax, eax, 0x01000193
+    inc rdx
+    jmp .loop
+.done:
+    pop rdx
+    pop rsi
+    ret
+
+; ======================================================================
+; 系统保护的第二层：核心清单与校验和
+; ======================================================================
+;
+; 第一层（只读位）在盘上、跟着文件走；这一层在系统里 —— 换一块盘插过来，清单还在。
+; 清单是盘上的一个文件 core.bin，二进制：u32 项数，然后每项 u8 名字长、名字 ASCII、
+; u32 FNV-1a。二进制而不是文本，是因为解析十六进制 ASCII 是白多做一步。
+;
+; 判据两条，而第二条是这一层的全部价值：
+;   一、不改盘时，三项全部对上；
+;   二、把盘上 hello.txt 的首字节翻一位（build --break），而清单仍按原内容算 ——
+;      校验必须红，并且点出是哪一个名字。
+; 少了第二条，一个「永远报 ok」的实现也能过第一条。
+run_core_test:
+    mov rdi, fs_core_path
+    call fs_open_path
+    test rax, rax
+    jz .nomanifest
+    mov rsi, [last_addr]
+    mov eax, [rsi]                 ; 项数
+    mov [core_left], rax
+    add rsi, 4
+    mov [core_ptr], rsi
+    mov qword [core_bad], 0
+    mov qword [core_n], 0
+.one:
+    cmp qword [core_left], 0
+    je .report
+    mov rsi, [core_ptr]
+    movzx ecx, byte [rsi]          ; 名字长（ASCII 字节数）
+    mov [core_namelen], rcx
+    inc rsi
+    ; 拼路径：α:/ 三个码元，然后名字逐字节扩成码元
+    lea rdi, [core_path]
+    mov word [rdi], 0x03B1
+    mov word [rdi + 2], 0x003A
+    mov word [rdi + 4], 0x002F
+    add rdi, 6
+    xor rdx, rdx
+.copy:
+    cmp rdx, [core_namelen]
+    jae .copied
+    movzx eax, byte [rsi + rdx]
+    mov [rdi + rdx * 2], ax
+    inc rdx
+    jmp .copy
+.copied:
+    mov word [rdi + rdx * 2], 0
+    ; 清单项的 hash 在名字之后，而游标要在这里一次推到位 ——
+    ; 下面那个 fs_open_path 会把 last_addr 覆盖掉，拿它当游标就丢了位置。
+    lea rax, [rsi + rdx]
+    mov eax, [rax]
+    mov [core_hash], rax
+    lea rax, [rsi + rdx + 4]
+    mov [core_ptr], rax
+    dec qword [core_left]
+    lea rdi, [core_path]
+    call fs_open_path
+    test rax, rax
+    jz .missing
+    mov rdi, [last_addr]
+    mov rcx, rbx
+    call fnv1a
+    cmp eax, dword [core_hash]
+    jne .mismatch
+    inc qword [core_n]
+    jmp .one
+.mismatch:
+    inc qword [core_bad]
+    mov rsi, line_core_bad
+    call puts64
+    lea rdi, [core_path + 6]       ; 跳过 α:/ 三个码元
+    call put_utf16_ascii
+    call put_nl64
+    jmp .one
+.missing:
+    inc qword [core_bad]
+    mov rsi, line_core_missing
+    call puts64
+    lea rdi, [core_path + 6]
+    call put_utf16_ascii
+    call put_nl64
+    jmp .one
+.report:
+    mov rsi, line_core_ok
+    call puts64
+    mov rax, [core_n]
+    call put_num64
+    mov al, ' '
+    call putc64
+    mov rax, [core_bad]
+    call put_num64
+    call put_nl64
+    ret
+.nomanifest:
+    mov rsi, line_core_nocore
+    call puts64
+    ret
+
 ; 写一次再读回来。判据是读到的内容 —— 「写了」这件事没有别的观测点。
 run_fs_write:
     mov rdi, fs_write_name
@@ -4062,7 +4185,7 @@ map_page_2m:
     mov [0x2000 + r12 * 8], rax
 .have_pd:
     mov rax, [0x2000 + r12 * 8]
-    and rax, 0x000FFFFFFFFFF000    ; PD 的物理地址
+    and rax, -4096                 ; PD 的物理地址（低 12 位是标志位）
     mov rdx, r14                   ; 用保住的那份入参，不是 rdi —— 新建 PD 页那一支里
                                    ; rdi 已经被改成 PD 页的地址了，而这一句如果照旧取 rdi，
                                    ; 写进 PD 的就是「堆的地址」，于是那一段虚拟地址会映到
@@ -4077,6 +4200,10 @@ map_page_2m:
     ret
 
 ; ======================================================================
+%if 0
+; AHCI 那两个探测已经判死，而那一章的读数后来被证明是假的 —— 代码留着（%if 0 关掉，不进二进制），
+; 因为引导扇区一次 int 0x13 不能跨 64 KB，而第二段从 0x7E00 起最多 64 个扇区。
+; map_page_2m 与 pci_write 是通用的，它们不在这一段里。
 ; AHCI：先看见那条不是 0x1F* 的通道
 ; ======================================================================
 ;
@@ -4579,6 +4706,7 @@ run_ahci_identify:
     jmp put_nl64
 
 ; ======================================================================
+%endif
 ; NVMe：AHCI 的 port 侧在这台机器上不通，换一条
 ; ======================================================================
 ;
@@ -7608,6 +7736,19 @@ line_guard_refused: db "Yunooka: guard rewrite refused", 13, 10, 0
 line_guard_other: db "Yunooka: guard other name ok", 13, 10, 0
 line_guard_leaked: db "Yunooka: guard rewrite LEAKED", 13, 10, 0
 line_guard_fail: db "Yunooka: guard setup failed", 13, 10, 0
+; 核心清单那一层。路径是 UTF-16（盘上的名字），而清单是二进制。
+fs_core_path: dw 0x03B1, 0x003A, 0x002F, 0x0063, 0x006F, 0x0072, 0x0065, 0x002E, 0x0062, 0x0069, 0x006E, 0
+core_ptr: dq 0
+core_left: dq 0
+core_namelen: dq 0
+core_hash: dq 0
+core_n: dq 0
+core_bad: dq 0
+core_path: times 128 dw 0
+line_core_ok: db "Yunooka: guard core ", 0
+line_core_bad: db "Yunooka: guard core bad ", 0
+line_core_missing: db "Yunooka: guard core missing ", 0
+line_core_nocore: db "Yunooka: guard core no manifest", 13, 10, 0
 ; 家庭组第一步的那几样。
 fs_share_path: dw 0x03B1, 0x003A, 0x002F, 0x0064, 0x006F, 0x0063, 0x0073, 0  ; α:/docs
 ; 第二块盘上的一个文件与它的盘符 —— 共享与边界见面那一条用的。

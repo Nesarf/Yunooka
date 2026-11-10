@@ -58,7 +58,7 @@ const 找VBox = () => {
 // 「第二段多大」只有这一个数，后面全从它推：上限、种子起始扇区、种子偏移，以及那几行
 // 打印出来的字。以前这几个数散在五处，每长一次都是一回「看着像四个不同的毛病」的返工；
 // 现在是推出来的，改一个数就够了。
-const 第二段扇区 = 64;
+const 第二段扇区 = 62;
 const 第二段上限 = 第二段扇区 * 512;
 const 编一段 = (名字, 源路, 出, 上限 = 512, 清单 = null) => {
   const 参 = ["-f", "bin", 源路, "-o", 出];
@@ -299,6 +299,45 @@ const 程序字节 = 程序包.subarray(0, 位);
 // 不看名字。没有它，「按魔数分析」与「按扩展名猜」在判据上分不开 —— 而分不开的那一对，
 // 恰恰是 Kohane 第六层唯一值得做的东西。
 const 假样本 = 程序字节;
+
+// ---- 三·三、核心清单与校验和 ----
+//
+// 系统文件保护的第二层，设计在 design/GUARD.txt 第二节。第一层是目录条目的只读位 ——
+// 它在盘上、跟着文件走；这一层在系统里：换一块盘插过来，清单还在。
+//
+// 校验和用 FNV-1a：一条异或、一条乘法，两条指令的量，不需要表。它不防碰撞，而这一层
+// 要防的不是碰撞，是「文件被改过而没人知道」。
+//
+// 清单是二进制而不是文本：stage2 要逐项读它，而解析十六进制 ASCII 是白多做一步。
+const fnv1a = (buf) => {
+  let h = 0x811c9dc5;
+  for (const b of buf) {
+    h ^= b;
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h >>> 0;
+};
+// --break 改的是**盘上那份字节**，而清单仍按原内容算 —— 于是启动时校验会红。
+// 这是这一层唯一的验红手段，而它必须改盘、不能改内存里的变量：
+// 判据要能看出「内容与清单不符」，而不是「清单跟着内容一起变了」。
+const 破 = process.argv.includes("--break");
+const 盘上示例 = Buffer.from(示例文件);
+if (破) 盘上示例[0] ^= 0xFF;
+const 核心项 = [
+  ["hello.txt", 示例文件],
+  ["prog.hmtn", 程序字节],
+  ["cmd.txt", 命令文件],
+];
+const 核心清单 = Buffer.alloc(512);
+核心清单.writeUInt32LE(核心项.length, 0);
+let 清位 = 4;
+for (const [名, 内容] of 核心项) {
+  核心清单.writeUInt8(名.length, 清位); 清位 += 1;
+  核心清单.write(名, 清位, "latin1"); 清位 += 名.length;
+  核心清单.writeUInt32LE(fnv1a(内容), 清位); 清位 += 4;
+}
+const 核心清单起 = 假样本起 + 1;
+
 const 示例扇区数 = Math.ceil(示例文件.length / 512) + Math.ceil(子文件.length / 512)
   + Math.ceil(命令文件.length / 512) + Math.ceil(求值输入.length / 512)
   + Math.ceil(数学输入.length / 512) + Math.ceil(程序字节.length / 512)
@@ -306,7 +345,8 @@ const 示例扇区数 = Math.ceil(示例文件.length / 512) + Math.ceil(子文�
   + Math.ceil(含毒样本.length / 512) + Math.ceil(干净样本.length / 512)
   + Math.ceil(规则文件.length / 512)
   + Math.ceil(绘图文件.length / 512)
-  + Math.ceil(假样本.length / 512);
+  + Math.ceil(假样本.length / 512)
+  + 1;                                     // 核心清单自己占一个扇区
 
 const 码元 = (s) => {
   const 列 = [];
@@ -352,7 +392,8 @@ let 根位 = 写条目(根目录, 0, "hello.txt", 0, 数据起, 示例文件.len
 根位 = 写条目(根目录, 根位, "clean.txt", 0, 干净样本起, 干净样本.length);
 根位 = 写条目(根目录, 根位, "rules.txt", 0, 规则起, 规则文件.length);
 根位 = 写条目(根目录, 根位, "plot.txt", 0, 绘图起, 绘图文件.length);
-写条目(根目录, 根位, "fake.txt", 0, 假样本起, 假样本.length);
+根位 = 写条目(根目录, 根位, "fake.txt", 0, 假样本起, 假样本.length);
+写条目(根目录, 根位, "core.bin", 0, 核心清单起, 清位);
 
 const 子目录 = Buffer.alloc(512);
 let 子位 = 写条目(子目录, 0, "note.txt", 0, 数据起 + 1, 子文件.length);
@@ -380,7 +421,7 @@ try {
   fs.writeSync(fd, 超级块, 0, 512, 文件系统起 * 512);
   fs.writeSync(fd, 根目录, 0, 512, 根目录号 * 512);
   fs.writeSync(fd, 子目录, 0, 512, 子目录号 * 512);
-  fs.writeSync(fd, 示例文件, 0, 示例文件.length, 数据起 * 512);
+  fs.writeSync(fd, 盘上示例, 0, 盘上示例.length, 数据起 * 512);
   fs.writeSync(fd, 子文件, 0, 子文件.length, (数据起 + 1) * 512);
   fs.writeSync(fd, 命令文件, 0, 命令文件.length, (数据起 + 2) * 512);
   fs.writeSync(fd, 求值输入, 0, 求值输入.length, (数据起 + 3) * 512);
@@ -393,10 +434,12 @@ try {
   fs.writeSync(fd, 规则文件, 0, 规则文件.length, 规则起 * 512);
   fs.writeSync(fd, 绘图文件, 0, 绘图文件.length, 绘图起 * 512);
   fs.writeSync(fd, 假样本, 0, 假样本.length, 假样本起 * 512);
+  fs.writeSync(fd, 核心清单, 0, 512, 核心清单起 * 512);
 } finally {
   fs.closeSync(fd);
 }
-console.log("盘映像    " + 盘大小MB + " MB（" + 盘字节数 / 512 + " 个扇区）");
+console.log("盘映像    " + 盘大小MB + " MB（" + 盘字节数 / 512 + " 个扇区）"
+  + (破 ? "；核心清单的第 1 个字节被改过（--break），启动时校验应当红" : ""));
 
 // ---- 四、转成 vdi ----
 const VBox = 找VBox();
