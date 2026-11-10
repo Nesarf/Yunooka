@@ -596,6 +596,7 @@ long_entry:
     call run_fs_write
     call run_share_test
     call run_home_test
+    call run_join_test
     call run_pci_scan
     call run_shell
     call run_repl
@@ -3640,13 +3641,23 @@ run_home_test:
     mov rax, r12
     call put_hex64
     call put_nl64
-    ; 第二块盘的家：借 fs_base 与 fs_start 过去一趟，读完立刻拨回
+    jmp betahome_report
+.differ:
+    mov rsi, line_not_family
+    call puts64
+    ret
+
+; 读第二块盘的家、与主盘比、说出来。两处都调它，因为「比较」这件事只该有一份 ——
+; 而两处的结果不同（一次 not family、一次 family），那正是判据要看的东西。
+betahome_report:
+    mov rdi, 1024
+    call fs_load
+    mov r12d, [rsi + 28]
     mov qword [fs_base], 0x60000
     mov qword [fs_start], 0
     xor edi, edi
     call fs_load
-    mov eax, [rsi + 28]
-    mov r13d, eax
+    mov r13d, [rsi + 28]
     mov qword [fs_base], 0x40000
     mov qword [fs_start], 1024
     mov rsi, line_home_beta
@@ -3656,14 +3667,31 @@ run_home_test:
     mov al, ' '
     call putc64
     cmp r12d, r13d
-    jne .differ
+    jne run_home_test.differ
     mov rsi, line_family
     call puts64
     ret
-.differ:
-    mov rsi, line_not_family
-    call puts64
-    ret
+
+; 加入：把主盘的家写进第二块盘。
+;
+; 这一步的意义不在写那两个字节，而在「家 ID 从构建期的事实变成运行时的动作」——
+; 在此之前，一块盘属不属于这个家由 build 决定；在此之后，它由一条命令决定。
+;
+; 判据是同一个比较的结论翻过来：上一块刚说 not family，这里说 family。同一段代码、
+; 同一个读法，只有盘上的数变了 —— 这比「又打印了一次 family」结实得多。
+run_join_test:
+    mov rdi, 1024
+    call fs_load
+    mov r12d, [rsi + 28]
+    mov qword [fs_base], 0x60000
+    mov qword [fs_start], 0
+    xor edi, edi
+    call fs_load
+    mov [rsi + 28], r12d
+    mov qword [fs_base], 0x40000
+    mov qword [fs_start], 1024
+    jmp betahome_report
+
 
 ; 打一串 UTF-16 码元，只取低字节。这一版的名字都是 ASCII，够用；非 ASCII 的名字会
 ; 在这里变成别的字节，而那是「打印」这一层的限制，不是名字本身的。
