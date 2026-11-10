@@ -775,6 +775,26 @@ Yunooka: persist survived a reboot           第二次启动
 
 第二趟里**没有任何代码去写那 512 个字节**；串口文件先清空，因为 `--uartmode1 file` 是追加写。
 
+## 九条停住的，各自在等什么
+
+地图里没有 `open` 了。九条被移到 `blocked`，而每一条都写清了**需要的条件** ——
+一份只说「做不了」的记录，下一次还是要重新查一遍。
+
+| 条目 | 在等 |
+| --- | --- |
+| `serial-io` | 一个能把字节**送进**客人机的串口通道（三种后端都试到底了） |
+| `container-runtime` | 进程 —— 没有进程就没有东西可以装进容器 |
+| `task-manager` | 进程与资源计量 |
+| `browser` | 网络栈（ARP/IP/TCP）与 `system-software` 的窗口层 |
+| `self-host` | HMYR 编译器本身能在字节码里跑 |
+| `android-port` | arm64 安卓那一整套（它与 x86-64 不共享一行代码） |
+| `disk-health` | 一块真的答 `IDENTIFY DEVICE` 的盘（VBox 的 IDE 盘读回一页零） |
+| `system-software` | 隔离要进程、中继要音频；五件里两件的砖已铺好 |
+| `homegroup` | 一个「改动已有条目」的动作（写已有文件、删除） |
+
+**`disk-health` 的代码是写完的** —— `ata_identify` 在，只是那块盘不答这一条。
+失败不在命令、不在时序、不在缓冲区。
+
 ### 一个间歇的坏法
 
 `rep insw` 在虚拟机模拟的 IDE 控制器上偶尔会挂住，而挂住只在「前一行的时序稍有不同」

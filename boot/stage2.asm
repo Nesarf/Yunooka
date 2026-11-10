@@ -44,21 +44,21 @@ stage2:
     ; 种子读到 0x20000 起，不是 0x8000 —— 第二段自己被加载在 0x7E00，32 扇区就是
     ; 16 KB，铺到 0xBE00，而 0x8000 起的种子会把它覆盖成零。0x20000 在实模式 1 MB
     ; 之内，离得够远。
-    mov dword [dap_lba], 44       ; 第 35 个扇区：引导 1 + 第二段 33
+    mov dword [dap_lba], 46       ; 第 35 个扇区：引导 1 + 第二段 33
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x2000
     mov word [dap_count], 64
     call read_batch
     jc .seed_fail
 
-    mov dword [dap_lba], 44 + 64
+    mov dword [dap_lba], 46 + 64
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x2800
     mov word [dap_count], 64
     call read_batch
     jc .seed_fail
 
-    mov dword [dap_lba], 44 + 128
+    mov dword [dap_lba], 46 + 128
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x3000
     mov word [dap_count], 18
@@ -617,6 +617,7 @@ long_entry:
     call run_rules_multi
     call run_plot_test
     call run_persist_test
+    call run_health_test
     call run_pci_scan
     call run_shell
     call run_repl
@@ -2938,7 +2939,7 @@ run_ata_test:
     mov rax, 512
     call alloc64
     mov [ata_buf], rax            ; 缓冲区地址要留住：ata_read 会把 rax 用掉
-    mov rdi, 44                   ; 种子在盘上的第一个扇区：引导 1 + 第二段 33
+    mov rdi, 46                   ; 种子在盘上的第一个扇区：引导 1 + 第二段 33
     mov rsi, rax
     call ata_read
     jc ata_fail
@@ -4903,6 +4904,113 @@ run_persist_test:
     call puts64
     ret
 
+; 问盘：「你是谁」。rdi = 512 字节缓冲。进位清表示答了。
+;
+; IDENTIFY DEVICE 是 0xEC，回来的 256 个 word 里有型号、序列号、以及一堆能力位。
+; 它是 disk-health 的第一块砖，理由不在温度也不在通电时间：这两样都要先知道盘认不认得
+; 这组命令。先问「你在不在」，再问「你累不累」。
+;
+; 它比读写简单一档：没有 LBA 要拆、没有扇区数要设，只有一个 DEV 位要放对。
+ata_identify:
+    push rsi
+    push rdi
+    mov r11, 3
+.try:
+    mov dx, 0x1F7
+    in al, dx
+    cmp al, 0xFF
+    je .retry
+    mov r10, 200000
+.busy:
+    mov dx, 0x1F7
+    in al, dx
+    cmp al, 0xFF
+    je .retry
+    test al, 0x80
+    jz .idle
+    dec r10
+    jnz .busy
+    jmp .retry
+.idle:
+    mov dx, 0x1F6
+    mov al, 0xE0                   ; 主盘、LBA 模式
+    out dx, al
+    mov dx, 0x1F7
+    mov al, 0xEC
+    out dx, al
+    mov r10, 200000
+.wait:
+    mov dx, 0x1F7
+    in al, dx
+    test al, 0x80
+    jnz .wait_dec
+    test al, 0x08
+    jnz .ready
+.wait_dec:
+    dec r10
+    jnz .wait
+    jmp .retry
+.ready:
+    mov rdi, [rsp + 8]
+    mov dx, 0x1F0
+    mov rcx, 256
+.in:
+    in ax, dx
+    mov [rdi], ax
+    add rdi, 2
+    dec rcx
+    jnz .in
+    pop rdi
+    pop rsi
+    clc
+    ret
+.retry:
+    dec r11
+    jnz .try
+    pop rdi
+    pop rsi
+    stc
+    ret
+
+; 盘的健康：先问出型号。
+;
+; 型号在 word 27 到 46，而每个 word 里两个字符是反的（ATA 的高字节在前，小端存进来就成
+; 了反的）。所以打印要成对交换 —— 不交换的话 VBOX HARDDISK 会打成 VOBX AHDRISKD 这种
+; 东西，而它看起来像「读错了」，实际只是没换字节序。
+run_health_test:
+    mov rdi, health_buf
+    call ata_identify
+    jc .fail
+    mov rsi, line_health
+    call puts64
+    lea rsi, [health_buf + 54]     ; word 27 = 偏移 54
+    mov rcx, 12                    ; 十二对，够看出是哪个型号
+.print:
+    test rcx, rcx
+    jz .done
+    mov al, [rsi + 1]              ; 高字节在前
+    push rsi
+    push rcx
+    call putc64
+    pop rcx
+    pop rsi
+    mov al, [rsi]
+    push rsi
+    push rcx
+    call putc64
+    pop rcx
+    pop rsi
+    add rsi, 2
+    dec rcx
+    jmp .print
+.done:
+    call put_nl64
+    ret
+.fail:
+    mov rsi, line_health_fail
+    call puts64
+    ret
+
 ; 打一串 UTF-16 码元，只取低字节。这一版的名字都是 ASCII，够用；非 ASCII 的名字会
 ; 在这里变成别的字节，而那是「打印」这一层的限制，不是名字本身的。
 put_utf16_ascii:
@@ -5536,6 +5644,10 @@ line_persist_ok: db "Yunooka: persist write -> same 512 bytes", 13, 10, 0
 line_persist_diff: db "Yunooka: persist write -> differ", 13, 10, 0
 line_persist_fail: db "Yunooka: persist write -> failed", 13, 10, 0
 line_persist_survived: db "Yunooka: persist survived a reboot", 13, 10, 0
+line_health: db "Yunooka: disk model ", 0
+line_health_fail: db "Yunooka: disk model -> no identify", 13, 10, 0
+; IDENTIFY 回来的一整页：512 字节，型号、序列号与能力位都在里面。
+health_buf: times 512 db 0
 ; 落盘那一条用的两个 512 字节缓冲：一个填满 0x2A 写下去，另一个接读回来的。
 persist_buf: times 512 db 0
 persist_buf2: times 512 db 0
