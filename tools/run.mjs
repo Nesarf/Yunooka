@@ -821,6 +821,40 @@ if (!成了) {
 
 if (!留机) {
   vbox(["controlvm", 机名, "poweroff"]);
-  console.log("机器已关（--keep 可以留着它，用 GUI 打开看）。");
 }
-process.exit(成了 ? 0 : 1);
+
+// ---- 四、第二趟：同一块盘，再启动一次 ----
+//
+// 落盘这件事只能在跨启动的时候证明。同一次运行里写下去再读回来，读到的也可能只是内存 ——
+// 而这一条最该否掉的正是那种「看起来写成功了」的实现。所以第二趟只差一件事：
+// 盘上已经躺过那 512 个字节，而这一次没有任何代码去写它。
+//
+// 串口文件先清空：VBox 的 --uartmode1 file 是追加写，不清的话第二趟的「读过」里还留着
+// 第一趟的字，那时 survived 与 same 就分不开了。
+const 存活成 = (() => {
+  if (留机) return true;                  // 留机模式下第二趟没有意义，不当失败
+  fs.writeFileSync(串口, "", "utf8");
+  const 又起 = vbox(["startvm", 机名, "--type", "headless"]);
+  if (又起.status !== 0) return false;
+  let 又读到 = "";
+  for (let i = 0; i < 120; i++) {
+    睡(500);
+    try { 又读到 = fs.readFileSync(串口, "utf8"); } catch { }
+    if (/Yunooka: persist (survived|write -> same)/.test(又读到)) {
+      // 见到 persist 那一行之后再等一会儿，让后面几行也写出来
+      for (let j = 0; j < 6; j++) {
+        睡(300);
+        try { 又读到 = fs.readFileSync(串口, "utf8"); } catch { }
+      }
+      break;
+    }
+  }
+  vbox(["controlvm", 机名, "poweroff"]);
+  return /Yunooka: persist survived a reboot/.test(又读到);
+})();
+console.log("落盘      " + (存活成 ? "第二趟读到 survived" : "(第二趟没有 survived)")
+  + (存活成 ? "  —— 关掉再开机，那 512 个字节还在盘上：写真的落下去了"
+    : "  —— 不对：第二次启动应当报 persist survived a reboot"));
+if (!留机) console.log("机器已关（--keep 可以留着它，用 GUI 打开看）。");
+const 全成 = 成了 && 存活成;
+process.exit(全成 ? 0 : 1);

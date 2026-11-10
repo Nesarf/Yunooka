@@ -44,21 +44,21 @@ stage2:
     ; 种子读到 0x20000 起，不是 0x8000 —— 第二段自己被加载在 0x7E00，32 扇区就是
     ; 16 KB，铺到 0xBE00，而 0x8000 起的种子会把它覆盖成零。0x20000 在实模式 1 MB
     ; 之内，离得够远。
-    mov dword [dap_lba], 41       ; 第 35 个扇区：引导 1 + 第二段 33
+    mov dword [dap_lba], 44       ; 第 35 个扇区：引导 1 + 第二段 33
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x2000
     mov word [dap_count], 64
     call read_batch
     jc .seed_fail
 
-    mov dword [dap_lba], 41 + 64
+    mov dword [dap_lba], 44 + 64
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x2800
     mov word [dap_count], 64
     call read_batch
     jc .seed_fail
 
-    mov dword [dap_lba], 41 + 128
+    mov dword [dap_lba], 44 + 128
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x3000
     mov word [dap_count], 18
@@ -616,6 +616,7 @@ long_entry:
     call run_scan_test
     call run_rules_multi
     call run_plot_test
+    call run_persist_test
     call run_pci_scan
     call run_shell
     call run_repl
@@ -2937,7 +2938,7 @@ run_ata_test:
     mov rax, 512
     call alloc64
     mov [ata_buf], rax            ; 缓冲区地址要留住：ata_read 会把 rax 用掉
-    mov rdi, 41                   ; 种子在盘上的第一个扇区：引导 1 + 第二段 33
+    mov rdi, 44                   ; 种子在盘上的第一个扇区：引导 1 + 第二段 33
     mov rsi, rax
     call ata_read
     jc ata_fail
@@ -4730,6 +4731,178 @@ run_plot_test:
     call puts64
     ret
 
+; 写一个扇区。rdi = LBA，rsi = 512 字节的源。进位清表示写成。
+;
+; 它是 ata_read 的镜像：同一组端口、同一个 LBA 拆分、同一套等 BSY 与 DRQ 的循环，
+; 只有两处不同 —— 命令是 0x30 而不是 0x20，而数据的方向是 out 而不是 in。连重试策略也照抄，
+; 因为写与读走的是同一条时序，而读那边已经证明「一次不成再试两次」够用。
+;
+; 写完还要等一次 BSY：写完最后一个 word 时命令并没有结束，它在盘上真正落下之前一直忙。
+; 不等这一下就断电（或者立刻读回来），读到的可能是别的东西 —— 而那种错看起来像「写丢了」，
+; 实际上是「没等它写完」。
+ata_write:
+    push rsi
+    push rdi
+    mov r11, 3
+.try:
+    mov dx, 0x1F7
+    in al, dx
+    cmp al, 0xFF
+    je .retry
+    mov r10, 200000
+.busy:
+    mov dx, 0x1F7
+    in al, dx
+    cmp al, 0xFF
+    je .retry
+    test al, 0x80
+    jz .idle
+    dec r10
+    jnz .busy
+    jmp .retry
+.idle:
+    mov rdi, [rsp]
+    mov rax, rdi
+    shr rax, 24
+    and al, 0x0F
+    or al, 0xE0
+    mov dx, 0x1F6
+    out dx, al
+    mov dx, 0x1F2
+    mov al, 1
+    out dx, al
+    mov rax, rdi
+    mov dx, 0x1F3
+    out dx, al
+    mov rax, rdi
+    shr rax, 8
+    mov dx, 0x1F4
+    out dx, al
+    mov rax, rdi
+    shr rax, 16
+    mov dx, 0x1F5
+    out dx, al
+    mov dx, 0x1F7
+    mov al, 0x30                   ; 写扇区
+    out dx, al
+    mov r10, 200000
+.wait:
+    mov dx, 0x1F7
+    in al, dx
+    test al, 0x80
+    jnz .wait_dec
+    test al, 0x08                  ; DRQ：盘在等数据
+    jnz .ready
+.wait_dec:
+    dec r10
+    jnz .wait
+    jmp .retry
+.ready:
+    mov rsi, [rsp + 8]
+    mov dx, 0x1F0
+    mov rcx, 256
+.out:
+    mov ax, [rsi]
+    out dx, ax
+    add rsi, 2
+    dec rcx
+    jnz .out
+    mov r10, 200000
+.flush:
+    mov dx, 0x1F7
+    in al, dx
+    test al, 0x80
+    jz .done
+    dec r10
+    jnz .flush
+    jmp .retry
+.done:
+    pop rdi
+    pop rsi
+    clc
+    ret
+.retry:
+    dec r11
+    jnz .try
+    pop rdi
+    pop rsi
+    stc
+    ret
+
+; 落盘：写一个扇区、再读回来比。
+;
+; 判据只能是「读回来一样」—— 因为写的对象与读的对象是同一块盘，而中间没有别的东西可以相信。
+; 真正更强的判据要跨两次启动（写一次、重启、再读），那一条留给 run.mjs 的两趟。
+;
+; 为什么写 60000 号扇区：文件系统只占到 1040 左右，60000 在那个范围之外，写它不会碰坏任何文件。
+; 挑一个「碰不到别人」的位置，是为了让这一条的失败只可能出在写本身。
+run_persist_test:
+    ; 先读 60000 号扇区，看它现在是什么。这一步是整条判据的枢纽：
+    ;   - 全新盘上它是零（build 从没写过那里），所以第一次启动走「写一次」
+    ;   - 写过之后它是 0x2A，所以第二次启动走「只读」而不写
+    ; 用盘上留下的字节区分两次启动，而不是靠命令行参数或第三个文件 —— 因为「盘上有什么」
+    ; 正是这一条要证明的东西，拿它当依据不是循环，那就是这件事本身。
+    mov rdi, 60000
+    lea rsi, [persist_buf2]
+    call ata_read
+    jc .fail
+    lea rsi, [persist_buf2]
+    mov rcx, 512
+    mov al, [rsi]
+    cmp al, 0x2A
+    jne .fresh
+.scan:
+    test rcx, rcx
+    jz .survived
+    cmp byte [rsi], al
+    jne .fresh
+    inc rsi
+    dec rcx
+    jmp .scan
+.survived:
+    ; 第二次启动：上一次写下的 512 个 0x2A 还在盘上，一个字节都没变
+    mov rsi, line_persist_survived
+    call puts64
+    ret
+.fresh:
+    lea rdi, [persist_buf]
+    mov rcx, 512
+    mov al, 0x2A
+    rep stosb
+    mov rdi, 60000
+    lea rsi, [persist_buf]
+    call ata_write
+    jc .fail
+    mov rdi, 60000
+    lea rsi, [persist_buf2]
+    call ata_read
+    jc .fail
+    lea rsi, [persist_buf]
+    lea rdi, [persist_buf2]
+    mov rcx, 512
+.cmp:
+    test rcx, rcx
+    jz .ok
+    mov al, [rsi]
+    cmp al, [rdi]
+    jne .diff
+    inc rsi
+    inc rdi
+    dec rcx
+    jmp .cmp
+.ok:
+    mov rsi, line_persist_ok
+    call puts64
+    ret
+.diff:
+    mov rsi, line_persist_diff
+    call puts64
+    ret
+.fail:
+    mov rsi, line_persist_fail
+    call puts64
+    ret
+
 ; 打一串 UTF-16 码元，只取低字节。这一版的名字都是 ASCII，够用；非 ASCII 的名字会
 ; 在这里变成别的字节，而那是「打印」这一层的限制，不是名字本身的。
 put_utf16_ascii:
@@ -5359,6 +5532,13 @@ line_rules_head_c: db "Yunooka: rules clean.txt = ", 0
 line_rule_none: db "none", 0
 line_plot: db "Yunooka: plot ", 0
 line_plot_none: db "Yunooka: plot -> no expression", 13, 10, 0
+line_persist_ok: db "Yunooka: persist write -> same 512 bytes", 13, 10, 0
+line_persist_diff: db "Yunooka: persist write -> differ", 13, 10, 0
+line_persist_fail: db "Yunooka: persist write -> failed", 13, 10, 0
+line_persist_survived: db "Yunooka: persist survived a reboot", 13, 10, 0
+; 落盘那一条用的两个 512 字节缓冲：一个填满 0x2A 写下去，另一个接读回来的。
+persist_buf: times 512 db 0
+persist_buf2: times 512 db 0
 ; 绘图那条表达式的落点：盘上读进来之后放在这里（UTF-16，0 结尾）。
 plot_expr: times 128 dw 0
 fs_plot_path: dw 0x03B1, 0x003A, 0x002F, 0x0070, 0x006C, 0x006F, 0x0074
