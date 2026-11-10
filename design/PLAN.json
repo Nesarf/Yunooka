@@ -878,7 +878,7 @@
       "id": "file-formats",
       "title": "认得 win/mac/linux/android 的程序与文件",
       "scope": "stage",
-      "status": "open",
+      "status": "done",
       "parent": "resident",
       "after": [
         "filesystem"
@@ -891,7 +891,7 @@
         "boot/stage2.asm",
         "tools/run.mjs"
       ],
-      "notes": "用户点下「让 win/mac/linux/android 的文件与程序在 Yunooka 里可辨认与读写」。按字面是两件（辨认、读写），而**可执行不在其中** —— 那是另一件事，贵一个数量级（要 PE 装载器与 Win32 的 API 表面）。判断写在 design/HIREN.txt 第二节。这一条比 HIREN 其余几块都便宜，因为它只把 identify 的表加长：PE（MZ 加 PE\u0000\u0000）、ELF（7F 45 4C 46）、Mach-O（FEEDFACE / FEEDFACF 一族，以及 FAT 的 CAFEBABE）、APK（PK 头加 AndroidManifest）、DEX（dex\n）。判据：给一个头，它答那个名字；而一个改名成 .txt 的 PE 仍然答 PE（「不看扩展名」那一条已经在 Kohane 第六层验过，所以这一条是它的延伸而不是重复）。它立刻能用：Nanodesu 与 Torikago 要的正是认得出、读得懂 —— 判断一个文件是什么，不需要跑它。"
+      "notes": "用户点下「让 win/mac/linux/android 的文件与程序在 Yunooka 里可辨认与读写」。按字面是两件（辨认、读写），而**可执行不在其中** —— 那是另一件事，贵一个数量级（要 PE 装载器与 Win32 的 API 表面）。判断写在 design/HIREN.txt 第二节。这一条比 HIREN 其余几块都便宜，因为它只把 identify 的表加长：PE（MZ 加 PE\u0000\u0000）、ELF（7F 45 4C 46）、Mach-O（FEEDFACE / FEEDFACF 一族，以及 FAT 的 CAFEBABE）、APK（PK 头加 AndroidManifest）、DEX（dex\n）。判据：给一个头，它答那个名字；而一个改名成 .txt 的 PE 仍然答 PE（「不看扩展名」那一条已经在 Kohane 第六层验过，所以这一条是它的延伸而不是重复）。它立刻能用：Nanodesu 与 Torikago 要的正是认得出、读得懂 —— 判断一个文件是什么，不需要跑它。 【已做】identify 的表从三种扩到八种：text、package（HMYRB）、pe、elf、macho、zip、dex。判据一行八格，而验红过：把 PE 签名那一处比较改错一位，那一格变成 unknown，判据报「那五个应当是 pe elf macho zip dex，实际 unknown elf macho zip dex」，退出码一。两处值得记：PE 是唯一需要读两处的（MZ 两字节太容易撞上，真定义是 offset 0x3C 那个 u32 指着 PE\\0\\0）；ZIP 那一格答的是 zip 而不是 apk —— APK 也是 zip，而「这个 zip 是不是 APK」要往里翻 AndroidManifest.xml，那超过「看头几个字节」这一层的约定，而一个答不出来的问题比一个猜出来的答案好。还有一件连带：盘上多了五个文件，于是索引表（16 条上限）被自己的上限截断了，判据报「甲盘条目数与索引不一致」—— 那个诊断是对的。索引表现在 24 条，而它还没有被 build 核对（预读扇区数有，索引容量没有）。另：第二段到 64 扇区了，而那是硬上限（0x7E00 加 32768 = 0xFE00，int 0x13 一次不能跨 64 KB），余 332 字节 —— 下一块砖要么拆第二段，要么压缩。"
     },
     {
       "id": "hmyr-integration",

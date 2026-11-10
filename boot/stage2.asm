@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 62
+stage2_sectors equ 64
 seed_lba       equ 1 + stage2_sectors   ; 引导占 1 个扇区，种子紧跟着第二段
 
 ; ======================================================================
@@ -157,7 +157,7 @@ stage2:
     mov dword [dap_lba], 1024
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x4000
-    mov word [dap_count], 17       ; preread-sectors: 预读几个扇区，这个数由 build 核对
+    mov word [dap_count], 22       ; preread-sectors: 预读几个扇区，这个数由 build 核对
     call read_batch
     jnc .fs_ready
     mov si, line_fs_preread
@@ -6433,7 +6433,11 @@ index_build:
     mov r8, rsi                    ; 目录项游标
     xor r9, r9
 .loop:
-    cmp r9, 16
+    cmp r9, 24                     ; 表容量。16 的时候盘上只有九个名字，而现在有二十个 ——
+                                   ; 于是索引数出来的条目比层三列出来的少，判据报的是
+                                   ; 「甲盘条目数与索引不一致」。那个诊断是对的：索引被
+                                   ; 上限截断了，而截断它是这一层自己做的决定。
+                                   ; 表容量与盘上文件数的同步，现在还没有人核对。
     jae .done
     movzx rax, word [r8]
     test rax, rax                  ; 名字长度 0：目录到头了
@@ -7064,6 +7068,60 @@ identify:
     mov rax, 2
     ret
 .text_check:
+    ; 别的系统的可执行与包：五个头，都在前 64 个字节内。
+    ;
+    ; 判断顺序有讲究。MZ 只有两个字节，最容易撞上（一个以字母 MZ 开头的文本文件就是），
+    ; 所以它不单独成立 —— 真正的 PE 定义是「MZ，而 offset 0x3C 那个 u32 指着 PE\0\0」。
+    ; 判据要的是那个定义，不是它的缩写。
+    cmp word [rdi], 0x5A4D         ; 'M' 'Z'
+    jne .try_elf
+    cmp rcx, 64
+    jb .try_elf
+    mov eax, [rdi + 0x3C]          ; e_lfanew：PE 头在文件里的偏移
+    cmp eax, 0x10000000
+    jae .try_elf                   ; 荒谬的偏移，不可能是 PE
+    add rax, 4
+    cmp rax, rcx
+    jae .try_elf
+    cmp dword [rdi + rax - 4], 0x00004550   ; 'P' 'E' 0 0
+    jne .try_elf
+    mov rax, 3
+    ret
+.try_elf:
+    cmp dword [rdi], 0x464C457F    ; 7F 'E' 'L' 'F'
+    jne .try_macho
+    mov rax, 4
+    ret
+.try_macho:
+    mov eax, [rdi]
+    ; Mach-O 的魔数有四种写法（32 位与 64 位，各自两种字节序）。
+    ; 只认前两种的话，一台大端机器上编译出来的东西会被认成不认得。
+    cmp eax, 0xFEEDFACF
+    je .macho
+    cmp eax, 0xFEEDFACE
+    je .macho
+    cmp eax, 0xCFFAEDFE
+    je .macho
+    cmp eax, 0xCEFAEDFE
+    je .macho
+    jmp .try_zip
+.macho:
+    mov rax, 5
+    ret
+.try_zip:
+    ; PK 03 04 是 zip 的头。APK 也是 zip，而「这个 zip 是不是 APK」要往里翻
+    ; AndroidManifest.xml —— 那超过「看头几个字节」这一层的约定，所以这里答 zip。
+    ; 一个答不出来的问题，比一个猜出来的答案好。
+    cmp dword [rdi], 0x04034B50    ; 'P' 'K' 03 04
+    jne .try_dex
+    mov rax, 6
+    ret
+.try_dex:
+    cmp dword [rdi], 0x0A786564    ; 'd' 'e' 'x' '\n'
+    jne .try_text
+    mov rax, 7
+    ret
+.try_text:
     ; 文本：头 32 个字节里没有不可打印的东西（换行、回车、制表除外）
     mov r8, rcx
     cmp r8, 32
@@ -7129,6 +7187,48 @@ run_identify_test:
     mov rcx, rbx
     call identify
     call put_ident_kind
+    ; 别的系统的五种头。样本的名字一律是 .bin —— 后缀与内容无关，而这一条在 fake.txt
+    ; 上已经验过一次；这里是同一个道理换个方向：判据要看的是头，不是后缀。
+    mov rdi, fs_pe_path
+    call fs_open_path
+    test rax, rax
+    jz .miss
+    mov rdi, [last_addr]
+    mov rcx, rbx
+    call identify
+    call put_ident_kind
+    mov rdi, fs_elf_path
+    call fs_open_path
+    test rax, rax
+    jz .miss
+    mov rdi, [last_addr]
+    mov rcx, rbx
+    call identify
+    call put_ident_kind
+    mov rdi, fs_macho_path
+    call fs_open_path
+    test rax, rax
+    jz .miss
+    mov rdi, [last_addr]
+    mov rcx, rbx
+    call identify
+    call put_ident_kind
+    mov rdi, fs_zip_path
+    call fs_open_path
+    test rax, rax
+    jz .miss
+    mov rdi, [last_addr]
+    mov rcx, rbx
+    call identify
+    call put_ident_kind
+    mov rdi, fs_dex_path
+    call fs_open_path
+    test rax, rax
+    jz .miss
+    mov rdi, [last_addr]
+    mov rcx, rbx
+    call identify
+    call put_ident_kind
     call put_nl64
     ret
 .miss:
@@ -7136,12 +7236,24 @@ run_identify_test:
     call puts64
     ret
 
-; 把一个类型码打成三个字母，接在后面。
+; 把一个类型码打成名字，接在后面。
+;
+; 名字用短的：这一行要在一行里挤八个结果，而判据要能一眼看出哪一格不对。
 put_ident_kind:
     cmp rax, 1
     je .text
     cmp rax, 2
     je .pkg
+    cmp rax, 3
+    je .pe
+    cmp rax, 4
+    je .elf
+    cmp rax, 5
+    je .macho
+    cmp rax, 6
+    je .zip
+    cmp rax, 7
+    je .dex
     mov rsi, line_kind_none
     jmp .out
 .text:
@@ -7149,6 +7261,21 @@ put_ident_kind:
     jmp .out
 .pkg:
     mov rsi, line_kind_pkg
+    jmp .out
+.pe:
+    mov rsi, line_kind_pe
+    jmp .out
+.elf:
+    mov rsi, line_kind_elf
+    jmp .out
+.macho:
+    mov rsi, line_kind_macho
+    jmp .out
+.zip:
+    mov rsi, line_kind_zip
+    jmp .out
+.dex:
+    mov rsi, line_kind_dex
 .out:
     call puts64
     mov al, ' '
@@ -7902,7 +8029,7 @@ smart_buf: times 512 db 0
 ; IDENTIFY 回来的一整页：512 字节，型号、序列号与能力位都在里面。
 health_buf: times 512 db 0
 ; KID 的索引表：16 条，每条 32 字节名字 + 4 字节扇区。
-index_buf: times 640 db 0
+index_buf: times 960 db 0
 index_n: dq 0
 name_hello: db "hello.txt", 0
 name_nosuch: db "nosuch.txt", 0
@@ -7947,6 +8074,18 @@ line_ident_miss: db "Yunooka: identify -> no file", 13, 10, 0
 line_kind_text: db "text", 0
 line_kind_pkg: db "package", 0
 line_kind_none: db "unknown", 0
+; 别的系统的五种。名字短是为了让那一行在一行里放得下。
+line_kind_pe: db "pe", 0
+line_kind_elf: db "elf", 0
+line_kind_macho: db "macho", 0
+line_kind_zip: db "zip", 0
+line_kind_dex: db "dex", 0
+; 别的系统的五个样本的路径。名字是 ASCII，所以码元就是它自己的字节。
+fs_pe_path: dw 0x03B1, 0x003A, 0x002F, 0x0070, 0x0065, 0x002E, 0x0062, 0x0069, 0x006E, 0
+fs_elf_path: dw 0x03B1, 0x003A, 0x002F, 0x0065, 0x006C, 0x0066, 0x002E, 0x0062, 0x0069, 0x006E, 0
+fs_macho_path: dw 0x03B1, 0x003A, 0x002F, 0x006D, 0x0061, 0x0063, 0x0068, 0x006F, 0x002E, 0x0062, 0x0069, 0x006E, 0
+fs_zip_path: dw 0x03B1, 0x003A, 0x002F, 0x007A, 0x0069, 0x0070, 0x002E, 0x0062, 0x0069, 0x006E, 0
+fs_dex_path: dw 0x03B1, 0x003A, 0x002F, 0x0064, 0x0065, 0x0078, 0x002E, 0x0062, 0x0069, 0x006E, 0
 fs_hello_path: dw 0x03B1, 0x003A, 0x002F, 0x0068, 0x0065, 0x006C, 0x006C, 0x006F
                dw 0x002E, 0x0074, 0x0078, 0x0074, 0
 fs_prog_path: dw 0x03B1, 0x003A, 0x002F, 0x0070, 0x0072, 0x006F, 0x0067, 0x002E

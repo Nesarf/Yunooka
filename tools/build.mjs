@@ -58,7 +58,7 @@ const 找VBox = () => {
 // 「第二段多大」只有这一个数，后面全从它推：上限、种子起始扇区、种子偏移，以及那几行
 // 打印出来的字。以前这几个数散在五处，每长一次都是一回「看着像四个不同的毛病」的返工；
 // 现在是推出来的，改一个数就够了。
-const 第二段扇区 = 62;
+const 第二段扇区 = 64;
 const 第二段上限 = 第二段扇区 * 512;
 const 编一段 = (名字, 源路, 出, 上限 = 512, 清单 = null) => {
   const 参 = ["-f", "bin", 源路, "-o", 出];
@@ -338,6 +338,56 @@ for (const [名, 内容] of 核心项) {
 }
 const 核心清单起 = 假样本起 + 1;
 
+// ---- 三·四、别的系统的五个样本 ----
+//
+// 每一个只有几十个字节，而判据只看头 —— 所以造的是「头对、身体短」的假件，
+// 不是真的可执行文件。这一点要写清，因为一个 128 字节的「PE」什么也跑不了，
+// 而它在这台机器上的作用只是「让 identify 有机会答对」。
+//
+// PE 那一个是唯一需要两处的：MZ 两个字节太容易撞上（一个以 MZ 开头的文本文件就是），
+// 所以真 PE 的定义是「MZ，而 offset 0x3C 那个 u32 指着 PE\0\0」。样本照那个定义造，
+// 判据才是对的定义而不是它的缩写。
+const 造PE = () => {
+  const b = Buffer.alloc(128);
+  b.write("MZ", 0, "latin1");
+  b.writeUInt32LE(0x40, 0x3C);       // e_lfanew：PE 头在 0x40
+  b.write("PE\0\0", 0x40, "latin1");
+  return b;
+};
+const 造ELF = () => {
+  const b = Buffer.alloc(64);
+  b.write("\x7fELF", 0, "latin1");
+  b[4] = 2;                          // 64 位
+  b[5] = 1;                          // 小端
+  b[6] = 1;                          // 版本
+  return b;
+};
+const 造MachO = () => {
+  const b = Buffer.alloc(64);
+  b.writeUInt32LE(0xFEEDFACF, 0);    // 64 位小端那一族
+  return b;
+};
+const 造ZIP = () => {
+  const b = Buffer.alloc(64);
+  b.write("PK\x03\x04", 0, "latin1");
+  return b;
+};
+const 造DEX = () => {
+  const b = Buffer.alloc(64);
+  b.write("dex\n035\0", 0, "latin1");
+  return b;
+};
+const 外五起 = 核心清单起 + 1;
+const 外五件 = [
+  ["pe.bin", 造PE()],
+  ["elf.bin", 造ELF()],
+  ["macho.bin", 造MachO()],
+  ["zip.bin", 造ZIP()],
+  ["dex.bin", 造DEX()],
+];
+// 最后一个占用的扇区号 —— 预读那条检查要拿它当上界，而那一条不该自己再算一遍。
+const 最后一份扇区 = 外五起 + 外五件.length - 1;
+
 const 示例扇区数 = Math.ceil(示例文件.length / 512) + Math.ceil(子文件.length / 512)
   + Math.ceil(命令文件.length / 512) + Math.ceil(求值输入.length / 512)
   + Math.ceil(数学输入.length / 512) + Math.ceil(程序字节.length / 512)
@@ -346,7 +396,8 @@ const 示例扇区数 = Math.ceil(示例文件.length / 512) + Math.ceil(子文�
   + Math.ceil(规则文件.length / 512)
   + Math.ceil(绘图文件.length / 512)
   + Math.ceil(假样本.length / 512)
-  + 1;                                     // 核心清单自己占一个扇区
+  + 1                                     // 核心清单自己占一个扇区
+  + 外五件.length;                        // 五个头部样本，每个一个扇区
 
 const 码元 = (s) => {
   const 列 = [];
@@ -393,7 +444,10 @@ let 根位 = 写条目(根目录, 0, "hello.txt", 0, 数据起, 示例文件.len
 根位 = 写条目(根目录, 根位, "rules.txt", 0, 规则起, 规则文件.length);
 根位 = 写条目(根目录, 根位, "plot.txt", 0, 绘图起, 绘图文件.length);
 根位 = 写条目(根目录, 根位, "fake.txt", 0, 假样本起, 假样本.length);
-写条目(根目录, 根位, "core.bin", 0, 核心清单起, 清位);
+根位 = 写条目(根目录, 根位, "core.bin", 0, 核心清单起, 清位);
+for (let i = 0; i < 外五件.length; i++) {
+  根位 = 写条目(根目录, 根位, 外五件[i][0], 0, 外五起 + i, 外五件[i][1].length);
+}
 
 const 子目录 = Buffer.alloc(512);
 let 子位 = 写条目(子目录, 0, "note.txt", 0, 数据起 + 1, 子文件.length);
@@ -435,6 +489,9 @@ try {
   fs.writeSync(fd, 绘图文件, 0, 绘图文件.length, 绘图起 * 512);
   fs.writeSync(fd, 假样本, 0, 假样本.length, 假样本起 * 512);
   fs.writeSync(fd, 核心清单, 0, 512, 核心清单起 * 512);
+  for (let i = 0; i < 外五件.length; i++) {
+    fs.writeSync(fd, 外五件[i][1], 0, 外五件[i][1].length, (外五起 + i) * 512);
+  }
 } finally {
   fs.closeSync(fd);
 }
@@ -460,13 +517,13 @@ console.log("盘映像    " + 盘大小MB + " MB（" + 盘字节数 / 512 + " �
   const 段源2 = fs.readFileSync(path.join("boot", "stage2.asm"), "utf8");
   const 预读 = /mov word \[dap_count\],\s*(\d+)\s*; preread-sectors/.exec(段源2);
   if (!预读) 失败("stage2.asm 里找不到带 preread-sectors 标记的 dap_count");
-  const 需要 = 核心清单起 - 1024 + 1;
+  const 需要 = 最后一份扇区 - 1024 + 1;
   if (Number(预读[1]) < 需要)
     失败("预读只盖 " + 预读[1] + " 个扇区（1024 到 " + (1024 + Number(预读[1]) - 1)
-      + "），而盘上最后一份文件在第 " + 核心清单起 + " 号扇区 —— 它读不到，而症状会是"
+      + "），而盘上最后一份文件在第 " + 最后一份扇区 + " 号扇区 —— 它读不到，而症状会是"
       + "「读到了、内容是零」那一类。把 stage2.asm 里那个 dap_count 改成 " + 需要 + "。");
   console.log("预读区    1024 起盖 " + 预读[1] + " 个扇区（到第 "
-    + (1024 + Number(预读[1]) - 1) + "），最后一份在第 " + 核心清单起 + " 号 —— 盖得住");
+    + (1024 + Number(预读[1]) - 1) + "），最后一份在第 " + 最后一份扇区 + " 号 —— 盖得住");
 }
 
 // ---- 四、转成 vdi ----
