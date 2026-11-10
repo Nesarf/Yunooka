@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 62
+stage2_sectors equ 63
 seed_lba       equ 1 + stage2_sectors   ; 引导占 1 个扇区，种子紧跟着第二段
 
 ; ======================================================================
@@ -4633,6 +4633,15 @@ run_nvme_health:
     mov rcx, 4096
     xor eax, eax
     rep stosb
+    mov rax, 8192
+    call alloc64
+    add rax, 4095
+    and rax, -4096
+    mov [nvme_ns], rax
+    mov rdi, rax
+    mov rcx, 4096
+    xor eax, eax
+    rep stosb
     mov r13, [nvme_bar]
     ; 一、停
     mov eax, [r13 + 0x14]
@@ -4817,6 +4826,56 @@ run_nvme_health:
     call puts64
     lea rsi, [nvme_serial]
     call puts64
+    call put_nl64
+    ; 第二条命令：Identify Namespace（同一条 opcode，NSID 写 1、CNS 写 0）。
+    ;
+    ; 为什么它比「再读一遍控制器」值：这一页 offset 0 那八个字节是这个命名空间有多少个
+    ; 逻辑块，而那是**盘自己报的容量**。判据那一侧知道造盘时给的是 2 MB，所以两个数
+    ; 一对上，就说明这一页真的从盘里读进来了 —— 而那是一个「打印固定字符串」的实现
+    ; 交不出来的东西。
+    mov rbx, [nvme_asq]
+    lea rbx, [rbx + 64]            ; 槽 1：第一条命令用掉了槽 0
+    mov dword [rbx + 0x00], 0x06
+    mov dword [rbx + 0x04], 1
+    mov rax, [nvme_ns]
+    mov [rbx + 0x18], rax
+    mov dword [rbx + 0x28], 0      ; CDW10 的 CNS 写 0 = Identify Namespace
+    mov dword [r13 + 0x1000], 2    ; SQ 的 tail 走到 2
+    ; 完成项在 ACQ 的第二项。phase 仍然是 1 —— 同一轮里不翻，
+    ; 翻是在「队列绕回」的时候，而我们只要两条命令。
+    mov rbx, [nvme_acq]
+    lea rbx, [rbx + 16]
+    mov rcx, 50000000
+.wnq:
+    mov eax, [rbx + 0x0E]
+    test eax, 1
+    jnz .ns_got
+    dec rcx
+    jnz .wnq
+    mov rsi, line_nvme_nstimeout
+    call puts64
+    ret
+.ns_got:
+    mov rbx, [nvme_ns]
+    mov rax, [rbx + 0]             ; NSZE：逻辑块数
+    mov [nvme_nsze], rax
+    ; LBA 大小：offset 26 的低四位是 FLBAS（用了哪一种格式），
+    ; 格式表从 offset 128 起、每项 4 字节，而 LBADS 在格式项的 byte 2。
+    movzx eax, byte [rbx + 26]
+    and eax, 0x0F
+    shl eax, 2
+    add rax, 128
+    add rax, rbx
+    movzx eax, byte [rax + 2]
+    mov [nvme_lbads], rax
+    mov rsi, line_nvme_ns
+    call puts64
+    mov rax, [nvme_nsze]
+    call put_num64
+    mov al, ' '
+    call putc64
+    mov rax, [nvme_lbads]
+    call put_num64
     jmp put_nl64
 
 ; ======================================================================
@@ -7487,6 +7546,11 @@ line_nvme_model: db "Yunooka: nvme model ", 0
 line_nvme_serial: db "Yunooka: nvme serial ", 0
 nvme_model: times 48 db 0
 nvme_serial: times 24 db 0
+nvme_ns: dq 0
+nvme_nsze: dq 0
+nvme_lbads: dq 0
+line_nvme_ns: db "Yunooka: nvme ns ", 0
+line_nvme_nstimeout: db "Yunooka: nvme ns timeout", 13, 10, 0
 line_nvme_diag: db "Yunooka: nvme diag ", 0
 line_nvme_stuck: db "Yunooka: nvme stuck ", 0
 line_nvme_pcicmd: db "Yunooka: nvme pcicmd ", 0

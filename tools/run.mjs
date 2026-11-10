@@ -327,6 +327,37 @@ if (!阿槽 || 阿槽[1] === "none") {
   if (挂.status !== 0) 做不了("AHCI 盘挂不上去：" + String(挂.stderr || "").slice(0, 200));
 }
 
+// ---- 二·八、NVMe ----
+//
+// 盘健康那条路最后走的是这里。AHCI 的控制器还挂着，只是它的 port 侧对 OS 不报设备
+// （六个 PxSSTS 全零，见 design/AHCI.txt）；而 NVMe 这个控制器是活的：Identify
+// Controller 答了型号、Identify Namespace 答了容量。
+//
+// 盘的大小是一个数，两处用它、语义不同：
+//   这里 —— 我给 VBox 的配置，造盘时 --size 就是这个；
+//   判据那边 —— 我认为这块盘应当有多大。
+// 而盘自己报的块数是第三个来源。三个对上才算数，而「盘报的对不对」只有第三个能回答。
+const NVMe盘大小 = 2 * 1024 * 1024;
+const NVMe盘 = path.join(建, "nvme.raw");
+if (!fs.existsSync(NVMe盘)) {
+  const 造 = vbox(["createmedium", "disk", "--filename", NVMe盘, "--size",
+    String(NVMe盘大小 / 1024 / 1024), "--format", "RAW", "--variant", "Fixed"]);
+  if (造.status !== 0) 做不了("NVMe 盘造不出来：" + String(造.stderr || "").slice(0, 200));
+}
+const 机器信息5 = String(vbox(["showvminfo", 机名, "--machinereadable"]).stdout || "");
+if (!/storagecontrollername\d+="NVME"/.test(机器信息5)) {
+  const 加 = vbox(["storagectl", 机名, "--name", "NVME", "--add", "pcie",
+    "--controller", "NVMe", "--portcount", "1"]);
+  if (加.status !== 0) 做不了("NVMe 控制器加不上：" + String(加.stderr || "").slice(0, 200));
+}
+const 机器信息6 = String(vbox(["showvminfo", 机名, "--machinereadable"]).stdout || "");
+const 奈槽 = /"NVME-0-0"="([^"]*)"/.exec(机器信息6);
+if (!奈槽 || 奈槽[1] === "none") {
+  const 挂 = vbox(["storageattach", 机名, "--storagectl", "NVME", "--port", "0", "--device", "0",
+    "--type", "hdd", "--medium", NVMe盘]);
+  if (挂.status !== 0) 做不了("NVMe 盘挂不上去：" + String(挂.stderr || "").slice(0, 200));
+}
+
 // ---- 三、跑 ----
 const 起 = vbox(["startvm", 机名, "--type", "headless"]);
 if (起.status !== 0) 做不了("起不来：" + String(起.stderr || "").slice(0, 200));
@@ -647,6 +678,17 @@ const 写死了 = 型号.length > 0 && 段源.includes(型号);
 const 健成 = 型号.length >= 8 && 序号.length >= 4
   && 型号 !== 序号 && !写死了;
 
+// 命名空间有多大。这一条判据的力气全在「两个独立来源对上」——
+// 一边是 Identify Namespace 那一页报的逻辑块数（盘自己说的），
+// 另一边是造这块盘时给的 --size 2（这个脚本自己给的）。
+// 两边算出同一个字节数，才说明那一页真的从盘里读进来了；
+// 而一个把「4096」写死的实现，会在有人把盘改成 3 MB 的那一天红。
+const 空了 = /Yunooka: nvme ns (\d+) (\d+)/.exec(读到);
+const 块数 = 空了 !== null ? Number(空了[1]) : 0;
+const 块位 = 空了 !== null ? Number(空了[2]) : 0;
+const 量成 = 块数 > 0 && 块位 >= 9 && 块位 <= 16
+  && 块数 * Math.pow(2, 块位) === NVMe盘大小;
+
 // 一个文件的详情：六列，加一次交叉核对。
 // 这一层真正值钱的是最后那一条：起始扇区要走两条完全不同的路各算一遍 —— 目录一条
 // （fs_open_path 逐段查找）、索引一条（index_build 建表再按名字查）。同一条路算两遍
@@ -882,6 +924,10 @@ console.log("盘的健康  " + (型号 ? "model " + 型号 + "  serial " + 序�
       型号 !== 序号 ? "" : "两段来自同一个位置",
       写死了 ? "型号被写进了代码（那就不是盘报的）" : "",
     ].filter(Boolean).join("、")));
+console.log("盘的大小  " + (空了 ? 块数 + " 块 × 2^" + 块位 + " 字节" : "(没读到)")
+  + (量成 ? "  —— 与造盘时给的 " + (NVMe盘大小 / 1024 / 1024) + " MB 一致，而块数是盘自己报的"
+    : "  —— 不对：应当是 " + NVMe盘大小 + " 字节，实际 "
+      + (块数 && 块位 ? 块数 * Math.pow(2, 块位) : "没算出来")));
 console.log("认类型    " + (认行 ? 认行[1] + " " + 认行[2] + " " + 认行[3] : "(没跑到)")
   + (认前二 ? "  —— 真文本认成 text、真包认成 package" : "  —— 不对：前两条该是 text 与 package")
   + (认第三 ? "；改名成 fake.txt 的包也认成 package —— 这一条才说明它不看名字"
@@ -952,6 +998,7 @@ const 结构成 = 有种子
     && 窗成
     && 列成
     && 健成
+    && 量成
     && 详成
     && 认前二
     && 认第三
