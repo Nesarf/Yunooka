@@ -1,6 +1,6 @@
 ; Yunooka 的第二段：从实模式一路走到 64 位长模式。
 ;
-; 它被引导扇区读进 0x7E00（现在占八个扇区，4 KB）。这一版做四件事：
+; 它被引导扇区读进 0x7E00。这一版做四件事：
 ;   一、还在实模式时，用 BIOS 读完整份种子、验前五字节 HMYRB
 ;   二、打开 A20、装 GDT、进 32 位保护模式
 ;   三、建四级页表、置 PAE 与 LME、开分页
@@ -10,10 +10,24 @@
 ; 屏幕一片黑，串口什么也没有。所以「保护模式到了」与「长模式到了」各有一行字，
 ; 失败时能看出断在哪一段，而不是只知道「没成」。
 ;
-; 编译：nasm -f bin stage2.asm -o stage2.bin（上限 4096 字节，占八个扇区）
+; 编译：nasm -f bin stage2.asm -o stage2.bin
 
 [org 0x7e00]
 [bits 16]
+
+; ======================================================================
+; 零、第二段多大、种子从哪起
+; ======================================================================
+;
+; 这两个数原先散在五处：boot.asm 里那句 mov al、本文件里三处 dap_lba、run_ata_test
+; 里那个「种子在盘上的第一个扇区」、build.mjs 里的上限与种子偏移。每一次长个子都要
+; 把它们一起改，而少改一处的症状各不相同 —— ata differ、种子魔数不对、盘建不起来、
+; 编不过 —— 看着像四个不同的毛病。为一个数字返工过六次，第六次就是这一回。
+;
+; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
+; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
+stage2_sectors equ 52
+seed_lba       equ 1 + stage2_sectors   ; 引导占 1 个扇区，种子紧跟着第二段
 
 ; ======================================================================
 ; 一、实模式：读种子、验魔数
@@ -44,21 +58,21 @@ stage2:
     ; 种子读到 0x20000 起，不是 0x8000 —— 第二段自己被加载在 0x7E00，32 扇区就是
     ; 16 KB，铺到 0xBE00，而 0x8000 起的种子会把它覆盖成零。0x20000 在实模式 1 MB
     ; 之内，离得够远。
-    mov dword [dap_lba], 52       ; 第 35 个扇区：引导 1 + 第二段 33
+    mov dword [dap_lba], seed_lba
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x2000
     mov word [dap_count], 64
     call read_batch
     jc .seed_fail
 
-    mov dword [dap_lba], 52 + 64
+    mov dword [dap_lba], seed_lba + 64
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x2800
     mov word [dap_count], 64
     call read_batch
     jc .seed_fail
 
-    mov dword [dap_lba], 52 + 128
+    mov dword [dap_lba], seed_lba + 128
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x3000
     mov word [dap_count], 18
@@ -619,6 +633,7 @@ long_entry:
     call run_persist_test
     call run_index_test
     call run_explorer_test
+    call run_kohane_list_test
     call run_identify_test
     call run_pci_scan
     call run_shell
@@ -2941,7 +2956,7 @@ run_ata_test:
     mov rax, 512
     call alloc64
     mov [ata_buf], rax            ; 缓冲区地址要留住：ata_read 会把 rax 用掉
-    mov rdi, 52                   ; 种子在盘上的第一个扇区：引导 1 + 第二段 33
+    mov rdi, seed_lba             ; 种子在盘上的第一个扇区 —— 与 dap_lba 同源，不再各写一个数
     mov rsi, rax
     call ata_read
     jc ata_fail
@@ -5403,6 +5418,167 @@ run_explorer_test:
     ret
 
 ; ======================================================================
+; Kohane 第三层：进一个盘，把根目录的条目一条一条列出来
+; ======================================================================
+;
+; 这一层的价值不在「能打印」，在**它列出了哪几列**：名字、类型、字节数、共享位。
+; 四列少任何一列，都有一类实现能蒙过判据 ——
+;   · 少了类型列，docs（目录、0 字节）与一个空文件在表里长得一样；
+;   · 少了字节数列，一个只念名字的实现照样能列出全部条目；
+;   · 少了共享位列，「共享过」与「没共享」在表上分不开。
+;
+; 所以判据让两块盘各列一次，而**两块盘上都有一个叫 hello.txt 的**：主盘那份 8 字节、
+; 不带共享位；β 那份 23 字节、带共享位。两张表因此一眼分得开 —— 一个「只列主盘、
+; 再把结果抄一遍」的实现交不出 β 那两行。这也是「同名不同物」那件事第一次在屏幕上现身。
+;
+; 时机也有用：这一段排在 run_share_test 与 run_homeshare_test 之后，那两段各自标记过
+; 一个共享位。所以这里读到的那几个 1 不是代码里写死的，是前面真的改过的。
+;
+; 形状：目录条目在预读区里就是内存，所以这一层不需要任何新前提 —— 不读盘、不算偏移。
+;
+; 每行自带盘符字母（La / Lb），所以判据不必先切段落再数：一行是什么、属于哪一块盘，
+; 都写在行首了。
+;
+; rdi = 盘符（UTF-16，0 码元结尾），esi = 行首那个字母。出 rax = 列了几条。
+fs_list_disk:
+    push r12
+    push r13
+    push rbx
+    mov rbx, rdi                   ; 盘符先存：fs_load 会用 rdi 算地址
+    mov eax, esi
+    mov [list_tag], al
+    movzx eax, word [rbx]
+    cmp ax, 0x03B1
+    je .alpha
+    cmp ax, 0x03B2
+    jne .miss
+    mov qword [fs_base], 0x60000
+    mov qword [fs_start], 0
+    jmp .set
+.alpha:
+    mov qword [fs_base], 0x40000
+    mov qword [fs_start], 1024
+.set:
+    mov rdi, [fs_start]
+    call fs_load
+    mov edi, [rsi + 12]            ; 超块第 12 字节：根目录扇区。
+                                   ; 这里必须是 32 位读 —— 写成 64 位就会把紧跟着的
+                                   ; root span 一起读进来，扇区号变成 0x0000000100000401，
+                                   ; 而 fs_load 算出巨大偏移，症状是 #PF at 0xBA52。
+    call fs_load
+    mov [list_ptr], rsi
+    mov qword [list_n], 0
+.entry:
+    mov r12, [list_ptr]
+    movzx eax, word [r12]
+    test eax, eax                  ; 名字长度 0：走到头了
+    jz .done
+    mov [list_namelen], rax
+    lea r9, [r12 + 2 + rax * 2]    ; 名字之后：类型 u8、起扇区 u32、字节长 u32
+    movzx r10d, byte [r9]
+    mov [list_type], r10
+    mov eax, [r9 + 5]
+    mov [list_size], rax
+    ; 行首：L、盘符字母、一个空格
+    mov al, 'L'
+    call putc64
+    mov al, [list_tag]
+    call putc64
+    mov al, ' '
+    call putc64
+    ; 名字
+    mov rdi, [list_ptr]
+    add rdi, 2
+    mov rcx, [list_namelen]
+    call put_utf16_n
+    mov al, ' '
+    call putc64
+    ; 类型：目录打 d，其余打 f
+    mov rdx, [list_type]
+    and edx, 0x7F
+    mov al, 'f'
+    cmp rdx, 1
+    jne .type_out
+    mov al, 'd'
+.type_out:
+    call putc64
+    mov al, ' '
+    call putc64
+    ; 字节数
+    mov rax, [list_size]
+    call put_num64
+    mov al, ' '
+    call putc64
+    ; 共享位。与类型同位，所以上面那一手 and 0x7F 是必须的 ——
+    ; 少了它，一个被共享的目录会打出一个既不是 d 也不是 f 的字节。
+    mov rax, [list_type]
+    and eax, 0x80
+    jz .plain
+    mov al, '1'
+    jmp .share_out
+.plain:
+    mov al, '0'
+.share_out:
+    call putc64
+    call put_nl64
+    ; 下一条。位置与长度都从内存里重取一遍：这一份文件里「打印函数吃掉循环变量」
+    ; 已经有过五条教训，而这一处一次要跨四个打印函数。
+    mov rax, [list_namelen]
+    lea rdx, [rax * 2 + 11]
+    add rdx, [list_ptr]
+    mov [list_ptr], rdx
+    inc qword [list_n]
+    jmp .entry
+.done:
+    mov rax, [list_n]
+    ; 拨回 α。调用者接下来多半还用主盘，而「上一次查的是 β」留在变量里，
+    ; 会让下一次 α 的读取落到第二块盘的地址上 —— 那种错很安静。
+    mov qword [fs_base], 0x40000
+    mov qword [fs_start], 1024
+    pop rbx
+    pop r12
+    pop r13
+    ret
+.miss:
+    mov rsi, line_list_miss
+    call puts64
+    mov qword [fs_base], 0x40000
+    mov qword [fs_start], 1024
+    xor eax, eax
+    pop rbx
+    pop r12
+    pop r13
+    ret
+
+; 打一行「这一盘列了几条」。行首字母取自 list_tag —— 就是刚列的那一块盘的那个字母，
+; 所以这一行不必再被告知是 α 还是 β。
+put_list_count:
+    mov rsi, line_list_count
+    call puts64
+    mov al, [list_tag]
+    call putc64
+    mov al, ' '
+    call putc64
+    mov rax, [list_count]
+    call put_num64
+    jmp put_nl64
+
+; 两块盘各列一次，各报一次数。数落在 list_count 里再打，是因为 put_num64 与 puts64
+; 都不保证保住寄存器，而 r12 里那个数要跨过两个打印函数。
+run_kohane_list_test:
+    mov rdi, fs_alpha_drive
+    mov esi, 'a'
+    call fs_list_disk
+    mov [list_count], rax
+    call put_list_count
+    mov rdi, fs_beta_drive
+    mov esi, 'b'
+    call fs_list_disk
+    mov [list_count], rax
+    call put_list_count
+    ret
+
+; ======================================================================
 ; 认一个文件是什么：看它的头几个字节，不看它的名字
 ; ======================================================================
 ;
@@ -6103,6 +6279,7 @@ fs_share_path: dw 0x03B1, 0x003A, 0x002F, 0x0064, 0x006F, 0x0063, 0x0073, 0  ; �
 fs_share_beta: dw 0x03B2, 0x003A, 0x002F, 0x0068, 0x0065, 0x006C, 0x006C, 0x006F
                dw 0x002E, 0x0074, 0x0078, 0x0074, 0                        ; β:/hello.txt
 fs_beta_drive: dw 0x03B2, 0
+fs_alpha_drive: dw 0x03B1, 0     ; 只当盘符用：不指任何路径，只指「哪一块盘」
 ; 第二块盘上那个没被共享的文件。
 fs_secret_path: dw 0x03B2, 0x003A, 0x002F, 0x0073, 0x0065, 0x0063, 0x0072, 0x0065
                 dw 0x0074, 0x002E, 0x0074, 0x0078, 0x0074, 0       ; β:/secret.txt
@@ -6177,6 +6354,18 @@ rect_w: dq 0
 rect_h: dq 0
 rect_c: db 0
 line_explorer: db "Yunooka: window ", 0
+
+; 第三层（列一个盘的条目）的游标与那几列。全部放内存：这一处要跨四个打印函数，
+; 而它们各自占用的寄存器不同 —— 托付给任何一个都会在「打了点什么」之后丢掉位置。
+list_ptr: dq 0
+list_n: dq 0
+list_namelen: dq 0
+list_type: dq 0
+list_size: dq 0
+list_count: dq 0
+list_tag: db 'a'
+line_list_count: db "Yunooka: listed ", 0
+line_list_miss: db "Yunooka: list -> unknown drive", 13, 10, 0
 line_ident_head: db "Yunooka: identify ", 0
 line_ident_miss: db "Yunooka: identify -> no file", 13, 10, 0
 line_kind_text: db "text", 0
