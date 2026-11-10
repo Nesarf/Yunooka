@@ -233,6 +233,10 @@ const 超级块 = Buffer.alloc(512);
 超级块.writeUInt32LE(1, 16);                       // 根目录占一个扇区
 超级块.writeUInt32LE(数据起, 20);
 超级块.writeUInt32LE(盘字节数 / 512 - 数据起 - 示例扇区数, 24);
+// 偏移 28：家庭组的「家」。同一个数的两块盘是一家，不同就不是。
+// 主盘用 YKNR 的 ASCII，β 盘在 run.mjs 里故意写另一个数 —— 判据要能看出比较发生过，
+// 而两块盘的家一样时，「比较过」与「没比较」看起来一样。
+超级块.writeUInt32LE(0x594B4E52, 28);
 
 const 根目录 = Buffer.alloc(512);
 let 根位 = 写条目(根目录, 0, "hello.txt", 0, 数据起, 示例文件.length);

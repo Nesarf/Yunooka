@@ -595,6 +595,7 @@ long_entry:
     call run_fs_open4
     call run_fs_write
     call run_share_test
+    call run_home_test
     call run_pci_scan
     call run_shell
     call run_repl
@@ -3616,6 +3617,54 @@ run_pci_scan:
     jb .dev
     ret
 
+; ======================================================================
+; 家庭组的第二步：边界是一个可以比较的数
+; ======================================================================
+;
+; 设计在 design/HOMEGROUP.txt 三节：边界是超块里的一个 u32，不是一段密码。
+; 理由是密码在没有网络身份的地方没法验证，而两个数可以比较。
+;
+; 这一块只做比较本身：读主盘的家、读第二块盘的家、比一比、说出来。共享清单还不会
+; 因为「不是一家人」而拒绝什么 —— 那要有「列某块盘的共享」这个动作才谈得上，而它现在
+; 还没有。先把「比较发生过」变成一行能读的读数，是这一步的全部。
+;
+; 主盘与 β 的家故意不同（build 与 run.mjs 各写一个数）。同号的话，「比较过」与
+; 「根本没比较」在串口上完全一样 —— 而那是这一条最该分得开的两件事。
+run_home_test:
+    mov rdi, 1024
+    call fs_load
+    mov eax, [rsi + 28]
+    mov r12d, eax
+    mov rsi, line_home
+    call puts64
+    mov rax, r12
+    call put_hex64
+    call put_nl64
+    ; 第二块盘的家：借 fs_base 与 fs_start 过去一趟，读完立刻拨回
+    mov qword [fs_base], 0x60000
+    mov qword [fs_start], 0
+    xor edi, edi
+    call fs_load
+    mov eax, [rsi + 28]
+    mov r13d, eax
+    mov qword [fs_base], 0x40000
+    mov qword [fs_start], 1024
+    mov rsi, line_home_beta
+    call puts64
+    mov rax, r13
+    call put_hex64
+    mov al, ' '
+    call putc64
+    cmp r12d, r13d
+    jne .differ
+    mov rsi, line_family
+    call puts64
+    ret
+.differ:
+    mov rsi, line_not_family
+    call puts64
+    ret
+
 ; 打一串 UTF-16 码元，只取低字节。这一版的名字都是 ASCII，够用；非 ASCII 的名字会
 ; 在这里变成别的字节，而那是「打印」这一层的限制，不是名字本身的。
 put_utf16_ascii:
@@ -4171,6 +4220,10 @@ line_share_first: db "Yunooka: share once", 13, 10, 0
 line_share_again: db "Yunooka: share twice", 13, 10, 0
 line_share_failed: db "Yunooka: share failed", 13, 10, 0
 line_pci: db "Yunooka: pci dev ", 0
+line_home: db "Yunooka: home ", 0
+line_home_beta: db "Yunooka: beta ", 0
+line_family: db "family", 13, 10, 0
+line_not_family: db "not family", 13, 10, 0
 
 ; shell 的两样：要从盘上找的文件名，与它认得的第一条命令。
 ; 命令是 ASCII（不是 UTF-16）—— 因为 cmd.txt 的内容就是 ASCII 字节，

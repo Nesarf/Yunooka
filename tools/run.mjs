@@ -64,6 +64,7 @@ const 全程 = [
   "Yunooka: wrote -> ",
   "Yunooka: share twice",
   "Yunooka: pci dev ",
+  "Yunooka: beta ",
   "Yunooka: shell> ",
   "Yunooka: repl> ",
   "Yunooka: math> average -> ",
@@ -251,6 +252,9 @@ const 二超 = Buffer.alloc(512);
 二超.writeUInt32LE(1, 16);              // 根目录占一个扇区
 二超.writeUInt32LE(2, 20);              // 数据从第 2 号扇区起
 二超.writeUInt32LE(2045, 24);           // 空闲扇区数（凑个数，这一版不写盘）
+// 偏移 28：家。这里故意与主盘不同 —— 家庭组的「边界」要能被看见，就必须有一块
+// 不同的盘来做对照；两块盘同号时，「比较过」与「根本没比较」在串口上一样。
+二超.writeUInt32LE(0x11111111, 28);
 const 二根 = Buffer.alloc(512);
 {
   let 位 = 0;
@@ -491,6 +495,12 @@ const 共成 = 共集.length === 2 && 共集[0] === "docs dir" && 共集[1] === 
 const 网行 = /Yunooka: pci dev (\d+) ([0-9A-F]+)/g;
 const 网集 = [...读到.matchAll(/Yunooka: pci dev (\d+) ([0-9A-F]+)/g)].map((m) => [m[1], m[2]]);
 const 网成 = 网集.some(([dev, id]) => id.endsWith("100E8086"));
+// 家庭组的边界：两块盘超块里的家 ID。判据要两个数都读对、而且结论是不一家人 ——
+// 两块盘故意不同（build 与 run.mjs 各写一个），否则「比较过」与「没比较」分不开。
+const 家行 = /Yunooka: home ([0-9A-F]+)/.exec(读到);
+const 贝行 = /Yunooka: beta ([0-9A-F]+) (family|not family)/.exec(读到);
+const 家成 = 家行 !== null && 家行[1] === "00000000594B4E52"
+  && 贝行 !== null && 贝行[1] === "0000000011111111" && 贝行[2] === "not family";
 // shell 的解释那一半：盘上的 cmd.txt 里写着一行 files，它要认出来并回答。
 // 判据是三步都在：提示符打出来、命令被回显、根目录的三个名字按顺序列出来。
 // 只验提示符的话，一个只会打字的实现照样能过。
@@ -594,6 +604,10 @@ console.log("共享      " + (共集.length ? 共集.join("  /  ") : "(没跑到
 console.log("网卡      " + (网集.length ? 网集.map(([d, i]) => d + ":" + i.slice(-8)).join("  ") : "(没跑到)")
   + (网成 ? "  —— 8086:100E 在 3 号槽上；网卡在，而且配置空间读得通"
     : "  —— 不对：应当看到 100E8086"));
+console.log("边界      " + (家行 ? "home " + 家行[1] : "home (没跑到)")
+  + "  " + (贝行 ? "beta " + 贝行[1] + " " + 贝行[2] : "beta (没跑到)")
+  + (家成 ? "  —— 两个家 ID 都读对了，而且比较的结论是不一家人"
+    : "  —— 不对：应当是 home 594B4E52 与 beta 11111111 not family"));
 console.log("壳        " + (壳行 ? "shell> files" : "(没跑到)")
   + (列行 ? "  → " + 列行[0] : "  → (没列出来)")
   + (壳成 ? "  —— 那一行认得出来、回答得出（来源见上一行）"
@@ -643,6 +657,7 @@ const 结构成 = 有种子
     && 写成
     && 共成
     && 网成
+    && 家成
     && 壳成
     && 重求成
     && 除成
