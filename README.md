@@ -1200,14 +1200,25 @@ Yunooka: cross 0000000000000403 0000000000000403 same
 
 ### 认得别人家的头
 
-`identify` 原先认三种（文本、HMYR 包、不认得）。现在认八种：
+`identify` 原先认三种（文本、HMYR 包、不认得）。现在认十五种：
 
 ```
-Yunooka: identify text package package pe elf macho zip dex
+Yunooka: identify text package package pe elf macho zip dex gzip 7z rar pdf png jpeg sqlite
 ```
 
-前三个是原来的（文本、真包、改名成 `fake.txt` 的包）；后五个是别的系统的头 —— PE、ELF、
-Mach-O、zip、DEX。而它们的样本名一律是 `.bin`，**判据要看的是头，不是后缀**。
+前三个是原来的（文本、真包、改名成 `fake.txt` 的包）；后十二个是别的系统的头 —— PE、ELF、
+Mach-O、zip、DEX，再往下七种是 gzip、7z、rar、PDF、PNG、JPEG、SQLite。前五个的样本住在
+盘上、名字一律是 `.bin`，**判据要看的是头，不是后缀**。
+
+后七种的样本不在盘上，它们是第二段里的**数据常量**。原因是 `identify` 吃的是「一串字节加
+一个长度」，本来就不需要文件系统；而根目录只有 512 字节，十八条已经用掉四百八十多，再放
+七个样本就溢出 —— 症状是 build 在偏移 511 处抛 `RangeError`，读起来像脚本写错了。
+这两个事实合起来指向同一个做法：判据要的是「给一个头，它答那个名字」，与那个头从哪来无关。
+
+（中间试过让它们住 `docs/`，用运行时拼接的路径去打开。串口上打出来的路径完全正确
+（`/docs/note.txt`），而 `fs_open_path` 仍然说找不到，把第一格换成 `note.txt` 也一样 ——
+拼接与查找之间哪一处出的问题**没有查清**，所以最后绕开了它。那件事记在
+`boot/stage2.asm` 的数据段注释里，免得下一次有人再拼一遍。）
 
 **PE 那一格是唯一需要读两处的。** `MZ` 两个字节太容易撞上（一个以字母 MZ 开头的文本文件
 就是），所以真正的定义是「`MZ`，而 `offset 0x3C` 那个 `u32` 指着 `PE\0\0`」。判据要的是
@@ -1216,6 +1227,10 @@ Mach-O、zip、DEX。而它们的样本名一律是 `.bin`，**判据要看的�
 **ZIP 那一格答的是 `zip`，不是 `apk`。** APK 也是 zip，而「这个 zip 是不是 APK」要往里翻
 `AndroidManifest.xml` —— 那超过「看头几个字节」这一层的约定。**一个答不出来的问题，
 比一个猜出来的答案好。**
+
+**验红的手段是把其中一个头改坏一位。** 把 rar 的首字节 `0x52` 改成 `0x53`，那一格就变成
+`unknown`，而其余十四格照旧 —— 判据报的正是「再七格应当是 …，实际 gzip 7z unknown …」。
+一格错只报一格，这是这一行判据的形状。
 
 验红：把 PE 签名那一处比较改错一位，那一格就变成 `unknown`，判据报「那五个应当是
 pe elf macho zip dex，实际 unknown elf macho zip dex」。

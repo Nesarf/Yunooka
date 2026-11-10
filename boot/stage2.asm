@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 72
+stage2_sectors equ 74
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -34,7 +34,7 @@ seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 
 ; 所以这一处与 index_buf 的大小、以及 build 那条核对是一组。
 ; 少一个的症状是「甲盘条目数与索引不一致」：层三列得出二十条，而索引在十六条那里
 ; 截断了 —— 那个诊断是对的，因为截断是这一层自己做的决定。
-index_cap      equ 24
+index_cap      equ 30
 
 ; 信箱盘一次读几个扇区。第 0 个是头（YUNOMBX：主机送进来的那一行），第 1 个往后
 ; 是补丁包（YUNOPAT：补完界面拿来修的那一份字节）。
@@ -7862,8 +7862,66 @@ identify:
     ret
 .try_dex:
     cmp dword [rdi], 0x0A786564    ; 'd' 'e' 'x' '\n'
-    jne .try_text
+    jne .try_gzip
     mov rax, 7
+    ret
+; 下面七个是「别的系统的东西」里最常撞上的那几种。它们与上面五个同一个约定：能从头上
+; 答出来的才答。所以「这个 zip 是不是 APK」仍然不答 —— 那要往里翻 AndroidManifest.xml，
+; 而一个答不出来的问题比一个猜出来的答案好。
+.try_gzip:
+    cmp word [rdi], 0x8B1F         ; 1F 8B
+    jne .try_7z
+    cmp byte [rdi + 2], 8          ; 压缩方法：8 是 deflate，几乎只有它
+    jne .try_7z
+    mov rax, 8
+    ret
+.try_7z:
+    cmp dword [rdi], 0xAFBC7A37    ; 37 7A BC AF
+    jne .try_rar
+    cmp word [rdi + 4], 0x1C27     ; 27 1C
+    jne .try_rar
+    mov rax, 9
+    ret
+.try_rar:
+    cmp dword [rdi], 0x21726152    ; 'R' 'a' 'r' '!'
+    jne .try_pdf
+    cmp word [rdi + 4], 0x071A     ; 1A 07
+    jne .try_pdf
+    mov rax, 10
+    ret
+.try_pdf:
+    cmp dword [rdi], 0x46445025    ; '%' 'P' 'D' 'F'
+    jne .try_png
+    mov rax, 11
+    ret
+.try_png:
+    cmp rcx, 8
+    jb .try_jpeg
+    cmp dword [rdi], 0x474E5089    ; 89 'P' 'N' 'G'
+    jne .try_jpeg
+    cmp dword [rdi + 4], 0x0A1A0A0D ; 0D 0A 1A 0A
+    jne .try_jpeg
+    mov rax, 12
+    ret
+.try_jpeg:
+    cmp word [rdi], 0xD8FF         ; FF D8
+    jne .try_sqlite
+    cmp byte [rdi + 2], 0xFF       ; 第三个字节也是 FF：标记段的起点
+    jne .try_sqlite
+    mov rax, 13
+    ret
+.try_sqlite:
+    cmp rcx, 16
+    jb .try_text
+    cmp dword [rdi], 0x694C5153    ; 'S' 'Q' 'L' 'i'
+    jne .try_text
+    cmp dword [rdi + 4], 0x66206574 ; 't' 'e' ' ' 'f'
+    jne .try_text
+    cmp dword [rdi + 8], 0x616D726F ; 'o' 'r' 'm' 'a'
+    jne .try_text
+    cmp dword [rdi + 12], 0x00332074 ; 't' ' ' '3' 0
+    jne .try_text
+    mov rax, 14
     ret
 .try_text:
     ; 文本：头 32 个字节里没有不可打印的东西（换行、回车、制表除外）
@@ -7973,6 +8031,40 @@ run_identify_test:
     mov rcx, rbx
     call identify
     call put_ident_kind
+    ; 另外七种：直接给头，不经文件系统。
+    ;
+    ; identify 吃的是「一串字节加一个长度」，所以它不需要文件系统 —— 而根目录只有
+    ; 512 字节，十八条已经用掉四百八十多，再放七个样本就溢出（症状是 build 在偏移
+    ; 511 处抛 RangeError）。判据要的是「给一个头，它答那个名字」，不关心那个头是从
+    ; 盘上读来的还是从数据段里指过来的。
+    lea rdi, [samp_gzip]
+    mov rcx, 64
+    call identify
+    call put_ident_kind
+    lea rdi, [samp_7z]
+    mov rcx, 64
+    call identify
+    call put_ident_kind
+    lea rdi, [samp_rar]
+    mov rcx, 64
+    call identify
+    call put_ident_kind
+    lea rdi, [samp_pdf]
+    mov rcx, 64
+    call identify
+    call put_ident_kind
+    lea rdi, [samp_png]
+    mov rcx, 64
+    call identify
+    call put_ident_kind
+    lea rdi, [samp_jpeg]
+    mov rcx, 64
+    call identify
+    call put_ident_kind
+    lea rdi, [samp_sqlite]
+    mov rcx, 64
+    call identify
+    call put_ident_kind
     call put_nl64
     ret
 .miss:
@@ -7998,6 +8090,20 @@ put_ident_kind:
     je .zip
     cmp rax, 7
     je .dex
+    cmp rax, 8
+    je .gzip
+    cmp rax, 9
+    je .sevenz
+    cmp rax, 10
+    je .rar
+    cmp rax, 11
+    je .pdf
+    cmp rax, 12
+    je .png
+    cmp rax, 13
+    je .jpeg
+    cmp rax, 14
+    je .sqlite
     mov rsi, line_kind_none
     jmp .out
 .text:
@@ -8020,6 +8126,27 @@ put_ident_kind:
     jmp .out
 .dex:
     mov rsi, line_kind_dex
+    jmp .out
+.gzip:
+    mov rsi, line_kind_gzip
+    jmp .out
+.sevenz:
+    mov rsi, line_kind_7z
+    jmp .out
+.rar:
+    mov rsi, line_kind_rar
+    jmp .out
+.pdf:
+    mov rsi, line_kind_pdf
+    jmp .out
+.png:
+    mov rsi, line_kind_png
+    jmp .out
+.jpeg:
+    mov rsi, line_kind_jpeg
+    jmp .out
+.sqlite:
+    mov rsi, line_kind_sqlite
 .out:
     call puts64
     mov al, ' '
@@ -8898,12 +9025,43 @@ line_kind_elf: db "elf", 0
 line_kind_macho: db "macho", 0
 line_kind_zip: db "zip", 0
 line_kind_dex: db "dex", 0
+line_kind_gzip: db "gzip", 0
+line_kind_7z: db "7z", 0
+line_kind_rar: db "rar", 0
+line_kind_pdf: db "pdf", 0
+line_kind_png: db "png", 0
+line_kind_jpeg: db "jpeg", 0
+line_kind_sqlite: db "sqlite", 0
 ; 别的系统的五个样本的路径。名字是 ASCII，所以码元就是它自己的字节。
 fs_pe_path: dw 0x03B1, 0x003A, 0x002F, 0x0070, 0x0065, 0x002E, 0x0062, 0x0069, 0x006E, 0
 fs_elf_path: dw 0x03B1, 0x003A, 0x002F, 0x0065, 0x006C, 0x0066, 0x002E, 0x0062, 0x0069, 0x006E, 0
 fs_macho_path: dw 0x03B1, 0x003A, 0x002F, 0x006D, 0x0061, 0x0063, 0x0068, 0x006F, 0x002E, 0x0062, 0x0069, 0x006E, 0
 fs_zip_path: dw 0x03B1, 0x003A, 0x002F, 0x007A, 0x0069, 0x0070, 0x002E, 0x0062, 0x0069, 0x006E, 0
 fs_dex_path: dw 0x03B1, 0x003A, 0x002F, 0x0064, 0x0065, 0x0078, 0x002E, 0x0062, 0x0069, 0x006E, 0
+; 七个样本头。它们不落在盘上，而是数据段里的常量 —— 理由见调用处那段注释。
+;
+; 每一个只造头：判据看的是头，而一个 64 字节的「PNG」本来也打不开。
+samp_gzip:
+    db 0x1F, 0x8B, 0x08
+    times 61 db 0
+samp_7z:
+    db 0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C
+    times 58 db 0
+samp_rar:
+    db 0x52, 0x61, 0x72, 0x21, 0x1A, 0x07
+    times 58 db 0
+samp_pdf:
+    db '%PDF-1.7', 10
+    times 55 db 0
+samp_png:
+    db 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A
+    times 56 db 0
+samp_jpeg:
+    db 0xFF, 0xD8, 0xFF, 0xE0
+    times 60 db 0
+samp_sqlite:
+    db 'SQLite format 3', 0
+    times 48 db 0
 fs_hello_path: dw 0x03B1, 0x003A, 0x002F, 0x0068, 0x0065, 0x006C, 0x006C, 0x006F
                dw 0x002E, 0x0074, 0x0078, 0x0074, 0
 fs_prog_path: dw 0x03B1, 0x003A, 0x002F, 0x0070, 0x0072, 0x006F, 0x0067, 0x002E

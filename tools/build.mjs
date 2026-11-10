@@ -447,6 +447,17 @@ const 造DEX = () => {
   b.write("dex\n035\0", 0, "latin1");
   return b;
 };
+// 另外七种。每一个只造头 —— 判据看的是头，而一个 64 字节的「PNG」本来也打不开。
+//
+// 为什么要七个而不是十几个：判据那一行每加一格，盘上就多一个文件、预读多一个扇区、
+// 索引多一条，而这三样都由 build 核对。七个让那一行从八格变成十五格，仍然读得下来。
+const 造GZIP = () => { const b = Buffer.alloc(64); b[0] = 0x1F; b[1] = 0x8B; b[2] = 0x08; return b; };
+const 造7Z = () => { const b = Buffer.alloc(64); b.write("7z\xBC\xAF\x27\x1C", 0, "latin1"); return b; };
+const 造RAR = () => { const b = Buffer.alloc(64); b.write("Rar!\x1A\x07", 0, "latin1"); return b; };
+const 造PDF = () => { const b = Buffer.alloc(64); b.write("%PDF-1.7\n", 0, "latin1"); return b; };
+const 造PNG = () => { const b = Buffer.alloc(64); b.write("\x89PNG\r\n\x1A\n", 0, "latin1"); return b; };
+const 造JPEG = () => { const b = Buffer.alloc(64); b[0] = 0xFF; b[1] = 0xD8; b[2] = 0xFF; b[3] = 0xE0; return b; };
+const 造SQLite = () => { const b = Buffer.alloc(64); b.write("SQLite format 3\0", 0, "latin1"); return b; };
 const 外五起 = 签名起 + 1;
 const 外五件 = [
   ["pe.bin", 造PE()],
@@ -579,7 +590,7 @@ for (let i = 0; i < 外五件.length; i++) {
 
 const 子目录 = Buffer.alloc(512);
 let 子位 = 写条目(子目录, 0, "note.txt", 0, 数据起 + 1, 子文件.length);
-写条目(子目录, 子位, "sub", 1, 子目录2号, 0);        // 第二层里的目录
+子位 = 写条目(子目录, 子位, "sub", 1, 子目录2号, 0);
 
 const 子目录2 = Buffer.alloc(512);
 写条目(子目录2, 0, "deep.txt", 0, 深层文件起, 深层文件.length);
