@@ -44,21 +44,21 @@ stage2:
     ; 种子读到 0x20000 起，不是 0x8000 —— 第二段自己被加载在 0x7E00，32 扇区就是
     ; 16 KB，铺到 0xBE00，而 0x8000 起的种子会把它覆盖成零。0x20000 在实模式 1 MB
     ; 之内，离得够远。
-    mov dword [dap_lba], 38       ; 第 35 个扇区：引导 1 + 第二段 33
+    mov dword [dap_lba], 39       ; 第 35 个扇区：引导 1 + 第二段 33
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x2000
     mov word [dap_count], 64
     call read_batch
     jc .seed_fail
 
-    mov dword [dap_lba], 38 + 64
+    mov dword [dap_lba], 39 + 64
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x2800
     mov word [dap_count], 64
     call read_batch
     jc .seed_fail
 
-    mov dword [dap_lba], 38 + 128
+    mov dword [dap_lba], 39 + 128
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x3000
     mov word [dap_count], 18
@@ -614,7 +614,7 @@ long_entry:
     call run_line_test
     call run_calc_live
     call run_scan_test
-    call run_rules_test
+    call run_rules_multi
     call run_pci_scan
     call run_shell
     call run_repl
@@ -2936,7 +2936,7 @@ run_ata_test:
     mov rax, 512
     call alloc64
     mov [ata_buf], rax            ; 缓冲区地址要留住：ata_read 会把 rax 用掉
-    mov rdi, 38                   ; 种子在盘上的第一个扇区：引导 1 + 第二段 33
+    mov rdi, 39                   ; 种子在盘上的第一个扇区：引导 1 + 第二段 33
     mov rsi, rax
     call ata_read
     jc ata_fail
@@ -4400,6 +4400,138 @@ run_rules_test:
     call puts64
     ret
 
+; 多行规则：拿盘上整个规则文件扫一个文件，报出命中的每一条名字。
+;
+; 这一层与「一行规则」那层的区别不是数量，是**名字**。一行规则只要能说「命中」就够，
+; 而一个规则库必须说「是哪一条命中」—— 否则五十条规则命中了一条，你只知道有事发生。
+;
+; 三行里两行是假的（never、also），它们证明的不是「没命中」，是「命中不是随手报的」：
+; 一个见到什么都报的实现会把两个名字一起报出来，而正确的实现只报 eicar。
+run_rules_multi:
+    mov rdi, fs_rules_path
+    call fs_open_path
+    test rax, rax
+    jz .no_rules
+    mov rax, [last_addr]
+    mov [rules_ptr], rax
+    mov [rules_left], rbx
+    mov rsi, line_rules_head_e
+    call puts64
+    mov rdi, fs_eicar_path
+    call scan_file_with_rules
+    call put_nl64
+    mov rsi, line_rules_head_c
+    call puts64
+    mov rdi, fs_clean_path
+    call scan_file_with_rules
+    call put_nl64
+    ret
+.no_rules:
+    mov rsi, line_rules_none
+    call puts64
+    ret
+
+; 用一个文件跑完整个规则库。rdi = 文件路径。命中的名字打出来，空格分隔；一个都没有就打 none。
+scan_file_with_rules:
+    push r14
+    push r15
+    push r13
+    call fs_open_path
+    test rax, rax
+    jz .missing
+    mov rax, [last_addr]
+    mov [data_ptr], rax
+    mov [data_len], rbx
+    mov r14, [rules_ptr]
+    mov r15, [rules_left]
+    xor r13d, r13d                 ; 命中个数
+.line:
+    test r15, r15
+    jz .done
+    xor r9, r9
+.find_eol:
+    cmp r9, r15
+    jae .have_eol
+    cmp byte [r14 + r9], 10
+    je .have_eol
+    inc r9
+    jmp .find_eol
+.have_eol:
+    xor r10, r10
+.find_colon:
+    cmp r10, r9
+    jae .next_line
+    cmp byte [r14 + r10], ':'
+    je .got_colon
+    inc r10
+    jmp .find_colon
+.got_colon:
+    mov r11, r10
+    cmp r11, 31
+    jbe .name_ok
+    mov r11, 31
+.name_ok:
+    xor rax, rax
+.copy_name:
+    cmp rax, r11
+    jae .name_done
+    mov dl, [r14 + rax]
+    mov [rule_name + rax], dl
+    inc rax
+    jmp .copy_name
+.name_done:
+    mov byte [rule_name + rax], 0
+    mov rdi, r14
+    add rdi, r10
+    add rdi, 1
+    mov rcx, r9
+    sub rcx, r10
+    sub rcx, 1
+    call parse_hex
+    mov [sig_len], rax
+    test rax, rax
+    jz .next_line
+    mov rdi, [data_ptr]
+    mov rcx, [data_len]
+    call scan_sig
+    test rax, rax
+    jz .next_line
+    test r13, r13
+    jz .no_space
+    mov al, ' '
+    call putc64
+.no_space:
+    lea rsi, [rule_name]
+    call puts64
+    inc r13
+.next_line:
+    lea r14, [r14 + r9]
+    sub r15, r9
+    test r15, r15
+    jz .done
+    cmp byte [r14], 10
+    jne .done
+    add r14, 1
+    sub r15, 1
+    jmp .line
+.done:
+    test r13, r13
+    jnz .out
+    mov rsi, line_rule_none
+    call puts64
+.out:
+    pop r13
+    pop r15
+    pop r14
+    ret
+.missing:
+    mov rsi, line_rule_none
+    call puts64
+    pop r13
+    pop r15
+    pop r14
+    ret
+
 ; 用 sig_buf 里那条规则扫一段字节。rdi = 内容，rcx = 长度。出 rax = 1 命中。
 scan_sig:
     mov r8, [sig_len]
@@ -4891,6 +5023,13 @@ calc_value: dq 0
 ; 从盘上那条规则解出来的签名，以及它的字节数。
 sig_buf: times 256 db 0
 sig_len: dq 0
+; 多行规则那一层用的游标与名字。规则库遍历与文件遍历各自要一个指针，
+; 寄存器不够用，而这类「被打印函数吃掉」的教训在这份文件里已经有四条了。
+rules_ptr: dq 0
+rules_left: dq 0
+data_ptr: dq 0
+data_len: dq 0
+rule_name: times 32 db 0
 
 line_fn116: db "Yunooka: fn116 -> ", 0
 line_call: db "Yunooka: call -> ", 0
@@ -5084,6 +5223,9 @@ line_rules_missed: db "Yunooka: rules eicar -> missed", 13, 10, 0
 line_rules_clean: db "Yunooka: rules clean -> clean", 13, 10, 0
 line_rules_false: db "Yunooka: rules clean -> false positive", 13, 10, 0
 line_rules_none: db "Yunooka: rules -> no rule", 13, 10, 0
+line_rules_head_e: db "Yunooka: rules eicar.txt = ", 0
+line_rules_head_c: db "Yunooka: rules clean.txt = ", 0
+line_rule_none: db "none", 0
 
 ; shell 的两样：要从盘上找的文件名，与它认得的第一条命令。
 ; 命令是 ASCII（不是 UTF-16）—— 因为 cmd.txt 的内容就是 ASCII 字节，
