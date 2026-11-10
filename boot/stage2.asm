@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 58
+stage2_sectors equ 60
 seed_lba       equ 1 + stage2_sectors   ; 引导占 1 个扇区，种子紧跟着第二段
 
 ; ======================================================================
@@ -647,6 +647,7 @@ long_entry:
     call run_pci_scan
     call run_ahci_probe
     call run_ahci_identify
+    call run_nvme_probe
     call run_shell
     call run_repl
     call run_div_test
@@ -3932,10 +3933,19 @@ map_page_2m:
     mov rax, [0x2000 + r12 * 8]
     test al, 1
     jnz .have_pd
-    ; 这一格还没有 PD：从池里取一页，清干净，再挂上去
-    mov rax, [pd_pool]
-    lea rdx, [rax + 0x1000]
-    mov [pd_pool], rdx
+    ; 这一格还没有 PD：分配一页，清干净，再挂上去。
+    ;
+    ; 不用固定地址，因为 0x4000 到 0x7E00 那一段不是空的：0x1000 到 0x4000 是页表、
+    ; **0x5000 到 0x6000 是 IDT**（256 项，每项 16 字节）、0x7E00 起是第二段自己。
+    ; 第一版把池写成「从 0x4000 起，每次加 0x1000」，于是第二次调用（对照实验那一次）
+    ; 取到 0x5000，rep stosq 把 IDT 整整一页清成了零 —— 而症状离这件事很远：
+    ; 「异常」那一条红，ud2 找不到处理者。一个池的起点写错，坏的是三个调用之后的事。
+    ;
+    ; alloc64 只保证 16 字节，而 PD 页要 4 KB 对齐，所以取整到 4096。
+    mov rax, 8192
+    call alloc64
+    add rax, 4095
+    and rax, -4096
     push rax
     mov rdi, rax
     xor eax, eax
@@ -3973,18 +3983,29 @@ map_page_2m:
 ; 比 class 而不比 vendor/device：VBox 的 AHCI 是 8086:2829，换一台机器就不一样，
 ; 而 class code 跟的是规范。
 run_ahci_probe:
-    xor r12, r12
+    xor r12, r12                   ; 设备号
 .dev:
     cmp r12, 32
     jae .none
+    xor r15, r15                   ; 功能号
+.func:
+    cmp r15, 8
+    jae .next_dev
     mov edi, r12d
     shl edi, 11
+    mov eax, r15d
+    shl eax, 8
+    or edi, eax
+    mov [pci_devbase], rdi         ; dev 与 func 都记住：后面每一次读配置空间都要用
     or edi, 0x08
     call pci_read
     mov r13d, eax
     shr r13d, 8
     cmp r13d, 0x010601
     je .found
+    inc r15
+    jmp .func
+.next_dev:
     inc r12
     jmp .dev
 .found:
@@ -3993,19 +4014,16 @@ run_ahci_probe:
     ; 那一片读回来的是总线上的别的东西，而它会有结构、会变、写入还能读回来，
     ; 于是看起来像一个活着的控制器。这一条假设是照着已经读到的三个怪现象立的：
     ; PxSIG 是零、PxIS 写 0xFFFFFFFF 就读回 0xFFFFFFFF、CAP 两次不同。
-    mov edi, r12d
-    shl edi, 11
+    mov edi, [pci_devbase]
     or edi, 0x04
     call pci_read
     mov [pci_cmd_before], rax
     mov esi, eax
     or esi, 6
-    mov edi, r12d
-    shl edi, 11
+    mov edi, [pci_devbase]
     or edi, 0x04
     call pci_write
-    mov edi, r12d
-    shl edi, 11
+    mov edi, [pci_devbase]
     or edi, 0x04
     call pci_read
     mov [pci_cmd], rax
@@ -4018,8 +4036,7 @@ run_ahci_probe:
     mov rax, [pci_cmd]
     call put_hex64
     call put_nl64
-    mov edi, r12d
-    shl edi, 11
+    mov edi, [pci_devbase]
     or edi, 0x24                   ; BAR5：AHCI 的 ABAR
     call pci_read
     and eax, 0xFFFFFFF0            ; 低四位是标志位，ABAR 按 4 KB 对齐
@@ -4027,6 +4044,10 @@ run_ahci_probe:
     mov rsi, line_ahci_found
     call puts64
     mov rax, r12
+    call put_num64
+    mov al, '.'
+    call putc64
+    mov rax, r15
     call put_num64
     mov al, ' '
     call putc64
@@ -4038,8 +4059,49 @@ run_ahci_probe:
     mov rdi, [ahci_abar]
     call map_page_2m
     mov r13, rax
-    mov eax, [r13]                 ; CAP：能力位，低五位是命令槽数减一
+    mov eax, [r13]                 ; CAP：能力位
     mov [ahci_cap], rax
+    ; CAP 是只读寄存器。往它写一个显眼的值再读回来 —— 真的 CAP 不会变，
+    ; 而一段普通内存会变成那个值。这是分辨「那一片是真的设备寄存器」与
+    ; 「那一片只是被映射上的一段内存」最便宜的一步，而它决定后面所有读数的可信度。
+    mov dword [r13], 0xDEADBEEF
+    mov eax, [r13]
+    mov [ahci_cap_after], rax
+    mov rsi, line_ahci_ro
+    call puts64
+    mov rax, [ahci_cap]
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, [ahci_cap_after]
+    call put_hex64
+    call put_nl64
+    ; VS（偏移 0x10）：AHCI 1.0 的版本寄存器是 0x00010000。它是「那一片是不是真的
+    ; AHCI 寄存器组」最硬的一条 —— 比 CAP 硬，因为 CAP 有些实现不保护写入，
+    ; 而 VS 不会有第二个值。写到 CAP 上那一次实验因此只能算半个证据。
+    mov eax, [r13 + 0x10]
+    mov [ahci_sig], rax
+    mov rsi, line_ahci_regs
+    call puts64
+    mov rax, [ahci_sig]
+    call put_hex64
+    call put_nl64
+    mov eax, [r13]                 ; 写完之后再取一次，后面的读数用这一个
+    ; 对照实验：映一个肯定没有设备的物理地址（1.25 GB，RAM 只有 32 MB），读它。
+    ; 如果那里读出来与 ABAR 那一片是同一个 0x18920F，那 0x18920F 就不是「控制器的
+    ; 能力位」，而是「不存在的物理地址上的固定返回值」—— 而那样的话，ABAR 那几次
+    ; 读数全部作废，包括「CAP 读得出」这件事。一个读数没有对照，就只是一个数。
+    mov rdi, 0x50000000
+    call map_page_2m
+    mov r13, rax
+    mov eax, [r13]
+    mov [ahci_ghc_before], rax
+    mov rsi, line_ahci_ctl
+    call puts64
+    mov rax, [ahci_ghc_before]
+    call put_hex64
+    call put_nl64
+    mov r13, [ahci_abar]
     ; GHC.AE（bit 31）：AHCI 规范要求驱动先把这一位置上，MMIO 那一片才算启用。
     ; 置之前读 PI 得到的是一个零 —— 而那个零有两种解释：「一个 port 都没接东西」
     ; 与「控制器还没被启用」，两种在串口上一模一样。
@@ -4135,6 +4197,41 @@ run_ahci_identify:
     mov rcx, 512
     xor eax, eax
     rep stosb
+    ; BOHC（偏移 0x28）是 BIOS 与 OS 的交接闸：BOS（bit 0）是「BIOS 还占着」的标志。
+    ; 规范说驱动初始化时若 BOS 是 1，就置 OOS（bit 1）等 BOS 清零；BIOS 不放手的话
+    ; 可以置 BOH（bit 31）强制拿走。这一台机器上 VBox 的 BIOS 确实通过 AHCI 访问过盘
+    ; （日志里 AHCI 0-P#0: 0x800 sectors），而它未必做了交接 —— 那会让控制器对 OS
+    ; 这一侧半锁着，症状正是「通用寄存器读得出、port 一片零」。
+    mov r13, [ahci_abar]
+    mov eax, [r13 + 0x28]
+    mov [ahci_bohc], rax
+    test eax, 1
+    jz .bohc_done
+    or eax, 2
+    mov [r13 + 0x28], eax
+    mov rcx, 20000000
+.bohc_wait:
+    mov eax, [r13 + 0x28]
+    test eax, 1
+    jz .bohc_done
+    dec rcx
+    jnz .bohc_wait
+    ; 还没放手：强制拿走
+    mov eax, [r13 + 0x28]
+    or eax, 0x80000000
+    mov [r13 + 0x28], eax
+.bohc_done:
+    mov eax, [r13 + 0x28]
+    mov [ahci_bohc2], rax
+    mov rsi, line_ahci_bohc
+    call puts64
+    mov rax, [ahci_bohc]
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, [ahci_bohc2]
+    call put_hex64
+    call put_nl64
     ; 只置 AE，不发起 HBA reset。
     ;
     ; 规范里 AE 之后要一次 HR 才算切到 AHCI 模式，而这一台机器上 HR 写进去之后
@@ -4170,8 +4267,7 @@ run_ahci_identify:
     mov rax, [ahci_cap]
     cmp rax, 6
     jae .bar_done
-    mov edi, 13
-    shl edi, 11
+    mov edi, [pci_devbase]
     add edi, 0x10
     lea eax, [rax * 4]
     add edi, eax
@@ -4206,8 +4302,9 @@ run_ahci_identify:
     mov [r13 + 0x08], eax
     mov dword [r13 + 0x0C], 0
     ; FIS 接收使能，再让命令处理跑起来。分两次写：规范要求 FRE 先于 ST。
+    ; SUD（bit 1，spin-up device）也要置：规范说硬盘要先转起来，命令才谈得上。
     mov eax, [r13 + 0x18]
-    or eax, 0x10
+    or eax, 0x12
     mov [r13 + 0x18], eax
     mov eax, [r13 + 0x18]
     or eax, 1
@@ -4249,6 +4346,31 @@ run_ahci_identify:
     ; 一个说「这一条线上握手了没有」。
     mov eax, [r13 + 0x24]
     mov [ahci_sig], rax
+    ; 六个 port 的 PxSSTS 一次报完：DET 那四位是设备检测。
+    ; 「port 0 是空的」与「所有 port 都是空的」是两件事 —— 后者说明这块盘在
+    ; 控制器眼里不存在，那问题就在配置那一侧，而不在我的初始化顺序上。
+    mov rsi, line_ahci_ports
+    call puts64
+    mov qword [ahci_cap], 0
+.all_loop:
+    mov rax, [ahci_cap]
+    cmp rax, 6
+    jae .all_done
+    shl rax, 7                     ; 0x80 一个 port
+    mov r13, [ahci_abar]
+    add r13, 0x100
+    add r13, rax
+    mov eax, [r13 + 0x28]
+    mov [ahci_tfd], rax
+    mov rax, [ahci_tfd]
+    call put_hex64
+    mov al, ' '
+    call putc64
+    inc qword [ahci_cap]
+    jmp .all_loop
+.all_done:
+    call put_nl64
+    mov r13, [ahci_port]
     ; 命令头（32 字节一条）：CFL 是 5 个 dword 的 FIS，一条 PRDT 表项
     mov rbx, [ahci_cmdlist]
     mov dword [rbx + 0], 5
@@ -4345,6 +4467,95 @@ run_ahci_identify:
     lea rsi, [ahci_model]
     call puts64
     jmp put_nl64
+
+; ======================================================================
+; NVMe：AHCI 的 port 侧在这台机器上不通，换一条
+; ======================================================================
+;
+; AHCI 那条路走到了同一处：控制器的通用寄存器是真的（CAP 读得出，而映一个肯定
+; 没有设备的地址读不到同一个值 —— 那个对照实验是必要的，没有它「读得出值」什么也
+; 说明不了），而**六个 port 的 PxSSTS 全是零**。VBox 的 AHCI 对 OS 这一侧报告
+; 「没有任何设备」，而 BIOS 通过它访问过盘。所以那是配置与实现之间的事，
+; 不是我这边初始化的顺序 —— 六条排除都写在 design/AHCI.txt 里。
+;
+; NVMe 是另一条：它没有 IDE 兼容模式那一段历史，寄存器全在 BAR0 的 MMIO 里，
+; 而版本寄存器 VS 是必需的（1.0 是 0x00010000）。所以「那一片是不是真的控制器」
+; 用 VS 一个数就答得出来，不必再绕 CAP 怎么写。
+;
+; class code 是 0x010802：class 01、subclass 08（非易失存储）、prog-if 02（NVMe）。
+run_nvme_probe:
+    xor r12, r12
+.dev:
+    cmp r12, 32
+    jae .none
+    xor r15, r15
+.func:
+    cmp r15, 8
+    jae .next_dev
+    mov edi, r12d
+    shl edi, 11
+    mov eax, r15d
+    shl eax, 8
+    or edi, eax
+    mov [pci_devbase], rdi
+    or edi, 0x08
+    call pci_read
+    mov r13d, eax
+    shr r13d, 8
+    cmp r13d, 0x010802
+    je .found
+    inc r15
+    jmp .func
+.next_dev:
+    inc r12
+    jmp .dev
+.found:
+    ; BAR0 是 64 位的：低半在 0x10、高半在 0x14。高半不移上去的话，
+    ; 落在 4 GB 之外的 BAR 会被读成一个低地址，而那看起来像「设备在低处」。
+    mov edi, [pci_devbase]
+    or edi, 0x10
+    call pci_read
+    and eax, 0xFFFFFFF0
+    mov [nvme_bar], rax
+    mov edi, [pci_devbase]
+    or edi, 0x14
+    call pci_read
+    shl rax, 32
+    or [nvme_bar], rax
+    mov rsi, line_nvme_found
+    call puts64
+    mov rax, r12
+    call put_num64
+    mov al, '.'
+    call putc64
+    mov rax, r15
+    call put_num64
+    mov al, ' '
+    call putc64
+    mov rax, [nvme_bar]
+    call put_hex64
+    call put_nl64
+    mov rdi, [nvme_bar]
+    call map_page_2m
+    mov r13, rax
+    mov eax, [r13 + 8]             ; VS：版本
+    mov [nvme_vs], rax
+    mov eax, [r13]                 ; CAP 低半：MQES 在 bits 15:0
+    mov [nvme_cap], rax
+    mov rsi, line_nvme_regs
+    call puts64
+    mov rax, [nvme_vs]
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, [nvme_cap]
+    call put_hex64
+    call put_nl64
+    ret
+.none:
+    mov rsi, line_nvme_none
+    call puts64
+    ret
 
 ; ======================================================================
 ; 家庭组的第二步：边界是一个可以比较的数
@@ -6987,6 +7198,21 @@ line_ahci_pcicmd: db "Yunooka: ahci pcicmd ", 0
 line_ahci_pi2: db "Yunooka: ahci pi2 ", 0
 line_ahci_regs: db "Yunooka: ahci regs ", 0
 line_ahci_bar: db "Yunooka: ahci bar ", 0
+line_ahci_bohc: db "Yunooka: ahci bohc ", 0
+line_ahci_ro: db "Yunooka: ahci ro ", 0
+line_ahci_ctl: db "Yunooka: ahci ctl ", 0
+line_ahci_ports: db "Yunooka: ahci ports ", 0
+; NVMe 那一条
+nvme_bar: dq 0
+nvme_vs: dq 0
+nvme_cap: dq 0
+line_nvme_found: db "Yunooka: nvme dev ", 0
+line_nvme_regs: db "Yunooka: nvme regs ", 0
+line_nvme_none: db "Yunooka: nvme none", 13, 10, 0
+ahci_cap_after: dq 0
+pci_devbase: dq 0
+ahci_bohc: dq 0
+ahci_bohc2: dq 0
 pci_cmd_before: dq 0
 pci_cmd: dq 0
 pd_pool: dq 0x4000

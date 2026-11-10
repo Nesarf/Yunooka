@@ -85,3 +85,38 @@ map_page_2m 是通用的：任何一 GB 之外的物理地址都能用它映进�
 下一次要用 MMIO 的东西（网卡、显示、别的 PCI 设备）都会用到它。
 
 pci_write 也是通用的，在那之前这一份文件里只有 pci_read。
+
+
+七、换到 NVMe：那一片是活的
+
+AHCI 那边的最后一锤是两个实验一起给的。
+
+第一个是对照：映一个肯定没有设备的物理地址（0x50000000，RAM 只有 32 MB），读它 —— 读出
+零。而 ABAR 那一片读得出 0x18920F。所以那一片是真的设备，不是「未映射内存的残留」。
+有一个更早的实验因此被判错：往 CAP 写 0xDEADBEEF 再读回 0xDEADBEEF，当时我以为那证明
+它不是设备；其实 VBox 的 AHCI 只是不保护 CAP 的写入。一个读数没有对照，就只是一个数。
+
+第二个是把六个 port 的 PxSSTS 全读出来：**六个都是零**。所以不是「port 0 上没东西」，
+是这块盘在控制器眼里根本不存在 —— 而 BIOS 通过同一个控制器访问过它（VBox 日志里
+AHCI 0-P#0: 0x800 sectors）。那是配置与实现之间的事，guest 侧改不动。
+
+于是换 NVMe：它没有 IDE 兼容模式那一段历史，寄存器全在 BAR0 的 MMIO 里，而版本寄存器
+VS 是必需的 —— 「那一片是不是真控制器」用 VS 一个数就答得出来。
+
+加上去之后第一次读就答了：
+
+  nvme dev 14.0 0xE1008000
+  nvme regs 0x00010200 0x0A010FFF
+
+VS 是 0x00010200（NVMe 1.2），CAP 的低十六位是 0x0FFF（MQES，4096 个队列项）。
+两个都是合理的版本号与能力值，而那正是 AHCI 那边缺的东西（它的 VS 是零）。
+所以这条通道是活的。
+
+下一步是 NVMe 自己的那条初始化：CC.EN 清零、等 CSTS.RDY=0、写 AQA/ASQ/ACQ、
+CC 里置 EN 与 CSS 与 IOSQES/IOCQES、等 RDY 起来、然后发第一条命令。
+
+为什么这条路对盘健康更好：NVMe 的 Get Log Page（opcode 0x02，LID 0x02）一页就把
+Composite Temperature、Available Spare、Percentage Used、Media Errors、
+Data Units Read/Written 全给出来 —— 那是 SMART 想要的那五样，而它不需要先过
+IDENTIFY 这一道门。
+

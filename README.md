@@ -811,7 +811,7 @@ Yunooka: persist survived a reboot           第二次启动
 | `browser` | 网络栈（ARP/IP/TCP）与 `system-software` 的窗口层 |
 | `self-host` | HMYR 编译器本身能在字节码里跑 |
 | `android-port` | arm64 安卓那一整套（它与 x86-64 不共享一行代码） |
-| `disk-health` | 一条能让盘答 `IDENTIFY DEVICE` 的通道（IDE 侧已经排除干净，AHCI 走到了 port） |
+| `disk-health` | NVMe 的初始化（控制器已验证是活的，见 [design/AHCI.txt](design/AHCI.txt) 第七节） |
 | `system-software` | 隔离要进程、中继要音频；五件里两件的砖已铺好 |
 | `homegroup` | 一个「改动已有条目」的动作（写已有文件、删除） |
 
@@ -855,6 +855,38 @@ IDE 那条路上五个探测全回一页零之后，这一轮换了通道：给�
 整条链、九条读数、以及下一步的三条候选（最便宜的是换 SATA 控制器类型，最贵的是换芯片组
 —— 这台 VM 是 `piix3` 而它报的 AHCI 是 ICH9 的设备号）都写在
 [design/AHCI.txt](design/AHCI.txt) 里。
+
+### 判死那条路的两个实验
+
+AHCI 最后是被两个实验一起判死的，而两个都值得记。
+
+**一、对照实验。** 映一个肯定没有设备的物理地址（`0x50000000`，RAM 只有 32 MB）读它 ——
+读出零。而 ABAR 那一片读出 `0x18920F`。所以那一片**是真的设备**，不是未映射内存的残留。
+
+这一条顺手把更早的一个结论判了错：往 `CAP` 写 `0xDEADBEEF` 再读回 `0xDEADBEEF`，当时
+以为那证明「它不是设备」—— 其实 VBox 的 AHCI 只是**不保护 CAP 的写入**。
+**一个读数没有对照，就只是一个数。**
+
+**二、六个 port 的 `PxSSTS` 全读出来，都是零。** 所以不是「port 0 上没东西」，是这块盘
+在控制器眼里根本不存在 —— 而 BIOS 通过同一个控制器访问过它。那是配置与实现之间的事，
+guest 侧改不动。
+
+### NVMe：那一片是活的
+
+换 `pcie` + `NVMe` 控制器，第一次读就答了：
+
+```
+nvme dev 14.0 0xE1008000
+nvme regs 0x00010200 0x0A010FFF
+```
+
+**`VS = 0x00010200`**（NVMe 1.2）、**`CAP` 低十六位 `0x0FFF`**（MQES，4096 个队列项）——
+两个都是合理的版本号与能力值，而那正是 AHCI 缺的东西（它的 `VS` 是零）。
+
+这条路对盘健康还更好：NVMe 的 `Get Log Page`（opcode `0x02`，LID `0x02`）一页就把
+Composite Temperature、Available Spare、Percentage Used、Media Errors、Data Units
+Read/Written 全给出来 —— 那是 SMART 想要的那五样，而它**不需要先过 IDENTIFY 那道门**。
+
 
 ## 那些名字：同名不同物
 
