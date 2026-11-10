@@ -69,6 +69,7 @@ const 全程 = [
   "Yunooka: secret blocked",
   "Yunooka: pixel ",
   "Yunooka: line ",
+  "Yunooka: calc ready",
   "Yunooka: shell> ",
   "Yunooka: repl> ",
   "Yunooka: math> average -> ",
@@ -310,10 +311,18 @@ if (起.status !== 0) 做不了("起不来：" + String(起.stderr || "").slice(
 // 一次送整行时 8042 的缓冲装不下，头一个会被挤掉（回送 files 得到 iles）。逐字符、
 // 每个之间留六十毫秒就好了。回车单独用 keyboardputscancode 送按下码 0x1C。
 const 睡 = (毫秒) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 毫秒);
+const 送码 = (码) => { vbox(["controlvm", 机名, "keyboardputscancode", 码]); 睡(40); };
 const 送一行 = (文字) => {
   for (const 字 of 文字) {
-    vbox(["controlvm", 机名, "keyboardputstring", 字]);
-    睡(60);
+    // 字母数字走 putstring；符号要自己按 Shift。
+    // 实测：送「1+1=x」回显成「11」—— 数字到了，而 + 与 = 都丢了。
+    // 集 1 里 = 是 0x0D，+ 是 Shift(0x2A) 加 0x0D。
+    //
+    // 而且四个码不能一次送：那样整个序列会被挤掉（与「整行一次送丢头一个」同族）。
+    // 一个码一次，中间留四十毫秒，8042 才跟得上。
+    if (字 === "+") { 送码("2a"); 送码("0d"); 送码("8d"); 送码("aa"); }
+    else if (字 === "=") { 送码("0d"); 送码("8d"); }
+    else { vbox(["controlvm", 机名, "keyboardputstring", 字]); 睡(60); }
   }
   睡(100);
   // 回车也要送放开码（集 1：按下 1C、放开 9C）。只送按下时 8042 认为回车一直按着，
@@ -323,6 +332,7 @@ const 送一行 = (文字) => {
 let 读到 = "";
 let 送过整行 = false;
 let 送过名字 = false;
+let 送过算式 = false;
 for (let i = 0; i < 40; i++) {
   睡(500);
   if (!送过整行) {
@@ -341,13 +351,21 @@ for (let i = 0; i < 40; i++) {
       送一行("letters");
       送过名字 = true;
     }
+    // 第三条要靠第三条握手：算数那一行也在等键。
+    // 只送「1+1」不送「=x」：实测符号后面跟一个字母时那个字母到不了客人机
+    //（回显是「1+1=」而 x 丢了），原因没查清。算的那半不依赖它，所以先钉住算。
+    if (!送过算式 && 读到.includes("Yunooka: calc ready")) {
+      送一行("1+1");
+      送过算式 = true;
+    }
     const 步数 = (读到.match(/Yunooka: op /g) || []).length;
     const 结果数 = (读到.match(/Yunooka: fn116 -> /g) || []).length;
     const 按名数 = (读到.match(/Yunooka: byname/g) || []).length;
     // 收手的条件里要有「交互那两行也走完了」：只等 ready 会在这儿就断电，而键刚送出去、
     // 客人机还没处理。那样看到的是一行 ready 加一条空白 —— 与「键没送到」一模一样。
     const 交互完 = /Yunooka: shell ready[\s\S]*?Yunooka: shell> files/.test(读到)
-      && /Yunooka: repl ready[\s\S]*?Yunooka: repl-live> letters/.test(读到);
+      && /Yunooka: repl ready[\s\S]*?Yunooka: repl-live> letters/.test(读到)
+      && /Yunooka: calc ready[\s\S]*?=2\.000000/.test(读到);
     if (交互完 && 全程.every((s) => 读到.includes(s)) && 步数 >= 4 && 结果数 >= 2 && 按名数 >= 2) break;
   }
 }
@@ -512,6 +530,10 @@ const 像成 = 像行 !== null && 像行[1] === "000000000000002F"
 const 线行 = /Yunooka: line ([0-9A-F]+) ([0-9A-F]+)/.exec(读到);
 const 线成 = 线行 !== null && 线行[1] === "000000000000002F"
   && 线行[2] === "000000000000002F";
+// 会算数：送「1+1」进去，等它打出 2.000000。那个 2 不是常量，是 calc_expr 走完两级
+// 求值的结果 —— 少一样（解析、加法、打印）都给不出来。名字那半（=x）还没通，见下面那一行注释。
+const 算行 = /Yunooka: calc ready[\s\S]*?=([0-9.]+)/.exec(读到);
+const 算成 = 算行 !== null && 算行[1] === "2.000000";
 // 写：造一个不存在的名字、写一段只有这里才有的字节、再按路径打开它。
 // 判据是那段内容本身 —— 而且 files 的列表里也要多出这个名字，因为「目录里多了一条」
 // 与「数据落对了地方」是两件事，两件都得成立。
@@ -669,6 +691,9 @@ console.log("像素      " + (像行 ? "写回 " + 像行[1].slice(-2) + " " + �
 console.log("画线      " + (线行 ? "线上两点 " + 线行[1].slice(-2) + " " + 线行[2].slice(-2) : "(没跑到)")
   + (线成 ? "  —— (0,0) 与 x=160 处都是线的颜色：一条连续的对角线"
     : "  —— 不对：两点都该是 2F"));
+console.log("算数      " + (算行 ? "1+1 = " + 算行[1] : "(没跑到)")
+  + (算成 ? "  —— 两级求值走通了：解析、f64 加、六位小数打印"
+    : "  —— 不对：应当是 2.000000"));
 console.log("壳        " + (壳行 ? "shell> files" : "(没跑到)")
   + (列行 ? "  → " + 列行[0] : "  → (没列出来)")
   + (壳成 ? "  —— 那一行认得出来、回答得出（来源见上一行）"
@@ -724,6 +749,7 @@ const 结构成 = 有种子
     && 门成
     && 像成
     && 线成
+    && 算成
     && 壳成
     && 重求成
     && 除成

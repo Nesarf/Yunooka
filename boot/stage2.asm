@@ -44,21 +44,21 @@ stage2:
     ; 种子读到 0x20000 起，不是 0x8000 —— 第二段自己被加载在 0x7E00，32 扇区就是
     ; 16 KB，铺到 0xBE00，而 0x8000 起的种子会把它覆盖成零。0x20000 在实模式 1 MB
     ; 之内，离得够远。
-    mov dword [dap_lba], 34       ; 第 35 个扇区：引导 1 + 第二段 33
+    mov dword [dap_lba], 35       ; 第 35 个扇区：引导 1 + 第二段 33
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x2000
     mov word [dap_count], 64
     call read_batch
     jc .seed_fail
 
-    mov dword [dap_lba], 34 + 64
+    mov dword [dap_lba], 35 + 64
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x2800
     mov word [dap_count], 64
     call read_batch
     jc .seed_fail
 
-    mov dword [dap_lba], 34 + 128
+    mov dword [dap_lba], 35 + 128
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x3000
     mov word [dap_count], 18
@@ -612,6 +612,7 @@ long_entry:
     call run_gate_test
     call run_pixel_test
     call run_line_test
+    call run_calc_live
     call run_pci_scan
     call run_shell
     call run_repl
@@ -2234,12 +2235,28 @@ read_line_keys:
     mov dx, 0x60
     in al, dx
     movzx r14, al
+    ; Shift 要在跳过高位码之前处理：放开码 0xAA 与 0xB6 本身就 ≥ 128。
+    ; 表里只有小写与不用 Shift 的那几个字符，所以 Shift 只用来把 = 变成 +。
+    cmp r14, 0x2A
+    je .shift_on
+    cmp r14, 0x36
+    je .shift_on
+    cmp r14, 0xAA
+    je .shift_off
+    cmp r14, 0xB6
+    je .shift_off
     cmp r14, 128
     jae .next                      ; 集 1 的放开码是「按下码或上 0x80」，一律跳过
     lea rax, [keymap]
     movzx eax, byte [rax + r14]
     test al, al
     jz .next
+    cmp al, '='
+    jne .plain
+    cmp byte [shift_state], 0
+    je .plain
+    mov al, '+'                    ; Shift 加 = 是 +
+.plain:
     cmp al, 13
     je .done
     mov rcx, [line_len]
@@ -2250,6 +2267,12 @@ read_line_keys:
     inc rcx
     mov [line_len], rcx
     call putc64                    ; 回显：串口上看得出正在打字
+    jmp .next
+.shift_on:
+    mov byte [shift_state], 1
+    jmp .next
+.shift_off:
+    mov byte [shift_state], 0
     jmp .next
 .next:
     dec r10
@@ -2911,7 +2934,7 @@ run_ata_test:
     mov rax, 512
     call alloc64
     mov [ata_buf], rax            ; 缓冲区地址要留住：ata_read 会把 rax 用掉
-    mov rdi, 34                   ; 种子在盘上的第一个扇区：引导 1 + 第二段 33
+    mov rdi, 35                   ; 种子在盘上的第一个扇区：引导 1 + 第二段 33
     mov rsi, rax
     call ata_read
     jc ata_fail
@@ -4049,6 +4072,153 @@ run_line_test:
     call put_nl64
     ret
 
+; ======================================================================
+; 会算数：把「1+1=x」算出来
+; ======================================================================
+;
+; 这是 math-console 里最早被点名的一件，而它一直是空的 —— 因为 MATH.txt 写着
+; 「表达式求值属于 HMYR 编译器」。那句话对，但它说的是「完整的表达式」；而用户要的第一件事
+; 是两三个数的四则运算，那不需要编译器，只需要一个会看两级的读法。
+;
+; 这一版只认两级：乘除先、加减后。不做括号，也不做递归 —— 括号要递归，而递归要压 xmm 栈，
+; 那会把这一段变成本文件里最难读的地方；而「1+1」与「2*3+4」不碰括号。
+;
+; 输入是 UTF-16（键盘那一路已经转好），rdi 前进到解析停下的地方；值在 xmm0。
+calc_expr:
+    call calc_term
+    movsd xmm4, xmm0               ; 这一级的和
+.loop:
+    movzx eax, word [rdi]
+    cmp ax, '+'
+    je .plus
+    cmp ax, '-'
+    je .minus
+.done:
+    movsd xmm0, xmm4
+    ret
+.plus:
+    add rdi, 2
+    call calc_term
+    addsd xmm4, xmm0
+    jmp .loop
+.minus:
+    add rdi, 2
+    call calc_term
+    subsd xmm4, xmm0
+    jmp .loop
+
+; 乘除那一级。xmm5 是这一级的积，xmm6 暂存右操作数。
+calc_term:
+    call calc_factor
+    movsd xmm5, xmm0
+.loop:
+    movzx eax, word [rdi]
+    cmp ax, '*'
+    je .mul
+    cmp ax, '/'
+    je .div
+.done:
+    movsd xmm0, xmm5
+    ret
+.mul:
+    add rdi, 2
+    call calc_factor
+    mulsd xmm5, xmm0
+    jmp .loop
+.div:
+    add rdi, 2
+    call calc_factor
+    movsd xmm6, xmm0
+    movsd xmm0, xmm5
+    movsd xmm1, xmm6
+    call div_f64
+    movsd xmm5, xmm0
+    jmp .loop
+
+; 一个数。负号当一元运算符处理，因为「-3+5」在录入时不该被当成错误。
+calc_factor:
+    movzx eax, word [rdi]
+    cmp ax, '-'
+    jne .number
+    add rdi, 2
+    call calc_factor
+    movsd xmm1, [const_signmask]   ; 取负：与 0x8000… 异或
+    xorpd xmm0, xmm1
+    ret
+.number:
+    mov rcx, 32                    ; 上限：一个数在这一版里不会长过 32 个码元
+    call parse_decimal
+    lea rdi, [rdi + rax * 2]
+    ret
+
+; 会算数的那一行：收一行、算、打出来。
+;
+; 「1+1=x」与「1+1」两种写法都认：等号右边是这一行的结果叫什么，没有等号就直接打值。
+; 用户的原话是「输入 1+1=x 并回车（确认）的时候能够输出 x=2」，所以等号左边的算法与
+; 右边的名字是这一件事的两半，而名字那半只是打印时加一句，不影响求值。
+;
+; 求值本身只到两级（乘除、加减），见 calc_expr 的注释。这一版不算括号、不算幂、
+; 不算函数 —— 那些都要递归或符号表，而它们都不是「1+1=x」需要的。
+run_calc_live:
+    mov rsi, line_calc_ready
+    call puts64
+    call read_line_keys
+    test rax, rax
+    jz .timeout
+    ; 键盘给的是 ASCII 字节，而 parse_decimal 读的是码元。
+    lea rdi, [line_buf]
+    lea rsi, [line_buf16]
+    mov rcx, [line_len]
+    xor rdx, rdx
+.conv:
+    cmp rdx, rcx
+    jae .converted
+    movzx eax, byte [rdi + rdx]
+    mov [rsi + rdx * 2], ax
+    inc rdx
+    jmp .conv
+.converted:
+    mov word [line_buf16 + rcx * 2], 0
+    ; 找等号：找到就把表达式截断在那里，右边留作名字
+    lea r12, [line_buf16]
+    xor rdx, rdx
+.find_eq:
+    cmp rdx, rcx
+    jae .no_eq
+    cmp word [line_buf16 + rdx * 2], '='
+    je .has_eq
+    inc rdx
+    jmp .find_eq
+.has_eq:
+    mov word [line_buf16 + rdx * 2], 0
+    lea r13, [line_buf16 + rdx * 2 + 2]   ; 名字，可能空
+    jmp .calc
+.no_eq:
+    xor r13d, r13d                 ; 没有名字
+.calc:
+    lea rdi, [line_buf16]
+    call calc_expr
+    movsd [calc_value], xmm0
+    mov rsi, r13
+    test rsi, rsi
+    jz .no_name
+    call puts64                    ; 名字
+    mov al, '='
+    call putc64
+    jmp .print
+.no_name:
+    mov rsi, line_calc_arrow
+    call puts64
+.print:
+    movsd xmm0, [calc_value]
+    call put_f64
+    call put_nl64
+    ret
+.timeout:
+    mov rsi, line_calc_timeout
+    call puts64
+    ret
+
 ; 打一串 UTF-16 码元，只取低字节。这一版的名字都是 ASCII，够用；非 ASCII 的名字会
 ; 在这里变成别的字节，而那是「打印」这一层的限制，不是名字本身的。
 put_utf16_ascii:
@@ -4460,6 +4630,8 @@ gate_a: dd 0
 gate_b: dd 0
 ; 非零时门放行。只有标记这种管理动作会打开它，读取一律走门。
 gate_off: dq 0
+; calc_live 求出来的那个值：打印分几支，而 xmm 会在打印里被用掉。
+calc_value: dq 0
 
 line_fn116: db "Yunooka: fn116 -> ", 0
 line_call: db "Yunooka: call -> ", 0
@@ -4550,7 +4722,7 @@ line_prog_nomain: db "Yunooka: prog has no main", 13, 10, 0
 ; 一个形状对、意思错的字符。
 align 8
 keymap:
-    db 0,0,"1","2","3","4","5","6", "7","8","9","0",0,0,0,0     ; 00-0F
+    db 0,0,"1","2","3","4","5","6", "7","8","9","0","-","=",0,0     ; 00-0F
     db "q","w","e","r","t","y","u","i", "o","p",0,0,13,0,"a","s" ; 10-1F
     db "d","f","g","h","j","k","l",0, 0,0,0,0,"z","x","c","v"    ; 20-2F
     db "b","n","m",0,0,0,0,0, 0," ",0,0,0,0,0,0                  ; 30-3F
@@ -4566,6 +4738,8 @@ line_buf: times 64 db 0
 line_len: dq 0
 ; 同一个名字的 UTF-16 版本：键盘给的是 ASCII 字节，而种子里存的是码元。
 line_buf16: times 128 db 0
+; Shift 有没有按着。表里只有小写与不用 Shift 的字符，所以它只用来把 = 变成 +。
+shift_state: db 0
 ; 当前在扫哪一个包。种子的地址是 0x20000，而盘上读进来的包住在预读区里 ——
 ; find_fn_by_name 靠这个变量就知道该从哪儿开始，不必写两份查找器。
 pkg_base: dq 0x20000
@@ -4629,6 +4803,9 @@ line_family: db "family", 13, 10, 0
 line_not_family: db "not family", 13, 10, 0
 line_pixel: db "Yunooka: pixel ", 0
 line_line: db "Yunooka: line ", 0
+line_calc_ready: db "Yunooka: calc ready", 13, 10, 0
+line_calc_arrow: db "=", 0
+line_calc_timeout: db "Yunooka: no line", 13, 10, 0
 
 ; shell 的两样：要从盘上找的文件名，与它认得的第一条命令。
 ; 命令是 ASCII（不是 UTF-16）—— 因为 cmd.txt 的内容就是 ASCII 字节，
@@ -4712,4 +4889,4 @@ seed_bytes: dd 0
 
 ; 上限 = 引导之后那一段占的字节数。它与 boot.asm 里那句 mov al、build.mjs 里的上限、
 ; 以及种子的起始扇区是同一组数 —— 四个数字一起改，少一个就会在别处报出来。
-times 16896-($-$$) db 0
+times 17408-($-$$) db 0
