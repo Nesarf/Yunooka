@@ -44,21 +44,21 @@ stage2:
     ; 种子读到 0x20000 起，不是 0x8000 —— 第二段自己被加载在 0x7E00，32 扇区就是
     ; 16 KB，铺到 0xBE00，而 0x8000 起的种子会把它覆盖成零。0x20000 在实模式 1 MB
     ; 之内，离得够远。
-    mov dword [dap_lba], 36       ; 第 35 个扇区：引导 1 + 第二段 33
+    mov dword [dap_lba], 38       ; 第 35 个扇区：引导 1 + 第二段 33
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x2000
     mov word [dap_count], 64
     call read_batch
     jc .seed_fail
 
-    mov dword [dap_lba], 36 + 64
+    mov dword [dap_lba], 38 + 64
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x2800
     mov word [dap_count], 64
     call read_batch
     jc .seed_fail
 
-    mov dword [dap_lba], 36 + 128
+    mov dword [dap_lba], 38 + 128
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x3000
     mov word [dap_count], 18
@@ -126,7 +126,7 @@ stage2:
     mov dword [dap_lba], 1024
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x4000
-    mov word [dap_count], 13
+    mov word [dap_count], 14
     call read_batch
     jnc .fs_ready
     mov si, line_fs_preread
@@ -614,6 +614,7 @@ long_entry:
     call run_line_test
     call run_calc_live
     call run_scan_test
+    call run_rules_test
     call run_pci_scan
     call run_shell
     call run_repl
@@ -2935,7 +2936,7 @@ run_ata_test:
     mov rax, 512
     call alloc64
     mov [ata_buf], rax            ; 缓冲区地址要留住：ata_read 会把 rax 用掉
-    mov rdi, 36                   ; 种子在盘上的第一个扇区：引导 1 + 第二段 33
+    mov rdi, 38                   ; 种子在盘上的第一个扇区：引导 1 + 第二段 33
     mov rsi, rax
     call ata_read
     jc ata_fail
@@ -4269,6 +4270,167 @@ scan_eicar:
     xor eax, eax
     ret
 
+; 把一个 ASCII 十六进制串解成字节。rdi = 串，rcx = 字符数。出 rax = 字节数，写进 sig_buf。
+;
+; 为什么规则要放盘上、而不继续写死在代码里：eicar_sig 那个常量证明的是「子串搜索能认出这 68
+; 字节」，而它一个字都不证明「规则是数据」。换掉盘上那个文件、不改一行代码、行为跟着变 ——
+; 那才是这个断言的证明方式，而这条路径就是为它存在的。
+parse_hex:
+    xor r8, r8                     ; 输出字节数
+    xor r9, r9                     ; 输入字符索引
+.loop:
+    lea rax, [r9 + 1]
+    cmp rax, rcx
+    jae .done
+    movzx eax, byte [rdi + r9]
+    call hex_val
+    shl al, 4
+    mov dl, al
+    add r9, 1
+    movzx eax, byte [rdi + r9]
+    call hex_val
+    or dl, al
+    mov [sig_buf + r8], dl
+    add r8, 1
+    add r9, 1
+    jmp .loop
+.done:
+    mov rax, r8
+    ret
+
+; 一个字符的十六进制值。入 al，出 al。不是十六进制字符时给 0 —— 而 0 会让那条规则扫不到东西，
+; 响声是「没命中」而不是「崩了」，这个取舍是有意的：一条坏规则不该让整台机器停下。
+hex_val:
+    cmp al, '0'
+    jb .bad
+    cmp al, '9'
+    jbe .digit
+    cmp al, 'A'
+    jb .bad
+    cmp al, 'F'
+    ja .bad
+    sub al, 'A' - 10
+    ret
+.digit:
+    sub al, '0'
+    ret
+.bad:
+    xor al, al
+    ret
+
+; 拿盘上的规则扫两个文件。
+;
+; 规则文件的形状：一行 `名字:十六进制`，冒号前是名字、后是签名。真的 ClamAV .ndb 还有
+; 「目标类型」与「偏移」两栏（偏移可写 * 表示任意位置），这一版先只认两栏 —— 但形状按它来，
+; 所以往后加那两栏是扩这一行，不是推翻它。
+run_rules_test:
+    mov rdi, fs_rules_path
+    call fs_open_path
+    test rax, rax
+    jz .no_rules
+    mov rdi, [last_addr]
+    mov rcx, rbx                   ; 规则文件的长度
+    ; 找冒号：它把名字与签名分开
+    xor r9, r9
+.find_colon:
+    cmp r9, rcx
+    jae .no_rules
+    cmp byte [rdi + r9], ':'
+    je .have_colon
+    inc r9
+    jmp .find_colon
+.have_colon:
+    add r9, 1                      ; 跳过冒号，r9 现在是签名的起点
+    lea rdi, [rdi + r9]
+    mov rcx, rcx
+    sub rcx, r9                    ; 签名的字符数
+    ; 到行尾为止（规则文件可能有多行，这一版只认第一行）
+    xor r10, r10
+.trim:
+    cmp r10, rcx
+    jae .parsed
+    cmp byte [rdi + r10], 10
+    je .cut
+    cmp byte [rdi + r10], 13
+    je .cut
+    inc r10
+    jmp .trim
+.cut:
+    mov rcx, r10
+.parsed:
+    call parse_hex
+    mov [sig_len], rax
+    test rax, rax
+    jz .no_rules
+    ; 扫两个文件
+    mov rdi, fs_eicar_path
+    call fs_open_path
+    test rax, rax
+    jz .no_rules
+    mov rdi, [last_addr]
+    mov rcx, rbx
+    call scan_sig
+    test rax, rax
+    jz .missed
+    mov rsi, line_rules_found
+    call puts64
+    jmp .second
+.missed:
+    mov rsi, line_rules_missed
+    call puts64
+.second:
+    mov rdi, fs_clean_path
+    call fs_open_path
+    test rax, rax
+    jz .no_rules
+    mov rdi, [last_addr]
+    mov rcx, rbx
+    call scan_sig
+    test rax, rax
+    jnz .false_pos
+    mov rsi, line_rules_clean
+    call puts64
+    ret
+.false_pos:
+    mov rsi, line_rules_false
+    call puts64
+    ret
+.no_rules:
+    mov rsi, line_rules_none
+    call puts64
+    ret
+
+; 用 sig_buf 里那条规则扫一段字节。rdi = 内容，rcx = 长度。出 rax = 1 命中。
+scan_sig:
+    mov r8, [sig_len]
+    cmp rcx, r8
+    jb .no
+    sub rcx, r8
+    xor r9, r9
+.outer:
+    cmp r9, rcx
+    ja .no
+    xor r10, r10
+.inner:
+    cmp r10, r8
+    jae .yes
+    mov r11, r9
+    add r11, r10
+    mov al, [rdi + r11]
+    cmp al, [sig_buf + r10]
+    jne .next
+    inc r10
+    jmp .inner
+.next:
+    inc r9
+    jmp .outer
+.yes:
+    mov rax, 1
+    ret
+.no:
+    xor eax, eax
+    ret
+
 ; 扫两个文件：一个含那个串、一个不含。两条判据都要 —— 一个永远报 FOUND 的实现过第一条，
 ; 一个永远报 clean 的过第二条，只有两条一起才分得开口。
 run_scan_test:
@@ -4726,6 +4888,9 @@ gate_b: dd 0
 gate_off: dq 0
 ; calc_live 求出来的那个值：打印分几支，而 xmm 会在打印里被用掉。
 calc_value: dq 0
+; 从盘上那条规则解出来的签名，以及它的字节数。
+sig_buf: times 256 db 0
+sig_len: dq 0
 
 line_fn116: db "Yunooka: fn116 -> ", 0
 line_call: db "Yunooka: call -> ", 0
@@ -4912,6 +5077,13 @@ line_scan_missed: db "Yunooka: scan eicar -> missed", 13, 10, 0
 line_scan_clean: db "Yunooka: scan clean -> clean", 13, 10, 0
 line_scan_false: db "Yunooka: scan clean -> false positive", 13, 10, 0
 line_scan_nofile: db "Yunooka: scan -> no file", 13, 10, 0
+fs_rules_path: dw 0x03B1, 0x003A, 0x002F, 0x0072, 0x0075, 0x006C, 0x0065, 0x0073
+               dw 0x002E, 0x0074, 0x0078, 0x0074, 0
+line_rules_found: db "Yunooka: rules eicar -> FOUND", 13, 10, 0
+line_rules_missed: db "Yunooka: rules eicar -> missed", 13, 10, 0
+line_rules_clean: db "Yunooka: rules clean -> clean", 13, 10, 0
+line_rules_false: db "Yunooka: rules clean -> false positive", 13, 10, 0
+line_rules_none: db "Yunooka: rules -> no rule", 13, 10, 0
 
 ; shell 的两样：要从盘上找的文件名，与它认得的第一条命令。
 ; 命令是 ASCII（不是 UTF-16）—— 因为 cmd.txt 的内容就是 ASCII 字节，
@@ -4995,4 +5167,4 @@ seed_bytes: dd 0
 
 ; 上限 = 引导之后那一段占的字节数。它与 boot.asm 里那句 mov al、build.mjs 里的上限、
 ; 以及种子的起始扇区是同一组数 —— 四个数字一起改，少一个就会在别处报出来。
-times 17920-($-$$) db 0
+times ((($-$$)+511)/512)*512-($-$$) db 0

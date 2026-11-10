@@ -71,6 +71,7 @@ const 全程 = [
   "Yunooka: line ",
   "Yunooka: calc ready",
   "Yunooka: scan eicar -> FOUND",
+  "Yunooka: rules eicar -> FOUND",
   "Yunooka: shell> ",
   "Yunooka: repl> ",
   "Yunooka: math> average -> ",
@@ -540,6 +541,11 @@ const 算成 = 算行 !== null && 算行[1] === "2.000000";
 const 扫行 = /Yunooka: scan eicar -> FOUND/.test(读到);
 const 净行 = /Yunooka: scan clean -> clean/.test(读到);
 const 扫成 = 扫行 && 净行;
+// 规则从盘上读：换掉那个文件行为就跟着变，所以这条与上面那条分得开 ——
+// 上面证明「子串搜索认得这 68 字节」，这条证明「规则是数据」。
+const 规行 = /Yunooka: rules eicar -> FOUND/.test(读到);
+const 规净 = /Yunooka: rules clean -> clean/.test(读到);
+const 规成 = 规行 && 规净;
 // 写：造一个不存在的名字、写一段只有这里才有的字节、再按路径打开它。
 // 判据是那段内容本身 —— 而且 files 的列表里也要多出这个名字，因为「目录里多了一条」
 // 与「数据落对了地方」是两件事，两件都得成立。
@@ -706,6 +712,9 @@ console.log("算数      " + (算行 ? "1+1 = " + 算行[1] : "(没跑到)")
 console.log("扫描      " + (扫行 ? "eicar -> FOUND" : "(没命中)") + "  " + (净行 ? "clean -> clean" : "(误报)")
   + (扫成 ? "  —— 一条规则、两个文件：命中的是真命中，没命中的没误报"
     : "  —— 不对：应当命中 eicar、放过 clean"));
+console.log("规则      " + (规行 ? "rules eicar -> FOUND" : "(没命中)") + "  " + (规净 ? "rules clean -> clean" : "(误报)")
+  + (规成 ? "  —— 规则从盘上读、解成字节、再扫：规则是数据，不是代码里的常量"
+    : "  —— 不对：读盘上的 rules.txt 之后应当命中 eicar、放过 clean"));
 console.log("壳        " + (壳行 ? "shell> files" : "(没跑到)")
   + (列行 ? "  → " + 列行[0] : "  → (没列出来)")
   + (壳成 ? "  —— 那一行认得出来、回答得出（来源见上一行）"
@@ -763,6 +772,7 @@ const 结构成 = 有种子
     && 线成
     && 算成
     && 扫成
+    && 规成
     && 壳成
     && 重求成
     && 除成

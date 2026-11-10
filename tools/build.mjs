@@ -71,10 +71,10 @@ if (引导[510] !== 0x55 || 引导[511] !== 0xaa) {
   失败("末两字节应当是 55 AA，实际 " + 引导[510].toString(16) + " " + 引导[511].toString(16));
 }
 const 清单 = path.join(建, "stage2.lst");
-const 二段 = 编一段("第二段", 源二, 像二, 17920, 清单);
+const 二段 = 编一段("第二段", 源二, 像二, 18944, 清单);
 // 第二段自带签名（它也是一段可引导的代码，只是不经过 BIOS），所以这里只查长度上限。
 console.log("引导扇区  " + 引导.length + " 字节，签名 55 AA 对");
-console.log("第二段    " + 二段.length + " 字节（上限 17920，占三十二个扇区）");
+console.log("第二段    " + 二段.length + " 字节（上限 18944，占三十二个扇区）");
 
 // ---- 二、种子 ----
 // 给不给种子都建得出来，这很重要：Yunooka 不欠 HMYR 仓库任何东西，所以没有种子时
@@ -101,7 +101,7 @@ console.log("种子      " + 种子说明);
 // 布局（BIOS 从 1 数扇区，数组从 0 数偏移）：
 //   第 1 个扇区（偏移 0）         引导扇区
 //   第 2 到 33 个扇区（偏移 512） 第二段，三十二个扇区（16 KB）
-//   第 34 个扇区起（偏移 17920）  种子的第一个字节
+//   第 34 个扇区起（偏移 18944）  种子的第一个字节
 // stage2.asm 里写的是 dap_lba = 33，也就是第 34 个扇区；引导扇区写的是 al = 32，也就是
 // 读三十二个扇区。三处数字对得上才建得对，所以它们写在同一段注释里。
 //
@@ -120,7 +120,7 @@ const 盘大小MB = (() => {
 // 种子从第 34 个扇区起：引导 1 个 + 第二段 33 个。
 // 这个数与第二段的上限、boot.asm 里那句 mov al 是一组 —— 第二段变长它就要往后挪，
 // 而它的症状会是「种子魔数不对」，看起来像盘坏了。
-const 种子偏移 = 36 * 512;
+const 种子偏移 = 38 * 512;
 const 盘字节数 = 盘大小MB * 1024 * 1024;
 if (种子偏移 + 种子内容.length > 盘字节数) 失败("种子比盘还大，装不下");
 
@@ -134,12 +134,12 @@ if (种子内容.length) {
   // nasm 的清单给的是段内偏移（-f bin 的输出与 org 无关），所以这里直接用；
   // 万一哪天它改成给绝对地址，减去 org 之后才对，所以两种都认。
   const 段内 = 格 >= 0x7e00 ? 格 - 0x7e00 : 格;
-  if (段内 < 0 || 段内 + 4 > 17920) 失败("seed_bytes 落在第二段外面：偏移 " + 段内);
+  if (段内 < 0 || 段内 + 4 > 18944) 失败("seed_bytes 落在第二段外面：偏移 " + 段内);
   二段.writeUInt32LE(种子内容.length, 段内);
   console.log("字节数    " + 种子内容.length + " 写进第二段偏移 " + 段内);
   // seed_bytes 是 times 之前的最后一项，所以它之后就是「这一段实际用到哪」。
-  // 不报这个数的话，17920 那个数字总像是用满了，而下一块砖就会在没人预料的时候撞上去。
-  console.log("实到      " + (段内 + 4) + " 字节，余 " + (17920 - 段内 - 4));
+  // 不报这个数的话，18944 那个数字总像是用满了，而下一块砖就会在没人预料的时候撞上去。
+  console.log("实到      " + (段内 + 4) + " 字节，余 " + (18944 - 段内 - 4));
 }
 
 // ---- 三·五、文件系统 ----
@@ -160,16 +160,27 @@ const 子目录2号 = 文件系统起 + 9;
 const 深层文件起 = 文件系统起 + 10;
 // 签名匹配的两个样本排在深层文件之后：1035 与 1036。
 // 它们一进盘，stage2 的预读就要跟着多两个扇区 —— 那个数与这里是一组。
+// EICAR：一段公开的、专为测杀毒软件而造的字符串，不是恶意代码。
+// 它先定义，因为样本与规则两边都要用它 —— 而这两个东西必须来自同一个串，
+// 否则「规则命中样本」就只是巧合。
+const EICAR串 = "X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
 const 毒样本起 = 文件系统起 + 11;
 const 干净样本起 = 文件系统起 + 12;
+// 规则也是盘上的数据，不是写死在代码里的常量。
+//
+// 这一行是 ClamAV 的 .ndb 形状的简化版：名字、冒号、十六进制串。真的 .ndb 还有「目标类型」
+// 与「偏移」两栏（偏移可以写 * 表示任意位置），而那两样这一版还没解析 —— 但形状先按它来，
+// 因为「规则是数据」这句话的证明方式就是：换掉这个文件、不改一行代码，行为跟着变。
+const 规则起 = 文件系统起 + 13;
+const 规则文件 = Buffer.from(
+  "eicar:" + Buffer.from(EICAR串, "latin1").toString("hex").toUpperCase() + "\n", "latin1");
 const 示例文件 = Buffer.from("Yunooka filesystem ok\n", "utf8");
 const 子文件 = Buffer.from("Yunooka subdirectory ok\n", "utf8");
 const 深层文件 = Buffer.from("Yunooka three levels ok\n", "utf8");
 // 签名匹配的两个样本。EICAR 是一段公开的、专为测杀毒软件而造的字符串 —— 它不是恶意代码，
 // 而是一段打印得出来、命不命中当场看得见的测试串。用它当第一批素材，理由不是它简单，
 // 是它合法且可核对：不需要从任何一个病毒库里搬真东西进这台机器。
-const 含毒样本 = Buffer.from(
-  "Yunooka scan me\nX5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*\n", "latin1");
+const 含毒样本 = Buffer.from("Yunooka scan me\n" + EICAR串 + "\n", "latin1");
 const 干净样本 = Buffer.from("Yunooka clean file, nothing to find here\n", "latin1");
 // 盘上的第一条命令。shell 的「解释」那一半从它读起 —— 交互那一半要串口能收字节，
 // 而那条路还没通，所以命令先写在盘上，等能读行了再换成真的键盘。
@@ -219,7 +230,8 @@ const 示例扇区数 = Math.ceil(示例文件.length / 512) + Math.ceil(子文�
   + Math.ceil(命令文件.length / 512) + Math.ceil(求值输入.length / 512)
   + Math.ceil(数学输入.length / 512) + Math.ceil(程序字节.length / 512)
   + 1 + Math.ceil(深层文件.length / 512)   // sub 目录自己占一个扇区，再加 deep.txt
-  + Math.ceil(含毒样本.length / 512) + Math.ceil(干净样本.length / 512);
+  + Math.ceil(含毒样本.length / 512) + Math.ceil(干净样本.length / 512)
+  + Math.ceil(规则文件.length / 512);
 
 const 码元 = (s) => {
   const 列 = [];
@@ -262,7 +274,8 @@ let 根位 = 写条目(根目录, 0, "hello.txt", 0, 数据起, 示例文件.len
 // 而症状是「某个文件凭空消失」，不是「布局错了」。这一处漏过一次：prog.hmtn 被 eicar.txt 吃掉。
 根位 = 写条目(根目录, 根位, "prog.hmtn", 0, 数据起 + 5, 程序字节.length);
 根位 = 写条目(根目录, 根位, "eicar.txt", 0, 毒样本起, 含毒样本.length);
-写条目(根目录, 根位, "clean.txt", 0, 干净样本起, 干净样本.length);
+根位 = 写条目(根目录, 根位, "clean.txt", 0, 干净样本起, 干净样本.length);
+写条目(根目录, 根位, "rules.txt", 0, 规则起, 规则文件.length);
 
 const 子目录 = Buffer.alloc(512);
 let 子位 = 写条目(子目录, 0, "note.txt", 0, 数据起 + 1, 子文件.length);
@@ -300,6 +313,7 @@ try {
   fs.writeSync(fd, 深层文件, 0, 深层文件.length, 深层文件起 * 512);
   fs.writeSync(fd, 含毒样本, 0, 含毒样本.length, 毒样本起 * 512);
   fs.writeSync(fd, 干净样本, 0, 干净样本.length, 干净样本起 * 512);
+  fs.writeSync(fd, 规则文件, 0, 规则文件.length, 规则起 * 512);
 } finally {
   fs.closeSync(fd);
 }
