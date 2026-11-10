@@ -44,21 +44,21 @@ stage2:
     ; 种子读到 0x20000 起，不是 0x8000 —— 第二段自己被加载在 0x7E00，32 扇区就是
     ; 16 KB，铺到 0xBE00，而 0x8000 起的种子会把它覆盖成零。0x20000 在实模式 1 MB
     ; 之内，离得够远。
-    mov dword [dap_lba], 51       ; 第 35 个扇区：引导 1 + 第二段 33
+    mov dword [dap_lba], 52       ; 第 35 个扇区：引导 1 + 第二段 33
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x2000
     mov word [dap_count], 64
     call read_batch
     jc .seed_fail
 
-    mov dword [dap_lba], 51 + 64
+    mov dword [dap_lba], 52 + 64
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x2800
     mov word [dap_count], 64
     call read_batch
     jc .seed_fail
 
-    mov dword [dap_lba], 51 + 128
+    mov dword [dap_lba], 52 + 128
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x3000
     mov word [dap_count], 18
@@ -619,6 +619,7 @@ long_entry:
     call run_persist_test
     call run_index_test
     call run_explorer_test
+    call run_identify_test
     call run_pci_scan
     call run_shell
     call run_repl
@@ -2940,7 +2941,7 @@ run_ata_test:
     mov rax, 512
     call alloc64
     mov [ata_buf], rax            ; 缓冲区地址要留住：ata_read 会把 rax 用掉
-    mov rdi, 51                   ; 种子在盘上的第一个扇区：引导 1 + 第二段 33
+    mov rdi, 52                   ; 种子在盘上的第一个扇区：引导 1 + 第二段 33
     mov rsi, rax
     call ata_read
     jc ata_fail
@@ -5401,6 +5402,125 @@ run_explorer_test:
     call put_nl64
     ret
 
+; ======================================================================
+; 认一个文件是什么：看它的头几个字节，不看它的名字
+; ======================================================================
+;
+; 这是 Kohane 第六层的砖。它值钱的地方不在「能认出文本与包」，而在**它不看名字**：
+; 盘上有一个叫 fake.txt 的文件，内容是 prog.hmtn —— 而它必须被认成包。
+;
+; 「按扩展名猜」的实现会把三条判据的头一条与第三条都做对（因为那两个名字本来就是对的），
+; 只在第二条上翻车 —— 而一条只有两条判据的测试分不出它来。所以这一层要三条。
+;
+; rdi = 内容，rcx = 长度。出 rax = 1 文本、2 包、0 不认得。
+identify:
+    cmp rcx, 5
+    jb .unknown
+    ; 包：魔数 HMYRB
+    cmp byte [rdi], 'H'
+    jne .text_check
+    cmp byte [rdi + 1], 'M'
+    jne .text_check
+    cmp byte [rdi + 2], 'Y'
+    jne .text_check
+    cmp byte [rdi + 3], 'R'
+    jne .text_check
+    cmp byte [rdi + 4], 'B'
+    jne .text_check
+    mov rax, 2
+    ret
+.text_check:
+    ; 文本：头 32 个字节里没有不可打印的东西（换行、回车、制表除外）
+    mov r8, rcx
+    cmp r8, 32
+    jbe .scan
+    mov r8, 32
+.scan:
+    xor r9, r9
+.loop:
+    cmp r9, r8
+    jae .text
+    mov al, [rdi + r9]
+    cmp al, 32
+    jb .control
+    cmp al, 126
+    ja .unknown
+    jmp .next
+.control:
+    cmp al, 10
+    je .next
+    cmp al, 13
+    je .next
+    cmp al, 9
+    je .next
+    jmp .unknown
+.next:
+    inc r9
+    jmp .loop
+.text:
+    mov rax, 1
+    ret
+.unknown:
+    xor eax, eax
+    ret
+
+; 三条判据。第二条（fake.txt）是「看内容不看名字」那一刀。
+run_identify_test:
+    mov rsi, line_ident_head
+    call puts64
+    ; hello.txt：真是文本
+    mov rdi, fs_hello_path
+    call fs_open_path
+    test rax, rax
+    jz .miss
+    mov rdi, [last_addr]
+    mov rcx, rbx
+    call identify
+    call put_ident_kind
+    ; prog.hmtn：真是包
+    mov rdi, fs_prog_path
+    call fs_open_path
+    test rax, rax
+    jz .miss
+    mov rdi, [last_addr]
+    mov rcx, rbx
+    call identify
+    call put_ident_kind
+    ; fake.txt：名字是文本、内容是包 —— 而它必须被认成包
+    mov rdi, fs_fake_path
+    call fs_open_path
+    test rax, rax
+    jz .miss
+    mov rdi, [last_addr]
+    mov rcx, rbx
+    call identify
+    call put_ident_kind
+    call put_nl64
+    ret
+.miss:
+    mov rsi, line_ident_miss
+    call puts64
+    ret
+
+; 把一个类型码打成三个字母，接在后面。
+put_ident_kind:
+    cmp rax, 1
+    je .text
+    cmp rax, 2
+    je .pkg
+    mov rsi, line_kind_none
+    jmp .out
+.text:
+    mov rsi, line_kind_text
+    jmp .out
+.pkg:
+    mov rsi, line_kind_pkg
+.out:
+    call puts64
+    mov al, ' '
+    call putc64
+    ret
+
 ; 打一串 UTF-16 码元，只取低字节。这一版的名字都是 ASCII，够用；非 ASCII 的名字会
 ; 在这里变成别的字节，而那是「打印」这一层的限制，不是名字本身的。
 put_utf16_ascii:
@@ -6057,6 +6177,17 @@ rect_w: dq 0
 rect_h: dq 0
 rect_c: db 0
 line_explorer: db "Yunooka: window ", 0
+line_ident_head: db "Yunooka: identify ", 0
+line_ident_miss: db "Yunooka: identify -> no file", 13, 10, 0
+line_kind_text: db "text", 0
+line_kind_pkg: db "package", 0
+line_kind_none: db "unknown", 0
+fs_hello_path: dw 0x03B1, 0x003A, 0x002F, 0x0068, 0x0065, 0x006C, 0x006C, 0x006F
+               dw 0x002E, 0x0074, 0x0078, 0x0074, 0
+fs_prog_path: dw 0x03B1, 0x003A, 0x002F, 0x0070, 0x0072, 0x006F, 0x0067, 0x002E
+              dw 0x0068, 0x006D, 0x0074, 0x006E, 0
+fs_fake_path: dw 0x03B1, 0x003A, 0x002F, 0x0066, 0x0061, 0x006B, 0x0065, 0x002E
+              dw 0x0074, 0x0078, 0x0074, 0
 ; 落盘那一条用的两个 512 字节缓冲：一个填满 0x2A 写下去，另一个接读回来的。
 persist_buf: times 512 db 0
 persist_buf2: times 512 db 0

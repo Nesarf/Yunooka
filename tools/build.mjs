@@ -71,10 +71,10 @@ if (引导[510] !== 0x55 || 引导[511] !== 0xaa) {
   失败("末两字节应当是 55 AA，实际 " + 引导[510].toString(16) + " " + 引导[511].toString(16));
 }
 const 清单 = path.join(建, "stage2.lst");
-const 二段 = 编一段("第二段", 源二, 像二, 25600, 清单);
+const 二段 = 编一段("第二段", 源二, 像二, 26112, 清单);
 // 第二段自带签名（它也是一段可引导的代码，只是不经过 BIOS），所以这里只查长度上限。
 console.log("引导扇区  " + 引导.length + " 字节，签名 55 AA 对");
-console.log("第二段    " + 二段.length + " 字节（上限 25600，占三十二个扇区）");
+console.log("第二段    " + 二段.length + " 字节（上限 26112，占三十二个扇区）");
 
 // ---- 二、种子 ----
 // 给不给种子都建得出来，这很重要：Yunooka 不欠 HMYR 仓库任何东西，所以没有种子时
@@ -101,7 +101,7 @@ console.log("种子      " + 种子说明);
 // 布局（BIOS 从 1 数扇区，数组从 0 数偏移）：
 //   第 1 个扇区（偏移 0）         引导扇区
 //   第 2 到 33 个扇区（偏移 512） 第二段，三十二个扇区（16 KB）
-//   第 34 个扇区起（偏移 25600）  种子的第一个字节
+//   第 34 个扇区起（偏移 26112）  种子的第一个字节
 // stage2.asm 里写的是 dap_lba = 33，也就是第 34 个扇区；引导扇区写的是 al = 32，也就是
 // 读三十二个扇区。三处数字对得上才建得对，所以它们写在同一段注释里。
 //
@@ -118,7 +118,7 @@ const 盘大小MB = (() => {
   return Number.isInteger(v) && v >= 1 ? v : 64;
 })();
 // 种子从第 44 个扇区起。它与下面那四个数是一组，而下面那段检查会把它们一次核完。
-const 种子偏移 = 51 * 512;
+const 种子偏移 = 52 * 512;
 // 「第二段多大」牵着四个数：boot.asm 里那句 mov al、这里的上限、stage2 末尾的 times、
 // 以及种子的起始扇区。少改一个的症状各不相同（编不过、盘建不起来、种子魔数不对、ata differ），
 // 而为了这一组数返工过五次，每次都像四个不同的毛病。所以在这里一次核完 ——
@@ -154,12 +154,12 @@ if (种子内容.length) {
   // nasm 的清单给的是段内偏移（-f bin 的输出与 org 无关），所以这里直接用；
   // 万一哪天它改成给绝对地址，减去 org 之后才对，所以两种都认。
   const 段内 = 格 >= 0x7e00 ? 格 - 0x7e00 : 格;
-  if (段内 < 0 || 段内 + 4 > 25600) 失败("seed_bytes 落在第二段外面：偏移 " + 段内);
+  if (段内 < 0 || 段内 + 4 > 26112) 失败("seed_bytes 落在第二段外面：偏移 " + 段内);
   二段.writeUInt32LE(种子内容.length, 段内);
   console.log("字节数    " + 种子内容.length + " 写进第二段偏移 " + 段内);
   // seed_bytes 是 times 之前的最后一项，所以它之后就是「这一段实际用到哪」。
-  // 不报这个数的话，25600 那个数字总像是用满了，而下一块砖就会在没人预料的时候撞上去。
-  console.log("实到      " + (段内 + 4) + " 字节，余 " + (25600 - 段内 - 4));
+  // 不报这个数的话，26112 那个数字总像是用满了，而下一块砖就会在没人预料的时候撞上去。
+  console.log("实到      " + (段内 + 4) + " 字节，余 " + (26112 - 段内 - 4));
 }
 
 // ---- 三·五、文件系统 ----
@@ -207,6 +207,7 @@ const 规则文件 = Buffer.from([
 // 而那时「曲线没画出来」与「坐标变换错了」在截图上长得一样。
 const 绘图文件 = Buffer.from("x*x/1000", "utf16le");
 const 绘图起 = 文件系统起 + 14;
+const 假样本起 = 文件系统起 + 15;
 const 示例文件 = Buffer.from("Yunooka filesystem ok\n", "utf8");
 const 子文件 = Buffer.from("Yunooka subdirectory ok\n", "utf8");
 const 深层文件 = Buffer.from("Yunooka three levels ok\n", "utf8");
@@ -259,13 +260,18 @@ for (const 字 of "main") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位
 程序包.writeDoubleLE(7.0, 位); 位 += 8;
 程序包[位++] = 28;                                          // 返回
 const 程序字节 = 程序包.subarray(0, 位);
+// 一个改名成 hello.txt 的包。它的存在只为了一条判据：认一个文件是什么，要看内容，
+// 不看名字。没有它，「按魔数分析」与「按扩展名猜」在判据上分不开 —— 而分不开的那一对，
+// 恰恰是 Kohane 第六层唯一值得做的东西。
+const 假样本 = 程序字节;
 const 示例扇区数 = Math.ceil(示例文件.length / 512) + Math.ceil(子文件.length / 512)
   + Math.ceil(命令文件.length / 512) + Math.ceil(求值输入.length / 512)
   + Math.ceil(数学输入.length / 512) + Math.ceil(程序字节.length / 512)
   + 1 + Math.ceil(深层文件.length / 512)   // sub 目录自己占一个扇区，再加 deep.txt
   + Math.ceil(含毒样本.length / 512) + Math.ceil(干净样本.length / 512)
   + Math.ceil(规则文件.length / 512)
-  + Math.ceil(绘图文件.length / 512);
+  + Math.ceil(绘图文件.length / 512)
+  + Math.ceil(假样本.length / 512);
 
 const 码元 = (s) => {
   const 列 = [];
@@ -310,7 +316,8 @@ let 根位 = 写条目(根目录, 0, "hello.txt", 0, 数据起, 示例文件.len
 根位 = 写条目(根目录, 根位, "eicar.txt", 0, 毒样本起, 含毒样本.length);
 根位 = 写条目(根目录, 根位, "clean.txt", 0, 干净样本起, 干净样本.length);
 根位 = 写条目(根目录, 根位, "rules.txt", 0, 规则起, 规则文件.length);
-写条目(根目录, 根位, "plot.txt", 0, 绘图起, 绘图文件.length);
+根位 = 写条目(根目录, 根位, "plot.txt", 0, 绘图起, 绘图文件.length);
+写条目(根目录, 根位, "fake.txt", 0, 假样本起, 假样本.length);
 
 const 子目录 = Buffer.alloc(512);
 let 子位 = 写条目(子目录, 0, "note.txt", 0, 数据起 + 1, 子文件.length);
@@ -350,6 +357,7 @@ try {
   fs.writeSync(fd, 干净样本, 0, 干净样本.length, 干净样本起 * 512);
   fs.writeSync(fd, 规则文件, 0, 规则文件.length, 规则起 * 512);
   fs.writeSync(fd, 绘图文件, 0, 绘图文件.length, 绘图起 * 512);
+  fs.writeSync(fd, 假样本, 0, 假样本.length, 假样本起 * 512);
 } finally {
   fs.closeSync(fd);
 }
