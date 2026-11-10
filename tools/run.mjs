@@ -62,6 +62,8 @@ const 全程 = [
   "Yunooka: open docs/sub/",
   "Yunooka: second disk ok",
   "Yunooka: wrote -> ",
+  "Yunooka: share twice",
+  "Yunooka: pci dev ",
   "Yunooka: shell> ",
   "Yunooka: repl> ",
   "Yunooka: math> average -> ",
@@ -162,7 +164,11 @@ if (!有这台) {
 for (const 旧 of [串口]) if (fs.existsSync(旧)) fs.unlinkSync(旧);
 vbox(["modifyvm", 机名, "--memory", "32", "--cpus", "1", "--firmware", "bios",
   "--boot1", "disk", "--boot2", "none", "--boot3", "none", "--boot4", "none",
-  "--audio", "none", "--usb", "off", "--nic1", "none",
+  "--audio", "none", "--usb", "off",
+  // 网卡：82540EM（Intel E1000）走 MMIO，NAT 不需要额外配置。
+  // 换成有网卡之后要做的第一件不是协议，是 PCI 枚举 —— 「有一块网卡」这件事
+  // 由它自己的 vendor/device 两个数说出来，而那一步不需要任何协议。
+  "--nic1", "nat", "--nictype1", "82540EM", "--cableconnected1", "on",
   "--uart1", "0x3F8", "4", "--uartmode1", "file", 串口]);
 
 // ---- 二·五、信箱 ----
@@ -476,6 +482,15 @@ const 二成 = 二集.length === 2 && 二集[0] === "Yunooka filesystem ok"
 const 写行 = /Yunooka: wrote -> (.+)/.exec(读到);
 const 写成 = 写行 !== null && 写行[1].trim() === "Yunooka wrote this"
   && /hello\.txt docs cmd\.txt repl\.txt math\.txt prog\.hmtn new\.txt/.test(读到);
+// 家庭组第一步：共享是目录条目上的一个位。走两遍，两遍都只该有一条 ——
+// 「往清单里加一条」的实现走两遍会出现两个 docs，而那样第一次也是对的。
+const 共集 = [...读到.matchAll(/Yunooka: shares ([^\r\n]*)/g)].map((m) => m[1].trim());
+const 共成 = 共集.length === 2 && 共集[0] === "docs dir" && 共集[1] === "docs dir";
+// 网卡：PCI 配置空间里 vendor 与 device 两个数由硬件自己给出。8086:100E 是 Intel E1000，
+// 也就是 --nictype1 指定的那一块。读对它，说明「网卡在这台机器上，而这条总线读得通」。
+const 网行 = /Yunooka: pci dev (\d+) ([0-9A-F]+)/g;
+const 网集 = [...读到.matchAll(/Yunooka: pci dev (\d+) ([0-9A-F]+)/g)].map((m) => [m[1], m[2]]);
+const 网成 = 网集.some(([dev, id]) => id.endsWith("100E8086"));
 // shell 的解释那一半：盘上的 cmd.txt 里写着一行 files，它要认出来并回答。
 // 判据是三步都在：提示符打出来、命令被回显、根目录的三个名字按顺序列出来。
 // 只验提示符的话，一个只会打字的实现照样能过。
@@ -573,6 +588,12 @@ console.log("第二块盘  " + (二集.length ? 二集.join("  /  ") : "(没走�
 console.log("写        " + (写行 ? "wrote -> " + 写行[1].trim() : "(没跑到)")
   + (写成 ? "  —— 空闲扇区的账、目录条目、数据落点三样都对，再按路径读回来"
     : "  —— 不对：应当读到 Yunooka wrote this，且 files 里有 new.txt"));
+console.log("共享      " + (共集.length ? 共集.join("  /  ") : "(没跑到)")
+  + (共成 ? "  —— 两次都只有一条 docs dir：标记是改一个位，不是往清单里加一条"
+    : "  —— 不对：应当是两行 shares，各一条 docs dir"));
+console.log("网卡      " + (网集.length ? 网集.map(([d, i]) => d + ":" + i.slice(-8)).join("  ") : "(没跑到)")
+  + (网成 ? "  —— 8086:100E 在 3 号槽上；网卡在，而且配置空间读得通"
+    : "  —— 不对：应当看到 100E8086"));
 console.log("壳        " + (壳行 ? "shell> files" : "(没跑到)")
   + (列行 ? "  → " + 列行[0] : "  → (没列出来)")
   + (壳成 ? "  —— 那一行认得出来、回答得出（来源见上一行）"
@@ -620,6 +641,8 @@ const 结构成 = 有种子
     && 更成
     && 二成
     && 写成
+    && 共成
+    && 网成
     && 壳成
     && 重求成
     && 除成

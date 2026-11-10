@@ -594,6 +594,8 @@ long_entry:
     call run_fs_open3
     call run_fs_open4
     call run_fs_write
+    call run_share_test
+    call run_pci_scan
     call run_shell
     call run_repl
     call run_div_test
@@ -3108,6 +3110,7 @@ fs_lookup:
     inc rdx
     jmp .cmp
 .hit:
+    mov [last_entry], rsi          ; 这一条在预读区里的起点 —— 改共享位要用它
     movzx ecx, word [rsi]
     lea rdx, [rsi + 2 + rcx * 2]
     movzx r10d, byte [rdx]        ; 类型
@@ -3456,6 +3459,161 @@ fs_write_failed:
 fs_write_lost:
     mov rsi, line_fs_write_lost
     call puts64
+    ret
+
+; ======================================================================
+; 家庭组的第一步：共享是目录条目上的一个位
+; ======================================================================
+;
+; 设计在 design/HOMEGROUP.txt。Windows 的家庭组拆开来是五个部件，而其中三件依赖网络
+; 与「第二台机器」—— 这两样这台机器都还没有。所以这里先做那两件不需要网络的：
+; 「边界」与「共享」。
+;
+; 共享做成了条目类型上的一个位（0x80），而不是一张单独的共享表。理由是它没有第二份
+; 真相：表要跟目录同步，而同步总有一个人先动 —— 那个间隙里两边会不一致。位上则只有
+; 一份数据，改它就是改目录。
+;
+; 代价是类型那一个字节现在有两个含义：低七位是文件还是目录，最高位是共享。这种挤在
+; 一起的字段要靠约定守住，所以下面凡是用类型的地方都先 and 0x7F。
+;
+; rdi = 路径（UTF-16，0 码元结尾）。出 rax = 1 成功 / 0 没找到。
+fs_share:
+    push rdi
+    call fs_open_path
+    pop rdi
+    test rax, rax
+    jz .miss
+    mov rax, [last_entry]
+    test rax, rax
+    jz .miss
+    movzx ecx, word [rax]
+    lea rdx, [rax + 2 + rcx * 2]   ; 名字之后就是类型
+    or byte [rdx], 0x80
+    mov rax, 1
+    ret
+.miss:
+    xor eax, eax
+    ret
+
+; 列出根目录里带共享位的条目。名字与类型都打出来 —— 只有名字的话，一个被标记的目录
+; 与一个被标记的文件在清单里长得一样。
+run_shares:
+    push rbx
+    mov rsi, line_shares
+    call puts64
+    ; 先读超块，再从它里面取根目录扇区 —— 1024 是超块，不是根目录。
+    ; 这一处抄错过：别处那两句连在一起时看着像「读根目录」，其实第一句读的是超块。
+    mov rdi, 1024
+    call fs_load
+    mov rbx, rsi
+    mov edi, [rbx + 12]
+    call fs_load
+    mov [shares_ptr], rsi
+.entry:
+    mov r12, [shares_ptr]
+    movzx ecx, word [r12]
+    test ecx, ecx
+    jz .done
+    lea r9, [r12 + 2 + rcx * 2]    ; 类型在名字之后
+    movzx r10d, byte [r9]
+    test r10b, 0x80
+    jz .next
+    push r10
+    mov rdi, r12
+    add rdi, 2
+    call put_utf16_n               ; rcx 已经是名字长度
+    pop r10
+    and r10b, 0x7F
+    cmp r10b, 1
+    je .as_dir
+    mov rsi, line_share_file
+    call puts64
+    jmp .next
+.as_dir:
+    mov rsi, line_share_dir
+    call puts64
+.next:
+    ; 指针与长度都从内存里再取一遍：put_utf16_n 与 puts64 会占用它们碰到的寄存器，
+    ; 把循环变量托付给任何一个寄存器，都会在「打了点什么」之后丢掉位置。
+    mov rax, [shares_ptr]
+    movzx ecx, word [rax]
+    lea rax, [rax + 11 + rcx * 2]
+    mov [shares_ptr], rax
+    jmp .entry
+.done:
+    call put_nl64
+    pop rbx
+    ret
+
+; 第一条走完再走一遍，看会不会多出一条 —— 标记不是追加，这一点要能看出差别：
+; 一个「往清单里加一条」的实现，走两遍就会出现两个 docs。
+run_share_test:
+    mov rsi, line_share_first
+    call puts64
+    mov rdi, fs_share_path
+    call fs_share
+    test rax, rax
+    jz .failed
+    call run_shares
+    mov rsi, line_share_again
+    call puts64
+    mov rdi, fs_share_path
+    call fs_share
+    call run_shares
+    ret
+.failed:
+    mov rsi, line_share_failed
+    call puts64
+    ret
+
+; ======================================================================
+; PCI 枚举：先证明「有一块网卡」
+; ======================================================================
+;
+; 家庭组要跨机器，跨机器要网络，而网络要一块网卡。可是「有网卡」与「能发一个包」
+; 之间隔着一整个协议栈，所以第一步就要选一件不需要协议的事 —— 那就是 PCI 配置空间里
+; 那两个数：vendor 与 device。
+;
+; 它们由硬件自己给出，不由我们解释。读对了它们，就说明「这块网卡在这台机器上、而这条
+; 总线读得通」；读不对，往后所有网络的事都会在别处找原因。
+;
+; 访问方式只有两个端口：0xCF8 写地址（bit 31 置一表示使能），0xCFC 读数据。
+; rdi = bus<<16 | dev<<11 | func<<8 | offset，出 eax。
+pci_read:
+    mov eax, edi
+    or eax, 0x80000000
+    mov dx, 0xCF8
+    out dx, eax
+    mov dx, 0xCFC
+    in eax, dx
+    ret
+
+; 扫 0 号总线上的 32 个设备槽，凡是有 vendor 的都报出来。
+;
+; 只扫 0 号总线、只扫 func 0：这台机器的设备都在那里，而多扫两级要把「怎么认多功能的
+; 设备」也写进来 —— 那一层对「有没有网卡」这个问题没有帮助。
+run_pci_scan:
+    xor r12, r12                   ; 设备号 0..31
+.dev:
+    mov rdi, r12
+    shl rdi, 11
+    call pci_read
+    cmp ax, 0xFFFF
+    je .next
+    mov r13d, eax                  ; vendor | device<<16
+    mov rsi, line_pci
+    call puts64
+    mov rax, r12
+    call put_num64
+    mov al, ' '
+    call putc64
+    mov rax, r13
+    call put_hex64
+    call put_nl64
+.next:
+    inc r12
+    cmp r12, 32
+    jb .dev
     ret
 
 ; 打一串 UTF-16 码元，只取低字节。这一版的名字都是 ASCII，够用；非 ASCII 的名字会
@@ -3856,6 +4014,11 @@ fs_buf: dq 0
 ; 默认是 α（主盘）。fs_open_path 认盘符之后会把它们改成 β 的，用完拨回来。
 fs_base: dq 0x40000
 fs_start: dq 1024
+; fs_lookup 命中的那一条在预读区里的地址。改共享位要用它 —— 而 lookup 本来就找到了
+; 那一条，只是以前没把位置留下来。
+last_entry: dq 0
+; 列共享时用的游标：循环变量放内存，不托付给任何寄存器。
+shares_ptr: dq 0
 
 line_fn116: db "Yunooka: fn116 -> ", 0
 line_call: db "Yunooka: call -> ", 0
@@ -3999,6 +4162,15 @@ fs_write_len: equ $ - fs_write_data
 line_fs_write: db "Yunooka: wrote -> ", 0
 line_fs_write_fail: db "Yunooka: write failed", 13, 10, 0
 line_fs_write_lost: db "Yunooka: wrote but lost", 13, 10, 0
+; 家庭组第一步的那几样。
+fs_share_path: dw 0x03B1, 0x003A, 0x002F, 0x0064, 0x006F, 0x0063, 0x0073, 0  ; α:/docs
+line_shares: db "Yunooka: shares ", 0
+line_share_dir: db " dir", 0
+line_share_file: db " file", 0
+line_share_first: db "Yunooka: share once", 13, 10, 0
+line_share_again: db "Yunooka: share twice", 13, 10, 0
+line_share_failed: db "Yunooka: share failed", 13, 10, 0
+line_pci: db "Yunooka: pci dev ", 0
 
 ; shell 的两样：要从盘上找的文件名，与它认得的第一条命令。
 ; 命令是 ASCII（不是 UTF-16）—— 因为 cmd.txt 的内容就是 ASCII 字节，
