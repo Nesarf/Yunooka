@@ -73,6 +73,8 @@ const 全程 = [
   "Yunooka: scan eicar -> FOUND",
   "Yunooka: rules eicar.txt = eicar",
   "Yunooka: plot ",
+  "Yunooka: index count ",
+  "Yunooka: window ",
   "Yunooka: shell> ",
   "Yunooka: repl> ",
   "Yunooka: math> average -> ",
@@ -553,6 +555,20 @@ const 规成 = 规行 && 规净;
 const 图行 = /Yunooka: plot ([0-9A-F]+) ([0-9A-F]+)/.exec(读到);
 const 图成 = 图行 !== null && 图行[1] === "000000000000002F"
   && 图行[2] === "000000000000002F";
+// KID 索引：三条判据，而第一条缺不得 —— 一颗「其实什么也没建、每次都现找」的实现
+// 也能过后两条。条目数不写死成 11：盘上每加一个文件它就变，而那时红的理由与索引无关。
+const 索数 = /Yunooka: index count ([0-9A-F]+)/.exec(读到);
+const 索查 = /Yunooka: index hello\.txt -> ([0-9A-F]+)/.exec(读到);
+const 索空 = /Yunooka: index nosuch\.txt -> ([0-9A-F]+)/.exec(读到);
+const 索成 = 索数 !== null && !/^0+$/.test(索数[1])
+  && 索查 !== null && 索查[1].endsWith("403")
+  && 索空 !== null && /^0+$/.test(索空[1]);
+// 此电脑的窗口骨架：四个位置各一种颜色。四个都要 —— 一颗只清屏不画的实现过不了前三，
+// 一颗整屏填满的过不了最后一行。规划在 design/KOHANE.txt。
+const 窗行 = /Yunooka: window ([0-9A-F]+) ([0-9A-F]+) ([0-9A-F]+) ([0-9A-F]+)/.exec(读到);
+const 窗成 = 窗行 !== null
+  && 窗行[1].endsWith("2F") && 窗行[2].endsWith("1C")
+  && 窗行[3].endsWith("28") && 窗行[4].endsWith("0F");
 // 写：造一个不存在的名字、写一段只有这里才有的字节、再按路径打开它。
 // 判据是那段内容本身 —— 而且 files 的列表里也要多出这个名字，因为「目录里多了一条」
 // 与「数据落对了地方」是两件事，两件都得成立。
@@ -784,6 +800,8 @@ const 结构成 = 有种子
     && 扫成
     && 规成
     && 图成
+    && 索成
+    && 窗成
     && 壳成
     && 重求成
     && 除成

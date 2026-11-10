@@ -44,21 +44,21 @@ stage2:
     ; 种子读到 0x20000 起，不是 0x8000 —— 第二段自己被加载在 0x7E00，32 扇区就是
     ; 16 KB，铺到 0xBE00，而 0x8000 起的种子会把它覆盖成零。0x20000 在实模式 1 MB
     ; 之内，离得够远。
-    mov dword [dap_lba], 46       ; 第 35 个扇区：引导 1 + 第二段 33
+    mov dword [dap_lba], 49       ; 第 35 个扇区：引导 1 + 第二段 33
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x2000
     mov word [dap_count], 64
     call read_batch
     jc .seed_fail
 
-    mov dword [dap_lba], 46 + 64
+    mov dword [dap_lba], 49 + 64
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x2800
     mov word [dap_count], 64
     call read_batch
     jc .seed_fail
 
-    mov dword [dap_lba], 46 + 128
+    mov dword [dap_lba], 49 + 128
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x3000
     mov word [dap_count], 18
@@ -618,6 +618,8 @@ long_entry:
     call run_plot_test
     call run_persist_test
     call run_health_test
+    call run_index_test
+    call run_explorer_test
     call run_pci_scan
     call run_shell
     call run_repl
@@ -2939,7 +2941,7 @@ run_ata_test:
     mov rax, 512
     call alloc64
     mov [ata_buf], rax            ; 缓冲区地址要留住：ata_read 会把 rax 用掉
-    mov rdi, 46                   ; 种子在盘上的第一个扇区：引导 1 + 第二段 33
+    mov rdi, 49                   ; 种子在盘上的第一个扇区：引导 1 + 第二段 33
     mov rsi, rax
     call ata_read
     jc ata_fail
@@ -5011,6 +5013,277 @@ run_health_test:
     call puts64
     ret
 
+; ======================================================================
+; KID：把盘上的名字建成一张能反复查的表
+; ======================================================================
+;
+; system-software 那五件里，这一件是唯一不需要任何新前提的 —— 它要的东西全在：
+; 文件系统、目录条目、以及 fs_lookup 里那段走条目的代码。
+;
+; 但它不是「再找一遍」。区别有三处，而判据必须压住这三处：
+;   一、建一次、查多次 —— fs_lookup 每查一次都从头走目录。
+;   二、能按序号列 —— 「第三条叫什么」这件事，走目录的函数给不出来。
+;   三、建的时候要数出有几个 —— 那是「索引存在过」的证据，也是「最后一条没漏」的证据。
+;
+; 所以判据是三条：条目数、按名字查到扇区、查不存在的名字返回空。少第一条的话，
+; 一颗「其实什么也没建、每次都现找」的实现也能过后两条。
+;
+; 表放在内存里，16 条封顶：这一版盘上只有九个名字，而 16 是「装得下」与「能数出来」的交点。
+index_build:
+    mov qword [index_n], 0
+    ; 从超块取根目录扇区 —— 与 run_shares 那一段同一个走法，而那一处抄错过一次
+    mov rdi, 1024
+    call fs_load
+    mov rbx, rsi
+    mov edi, [rbx + 12]
+    call fs_load
+    mov r8, rsi                    ; 目录项游标
+    xor r9, r9
+.loop:
+    cmp r9, 16
+    jae .done
+    movzx rax, word [r8]
+    test rax, rax                  ; 名字长度 0：目录到头了
+    jz .done
+    mov rcx, rax
+    ; 名字存成 ASCII（低字节）：这一版的名字都是 ASCII，而比两串字节比两串码元少一半活
+    lea rdi, [index_buf]
+    mov rax, r9
+    imul rax, rax, 40              ; 每条 40 字节：32 名字 + 4 扇区
+    add rdi, rax
+    xor r10, r10
+.copy_name:
+    cmp r10, rcx
+    jae .name_done
+    cmp r10, 31
+    jae .name_done
+    mov al, [r8 + 2 + r10 * 2]
+    mov [rdi + r10], al
+    inc r10
+    jmp .copy_name
+.name_done:
+    mov byte [rdi + r10], 0
+    lea rax, [r8 + 2 + rcx * 2 + 1]   ; 类型之后是起始扇区
+    mov eax, [rax]
+    mov [rdi + 32], eax
+    inc r9
+    lea r8, [r8 + 2 + rcx * 2 + 9]    ; 2 + 名字 + 1 类型 + 4 起 + 4 长
+    jmp .loop
+.done:
+    mov [index_n], r9
+    ret
+
+; 按名字查。rdi = ASCII 名字（0 结尾）。出 rax = 扇区，0 表示没有。
+index_find:
+    xor r9, r9
+.entry:
+    cmp r9, [index_n]
+    jae .miss
+    mov rax, r9
+    imul rax, rax, 40
+    lea rsi, [index_buf]
+    add rsi, rax
+    xor r10, r10
+.cmp:
+    mov al, [rdi + r10]
+    mov dl, [rsi + r10]
+    cmp al, dl
+    jne .next
+    test al, al
+    jz .hit
+    inc r10
+    cmp r10, 32
+    jb .cmp
+.hit:
+    mov eax, [rsi + 32]
+    ret
+.next:
+    inc r9
+    jmp .entry
+.miss:
+    xor eax, eax
+    ret
+
+; 三条判据：条目数、按名字查到扇区、查不存在的名字返回空。
+run_index_test:
+    call index_build
+    mov rsi, line_index_count
+    call puts64
+    mov rax, [index_n]
+    call put_hex64
+    call put_nl64
+    lea rdi, [name_hello]
+    call index_find
+    mov r12, rax
+    mov rsi, line_index_hello
+    call puts64
+    mov rax, r12
+    call put_hex64
+    call put_nl64
+    lea rdi, [name_nosuch]
+    call index_find
+    mov r13, rax
+    mov rsi, line_index_miss
+    call puts64
+    mov rax, r13
+    call put_hex64
+    call put_nl64
+    ret
+
+; ======================================================================
+; 窗口：一个矩形边框，一块填充
+; ======================================================================
+;
+; 用户要的 Kohane 是「此电脑」，按文件资源管理器的样子做。而资源管理器在屏幕上首先是一个
+; 矩形：边框、标题栏、左边导航栏、右边内容区。所以这一块砖不是界面，是**能把界面画出来的
+; 那两个原语** —— 不先有它们，谈布局没有意义。
+;
+; 为什么参数走内存：draw_line 自己要用 r12 到 r15（那是它的四个端点），所以四次调用之间
+; 没有寄存器可以托付 x、y、w、h、颜色。这一份文件里「寄存器被吃掉」的教训已经有五条了，
+; 这一条是同一族 —— 只是这次吃寄存器的是画线。
+draw_rect:
+    mov [rect_x], rdi
+    mov [rect_y], rsi
+    mov [rect_w], rdx
+    mov [rect_h], rcx
+    mov [rect_c], r8b
+    ; 上边
+    mov r12, [rect_x]
+    mov r13, [rect_y]
+    mov r14, [rect_x]
+    add r14, [rect_w]
+    dec r14
+    mov r15, [rect_y]
+    mov dl, [rect_c]
+    call draw_line
+    ; 下边
+    mov r12, [rect_x]
+    mov r13, [rect_y]
+    add r13, [rect_h]
+    dec r13
+    mov r14, r12
+    add r14, [rect_w]
+    dec r14
+    mov r15, r13
+    mov dl, [rect_c]
+    call draw_line
+    ; 左边
+    mov r12, [rect_x]
+    mov r13, [rect_y]
+    mov r14, r12
+    mov r15, r13
+    add r15, [rect_h]
+    dec r15
+    mov dl, [rect_c]
+    call draw_line
+    ; 右边
+    mov r12, [rect_x]
+    add r12, [rect_w]
+    dec r12
+    mov r13, [rect_y]
+    mov r14, r12
+    mov r15, r13
+    add r15, [rect_h]
+    dec r15
+    mov dl, [rect_c]
+    call draw_line
+    ret
+
+; 填充一个矩形。rdi x, rsi y, rdx w, rcx h, r8b 颜色。
+fill_rect:
+    mov [rect_x], rdi
+    mov [rect_y], rsi
+    mov [rect_w], rdx
+    mov [rect_h], rcx
+    mov [rect_c], r8b
+    xor r9, r9
+.row:
+    cmp r9, [rect_h]
+    jae .done
+    xor r10, r10
+.col:
+    cmp r10, [rect_w]
+    jae .next_row
+    mov rax, [rect_y]
+    add rax, r9
+    imul rax, rax, 320
+    add rax, [rect_x]
+    add rax, r10
+    mov rdi, 0xA0000
+    add rdi, rax
+    mov al, [rect_c]
+    mov [rdi], al
+    inc r10
+    jmp .col
+.next_row:
+    inc r9
+    jmp .row
+.done:
+    ret
+
+; 此电脑那个窗口的骨架：清屏、边框、标题栏、左边导航栏、内容区。
+;
+; 判据读回四个位置的颜色。四行都要 —— 一颗「只清屏不画」的实现过不了前三行，
+; 一颗「整屏填满」的实现过不了最后一行。
+run_explorer_test:
+    xor edi, edi
+    xor esi, esi
+    mov rdx, 320
+    mov rcx, 200
+    xor r8d, r8d
+    call fill_rect
+    mov rdi, 8
+    mov rsi, 8
+    mov rdx, 304
+    mov rcx, 184
+    mov r8b, 0x2F
+    call draw_rect
+    mov rdi, 9
+    mov rsi, 9
+    mov rdx, 302
+    mov rcx, 12
+    mov r8b, 0x1C
+    call fill_rect
+    mov rdi, 9
+    mov rsi, 22
+    mov rdx, 76
+    mov rcx, 169
+    mov r8b, 0x28
+    call fill_rect
+    mov rdi, 86
+    mov rsi, 22
+    mov rdx, 225
+    mov rcx, 169
+    mov r8b, 0x0F
+    call fill_rect
+    mov rdi, 0xA0000
+    movzx eax, byte [rdi + 8 * 320 + 8]
+    mov r12d, eax
+    movzx eax, byte [rdi + 14 * 320 + 100]
+    mov r13d, eax
+    movzx eax, byte [rdi + 100 * 320 + 40]
+    mov r14d, eax
+    movzx eax, byte [rdi + 100 * 320 + 200]
+    mov r15d, eax
+    mov rsi, line_explorer
+    call puts64
+    mov rax, r12
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, r13
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, r14
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, r15
+    call put_hex64
+    call put_nl64
+    ret
+
 ; 打一串 UTF-16 码元，只取低字节。这一版的名字都是 ASCII，够用；非 ASCII 的名字会
 ; 在这里变成别的字节，而那是「打印」这一层的限制，不是名字本身的。
 put_utf16_ascii:
@@ -5648,6 +5921,22 @@ line_health: db "Yunooka: disk model ", 0
 line_health_fail: db "Yunooka: disk model -> no identify", 13, 10, 0
 ; IDENTIFY 回来的一整页：512 字节，型号、序列号与能力位都在里面。
 health_buf: times 512 db 0
+; KID 的索引表：16 条，每条 32 字节名字 + 4 字节扇区。
+index_buf: times 640 db 0
+index_n: dq 0
+name_hello: db "hello.txt", 0
+name_nosuch: db "nosuch.txt", 0
+line_index_count: db "Yunooka: index count ", 0
+line_index_hello: db "Yunooka: index hello.txt -> ", 0
+line_index_miss: db "Yunooka: index nosuch.txt -> ", 0
+
+; 窗口原语的参数。它们放在内存里，因为 draw_line 要占 r12 到 r15。
+rect_x: dq 0
+rect_y: dq 0
+rect_w: dq 0
+rect_h: dq 0
+rect_c: db 0
+line_explorer: db "Yunooka: window ", 0
 ; 落盘那一条用的两个 512 字节缓冲：一个填满 0x2A 写下去，另一个接读回来的。
 persist_buf: times 512 db 0
 persist_buf2: times 512 db 0
