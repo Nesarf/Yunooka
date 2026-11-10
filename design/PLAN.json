@@ -16,8 +16,12 @@
       "status": "done",
       "parent": "resident",
       "after": [],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["boot/boot.asm"],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "boot/boot.asm"
+      ],
       "notes": "串口两行：boot ok 与 stage2 ok。判据只认前两行是成败线，其余各行分别报。"
     },
     {
@@ -26,9 +30,16 @@
       "scope": "stage",
       "status": "done",
       "parent": "resident",
-      "after": ["boot"],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["boot/stage2.asm", "tools/build.mjs"],
+      "after": [
+        "boot"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "boot/stage2.asm",
+        "tools/build.mjs"
+      ],
       "notes": "三段位宽各有观测点：protected mode ok 与 long mode ok。代码段必须两个 —— L=1 的段在 EFER.LME 未开时是未定义的，CPU 不报错而是挂住。"
     },
     {
@@ -37,9 +48,15 @@
       "scope": "stage",
       "status": "done",
       "parent": "resident",
-      "after": ["second-stage"],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["boot/stage2.asm"],
+      "after": [
+        "second-stage"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "boot/stage2.asm"
+      ],
       "notes": "CR3 指向 PML4 而不是页目录。这个错只出现一次，症状是开分页那一瞬间之后没有任何输出。"
     },
     {
@@ -48,9 +65,15 @@
       "scope": "stage",
       "status": "done",
       "parent": "resident",
-      "after": ["paging"],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["boot/stage2.asm"],
+      "after": [
+        "paging"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "boot/stage2.asm"
+      ],
       "notes": "三条 alloc 地址加一行 heap ok。heap ok 才是关键：它分配 64 字节、填 0xA5、读回来比 —— 只验地址说明不了那块内存真能读写。"
     },
     {
@@ -59,9 +82,16 @@
       "scope": "stage",
       "status": "done",
       "parent": "resident",
-      "after": ["boot"],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["boot/stage2.asm", "tools/build.mjs"],
+      "after": [
+        "boot"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "boot/stage2.asm",
+        "tools/build.mjs"
+      ],
       "notes": "三批 64 + 64 + 18 扇区。BIOS 的 LBA 扩展不保证推进 DAP 里的 LBA，所以每批自己写一次 —— 否则第二批重读第一批，而魔数与长度都对。"
     },
     {
@@ -70,9 +100,15 @@
       "scope": "stage",
       "status": "done",
       "parent": "resident",
-      "after": ["seed-read"],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["boot/stage2.asm"],
+      "after": [
+        "seed-read"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "boot/stage2.asm"
+      ],
       "notes": "seed v1 202。格式在 HMYR 的 design/C-VM.txt：HMYRB 加版本 u16、函数数 u16。种子不压缩，所以「解出一点」其实是「照格式读」。"
     },
     {
@@ -81,9 +117,15 @@
       "scope": "stage",
       "status": "done",
       "parent": "resident",
-      "after": ["seed-header"],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["boot/stage2.asm"],
+      "after": [
+        "seed-header"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "boot/stage2.asm"
+      ],
       "notes": "fn letters params 0 slots 0 instrs 4。没有种子时不读这一块 —— 否则会从零填充里读出一个漂亮的「版本 0、0 个函数」。"
     },
     {
@@ -92,9 +134,15 @@
       "scope": "stage",
       "status": "done",
       "parent": "resident",
-      "after": ["fn-table"],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["boot/stage2.asm"],
+      "after": [
+        "fn-table"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "boot/stage2.asm"
+      ],
       "notes": "三十四项的 imm_shape 表加 skip_imm。没有这张表只能读第一条，而「只读第一条」与「走完四条」在第一条上看起来一样。"
     },
     {
@@ -103,9 +151,15 @@
       "scope": "stage",
       "status": "done",
       "parent": "resident",
-      "after": ["instr-stream"],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["boot/stage2.asm"],
+      "after": [
+        "instr-stream"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "boot/stage2.asm"
+      ],
       "notes": "letters -> string 53。53 是 26 小写加 26 大写加一个下划线，可以从那一侧独立算出来 —— 所以这一行验的是执行，不是打印。"
     },
     {
@@ -114,9 +168,15 @@
       "scope": "stage",
       "status": "done",
       "parent": "resident",
-      "after": ["eval"],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["boot/stage2.asm"],
+      "after": [
+        "eval"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "boot/stage2.asm"
+      ],
       "notes": "fn116 两次：2147483648 与 0。两行合起来才说明跳转按条件走 —— 只验一个的话，一个永远不跳的解释器也能过。"
     },
     {
@@ -125,9 +185,15 @@
       "scope": "stage",
       "status": "done",
       "parent": "resident",
-      "after": ["branch"],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["boot/stage2.asm"],
+      "after": [
+        "branch"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "boot/stage2.asm"
+      ],
       "notes": "call -> 512。帧是四行 push/pop，往后加参数与局部槽加的是它们之间的内容。不是「调函数」这条指令 —— 那还要按名字找函数。"
     },
     {
@@ -136,9 +202,15 @@
       "scope": "task",
       "status": "done",
       "parent": "resident",
-      "after": ["call"],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["boot/stage2.asm"],
+      "after": [
+        "call"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "boot/stage2.asm"
+      ],
       "notes": "走完整张函数表是这块的主要内容：块长 两处定义，一个 512 一个 256，走完整表留最后那个得 512，第一个匹配就收手得 256 —— 两行都在串口上，才是「按名字」与「按顺序」分得开的证据，只验一个的话「永远取最后一个函数」也能过。踩到的坑是 mov r13, [rsi] 八字节读：指令数是 u32，高 32 位吃进了后面第一个 opcode，循环上限成了两万多亿，症状是找不到而不是崩；find_fn 里同一行因为从不跳过指令流、第 0 个就找到了，所以从没露过。参数传递还没验 —— 块长 零参，槽填充、参数数检查、返回值落槽这三样代码里有位置，判据还没有。"
     },
     {
@@ -147,9 +219,15 @@
       "scope": "task",
       "status": "done",
       "parent": "resident",
-      "after": ["call-op"],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["boot/stage2.asm"],
+      "after": [
+        "call-op"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "boot/stage2.asm"
+      ],
       "notes": "做成的比原来写的多：调内置 len，加上索引、等（串按内容比而不是按指针）、加、大等，还有帧栈与参数落槽 —— 因为 is_digit 七条指令里这些全要用。尾调用也是这一块补的：in_set 是十轮递归，不做尾调用四帧立刻用完。判据是 is_digit('7') 真与 is_digit('a') 假，两个都要对，只验一个的话「永远返回 true」照样能过。三个坑一个比一个安静：CR4.OSFXSR 没开，SSE 指令 #UD 而无 IDT 就成三重故障，症状是串口停在上一行；pop_val 自己用 rcx，而参数循环的上限也放在 rcx；find_fn_by_name 把 rbx 用成自己的计数（收工时 401），调用者却以为那还是自己的 pc，于是 instr_offsets[402] 出表、每处调用都被判成非尾。"
     },
     {
@@ -158,9 +236,15 @@
       "scope": "stage",
       "status": "open",
       "parent": "resident",
-      "after": ["fs-multilevel"],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["boot/stage2.asm"],
+      "after": [
+        "fs-multilevel"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "boot/stage2.asm"
+      ],
       "notes": "用户点到 CrystalDiskInfo。它读的是 SMART（自监测分析与报告技术），命令还是 ATA 的（0xB0 读、0xB1 开），所以它与 fs-multilevel 卡住的那一层是同一条路 —— ATA 的读扇区先稳下来，这一条才谈得上。要做三件：IDENTIFY DEVICE 拿型号与能力位、SMART READ DATA 拿温度与通电时间与重映射扇区计数、以及把这些数按「哪个是健康指标」分类，而不是当成一堆数打出来。KID 那份记录里已经写过「DiskInfo 风格」，展示的调子有参照。"
     },
     {
@@ -169,9 +253,13 @@
       "scope": "stage",
       "status": "open",
       "parent": "resident",
-      "after": ["system-software"],
+      "after": [
+        "system-software"
+      ],
       "verifiedBy": [],
-      "touches": ["README.md"],
+      "touches": [
+        "README.md"
+      ],
       "notes": "用户点到 Windows 任务管理器。这一条比 SMART 远得多：它显示进程与它们的资源占用，而 Yunooka 现在没有进程 —— 只有一个执行流，连「当前目录」都因此没有主人（这一条在 filesystem 的 notes 里也写过）。所以它不是「实现一个列表」，而是「先有进程这个概念」：一个能被创建、被切换、被结束的东西，并且知道自己占了多少内存。在那之前它只能作为方向记着，写不出判据。"
     },
     {
@@ -182,7 +270,9 @@
       "parent": "resident",
       "after": [],
       "verifiedBy": [],
-      "touches": ["design/palette.json"],
+      "touches": [
+        "design/palette.json"
+      ],
       "notes": "22 个色号存在 design/palette.json，按用户给出的顺序，不重排。角色划分（背景、前景、强调）还没有定，文件里写的是 null 而不是编一个 —— 一份 22 色的清单不是一套配色。来源是 F:\\素材\\图\\brak 立绘\\kohane\\小一孁 琥珀音_info.jpg（字节其实是 PNG，扩展名写作 jpg）。它与 Ichiwatashi 的像素层是一对：色组定颜色，Ichiwatashi 定怎么画成像素。这一条之所以记成 done，是因为「色号被记下来并且可被代码读到」这件事已经完成；「它被用上」还没有。"
     },
     {
@@ -193,7 +283,10 @@
       "parent": "resident",
       "after": [],
       "verifiedBy": [],
-      "touches": ["design/CURSOR.txt", "README.md"],
+      "touches": [
+        "design/CURSOR.txt",
+        "README.md"
+      ],
       "notes": "用户提出的一项：把本机正在用的鼠标指针方案暂时作为 Yunooka 的默认光标组。查清了，是 Maki —— 注册表 HKCU\\Control Panel\\Cursors 里十七个槽位全部指向 %SYSTEMROOT%\\Cursors\\Maki\\，方案名也是 Maki，CursorBaseSize 是 0x20。十七个文件合计 1816690 字节，其中七个静态（.cur，全部 16958 字节，同一套多尺寸容器）十个动画（.ani）。映射、字节数、来源都写进 design/CURSOR.txt。二进制没有搬进仓库：Maki 的再分发条款还没核过，许可没说清之前只记方案与来源。这一条记 done 是因为「方案被查清并记录下来」已经完成；它离被用上还差一整个图形界面 —— 等有像素层与窗口，要做的第一件事是「什么场合换哪一个」，而十七个槽位就是那个映射的骨架。还有两件这一版没定：默认尺寸，以及光标热点要不要自己重做（第三方 .cur 的热点是自带的，改尺寸不会跟着重算）。光标与配色分开记，因为改的时机不一样：配色跟着界面走，光标跟着交互走。"
     },
     {
@@ -202,9 +295,16 @@
       "scope": "stage",
       "status": "done",
       "parent": "resident",
-      "after": ["fs-open"],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["boot/stage2.asm", "tools/run.mjs"],
+      "after": [
+        "fs-open"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "boot/stage2.asm",
+        "tools/run.mjs"
+      ],
       "notes": "用户点名的第一件。终端、控制台、shell 在别的系统里常被混着叫，这里按一件事记：一个能读一行、解释它、把结果写回来的东西。做成的时候它分了三层，因为三层的前置不一样。解释那一层最先成：盘上 cmd.txt 里写着 files，run_shell 查它、回显、比前五个字节、是就列根目录、不是就说 unknown command。输入来源那一层是 input-mailbox：先看信箱，信箱没有才回盘上。运行时那一层是 keyboard：run_shell_live 先打一行 shell ready，主机看到之后才把文件逐字符送进来，客人机轮询 0x64 与 0x60、查 keymap、攒进 64 字节的行缓冲、回车时解释。判据的那一行连成一条链：shell ready 之后接上 shell> files 与目录列表 —— 只查「有 hello.txt」会被前面从信箱读的那一次占便宜，那一行也是 files。这一版还没有的：光标、历史、退格之外的行编辑、清屏，以及一个真正的循环 —— run_shell_live 处理完一行就返回，因为后面还排着别的测试；要做成常驻，得先有一个能跳出来的条件。路上踩过的坑记在别处：put_utf16_ascii 打到零码元（另写了 put_utf16_n）、run.mjs 读文件太早（不是 stage2 的问题）、键盘那一路的集 1 与集 2（见 keyboard 那一条）。"
     },
     {
@@ -213,9 +313,16 @@
       "scope": "stage",
       "status": "done",
       "parent": "resident",
-      "after": ["shell"],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["boot/stage2.asm", "tools/run.mjs"],
+      "after": [
+        "shell"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "boot/stage2.asm",
+        "tools/run.mjs"
+      ],
       "notes": "两半都成了，门开了。文件输入那一半：盘上 repl.txt 里是一个函数名（块长，UTF-16 码元），run_repl 按名字找它、跑它、打出来 —— repl> 2 units -> 512。那个 512 是 exec 真的跑了第二个定义的结果。名字本身打不出来：块长 的低字节是 0x57 与 0x7F，八位串口只出一个 W，所以那一行打的是码元数。交互那一半：run_repl_live 先说一句 repl ready，主机看到才逐字符送名字，客人机收一行、转成 UTF-16、find_fn_by_name、exec、print_value —— 判据是 repl ready 之后接上 repl-live> letters 与 string 53。选 letters 是因为它的返回值是串而不是数，这样 print_value 的分类那几支里有两支被走到；而 53 不是打出来的常量，是 exec 算的。与文件那一半的 512 区分开：一个是事先写好的名字，一个是运行时打进去的。收键那一段抽成了 read_line_keys，shell 与 repl 共用 —— 四步（读 0x64、查表、攒缓冲、回车收尾）抄两遍就会改一处漏一处。踩了两个坑。一是回车只送按下码 1C 会让 8042 认为它一直按着，重复码追到下一条命令里，症状是 repl 收到一个空行；补上放开码 9C 就好了 —— 这条与字符不用补放开码不一样，因为 keyboardputstring 自己会拆。二是空名字不该被当成一个函数去查，加了判断之后 unknown 那一支才真的会走。求值本身仍属于 HMYR：Yunooka 这一侧只负责「拿到一个名字」与「打一个值」，中间那段是种子里已有的 exec。"
     },
     {
@@ -224,9 +331,17 @@
       "scope": "stage",
       "status": "done",
       "parent": "resident",
-      "after": ["shell"],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["README.md", "boot/stage2.asm", "tools/build.mjs"],
+      "after": [
+        "shell"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "README.md",
+        "boot/stage2.asm",
+        "tools/build.mjs"
+      ],
       "notes": "先定的那件做完了：一个程序从盘上的哪一份字节开始跑。答案是与种子同格式的一个包（HMYRB 头 + 一条 u16 版本 + 一条 u16 函数数，函数表从第九个字节起），放在盘上叫 prog.hmtn，由文件系统读进预读区，在里面找 main、跑它、打返回值。判据是那个 7：七只存在于那个包的两条指令里（常量、返回），别处没有，所以读到 7 就等于「包被读进来、入口被找到、指令流被跑过」。让这件事成立的是一处小改动：find_fn_by_name 原来写死从 0x20000 扫，改成读 pkg_base —— 于是种子与盘上的包用同一段查找代码，差别只在那个变量指哪儿；run_program 跑完把 pkg_base 拨回 0x20000，免得后面的测试读错地方。这也说明了「程序」与「种子」从此分得开：种子是启动时就在的那个包，这个是从盘上取的另一个。没有做的，与原先写的一样：地址空间（包与系统共用同一片内存，没有隔离）、权限、多个程序同时存在、以及调度。那些都要先有「一个程序占一块地方」的概念，而那要等进程 —— 所以这一条记 done 指的是「第一件做完了」，不是「用户空间齐了」。"
     },
     {
@@ -235,9 +350,13 @@
       "scope": "stage",
       "status": "open",
       "parent": "resident",
-      "after": ["userland"],
+      "after": [
+        "userland"
+      ],
       "verifiedBy": [],
-      "touches": ["README.md"],
+      "touches": [
+        "README.md"
+      ],
       "notes": "用户点名的一项。在 Yunooka 上它比在别的系统上自然，因为这本来就是「一台只装自己东西的机器」；但它依赖用户空间先有形状 —— 没有进程就没有东西可以装进容器。记下来是为了不让它被忘掉，不是说现在能开工。"
     },
     {
@@ -246,9 +365,19 @@
       "scope": "stage",
       "status": "done",
       "parent": "resident",
-      "after": ["repl", "fs-multilevel"],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["boot/stage2.asm", "tools/build.mjs", "tools/run.mjs", "design/MATH.txt"],
+      "after": [
+        "repl",
+        "fs-multilevel"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "boot/stage2.asm",
+        "tools/build.mjs",
+        "tools/run.mjs",
+        "design/MATH.txt"
+      ],
       "notes": "盘的 math.txt 是四行，run_math 逐行切、按 design/MATH.txt 三节分派：行里有等号就是表达式（左边是名字，右边要看有没有 x），否则冒号前是已知运算名就按具名运算读，都不认得就说 unknown operation。四行压住四种写法 —— average 那一行给两个数，后三行是同一个左边的三种写法 y、f(x)、f x。judges 落在五行读数上：sum 262.488320、average 29.165369，以及三行 curve 各自把左边原样打出来并报右边有没有 x。三种写法要认成一模一样，这是「括号与空格是给人看的」那句话的可执行形态。这一条新写的东西里有四样：除（操作码 6）、十进制解析（含 30.4 与 6π、24e 两个常量）、六位小数的打印（四舍五入），以及按行的分派。踩过的坑有两个。一是「除」必须有自己的判据：average 也走同一份 div_f64，但 exec 的分发表若漏了操作码 6，average 那两行照样是绿的，所以另造了一段四条指令的迷你流（常量 π、常量 2、除、返回），读数 1.570796。二是逐行推进的第一版把 cmp r8, r15 之后 add r14, 2 写在 sub r15, r8 之前，只跳了一个码元却减了整行长度，于是第二行从一个错位置开始读，症状是一个 unknown operation 之后整条流停住 —— 这种错在读代码时看不出来，因为两个操作各自都对。红的验法做了两次：把 30.4 改成 30，sum 少正好 0.4、average 跟着变；把 f(x)=1/x 的右边改成 2，那一行报 no x 而另两行仍报 has x —— 后者证明右边真的被扫描、三行各自独立判断，不是复制第一行的结论。"
     },
     {
@@ -257,9 +386,16 @@
       "scope": "stage",
       "status": "open",
       "parent": "resident",
-      "after": ["math-line"],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["boot/stage2.asm", "design/MATH.txt"],
+      "after": [
+        "math-line"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "boot/stage2.asm",
+        "design/MATH.txt"
+      ],
       "notes": "读的那一半在 math-line 里做完了：两种形状分派得开、三种左边写法一致、具名运算算得出数。剩下的是画那半，以及它带出来的三件事。绘图要一块能画点的界面，而界面排在像素层与色组之后（palette 已经 done，像素层还没有目标）。画一张图还要定三样：尺寸与坐标轴、取多少个点、以及 x 落在哪一段。另外两件小的：坏输入说什么只定了「认不出的运算名说 unknown operation」，表达式那边坏在哪还没话可说；average 之外还有哪些运算名没定。还有一条线在这条目标之外但迟早要撞上：表达式求值本身属于 HMYR 的编译器，Yunooka 这一侧只认形状、不算值 —— 真要在这里求值，要么把编译器搬过来，要么调种子里已经有的函数。"
     },
     {
@@ -268,9 +404,13 @@
       "scope": "stage",
       "status": "open",
       "parent": "resident",
-      "after": ["fs-multilevel"],
+      "after": [
+        "fs-multilevel"
+      ],
       "verifiedBy": [],
-      "touches": ["README.md"],
+      "touches": [
+        "README.md"
+      ],
       "notes": "YunookA 不是 Yunooka 的移植，它与 Yunooka 同级：同样是一整套 —— 系统、SDK、默认软件组、默认语言、开发平台。两台机器各有自己的一份，共用同一个语言本体（HMYR）。写成 HMYR 那边移植矩阵的一行是不对的，那一条只在「同一个系统换一个桌面宿主」时才成立；这一份是另一台机器。参考系统是三台真机器：红米 Turbo 4、红魔 11 Air、红魔 9S Pro。三台都是 arm64、都在安卓上，所以宿主口要回答的不是「扩展名怎么登记」，而是「一个 HMYR 程序在安卓里以什么身份存在」—— 应用里的资源、被别的程序拉起来的组件、还是 YunookA 自己托管的壳；安卓不给第二个答案，一个应用就是一个包裹，不存在「从任意目录启动一个程序」。名字里的 A 就是 Android：Yunooka 是桌面那一套，YunookA 是 Android 那一套，一个字母把区别说完了。"
     },
     {
@@ -280,8 +420,13 @@
       "status": "open",
       "parent": "resident",
       "after": [],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["boot/stage2.asm", "tools/run.mjs"],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "boot/stage2.asm",
+        "tools/run.mjs"
+      ],
       "notes": "shell 与 math-console 共同的前置。前半已成：stage2 有 read_char（等 LSR 的 bit 0，从 0x3F8 取字节，有上限）与 run_serial_echo（收到就回显，收不到就说 no input）。第一课值得记：第一版等 200000 次，在这台虚拟机上那是二十多秒，于是超时本身变成了它该报告的那种卡住 —— 降到 2000 才成了一次探测。后半这一趟查到底了，结论与之前的猜测不一样，写清楚免得再走一遍。旧解释是「主机连得晚，输出已经写完」，已经被推翻。事实是三条。一、tcpserver 后端下主机连得上，客人机一个字节也送不出来：跑到六十秒仍是 running、仍是零字节，摘掉 uart_init 一样，把 serial_wait 整个摘掉也一样 —— 连引导扇区那句 boot ok 都出不来，所以原因不在握手也不在初始化，在客人机的串口 port I/O 在这条后端上出不去。二、uart_init 加上 tcpserver，客人机会三重故障（VINF_EM_TRIPLE_FAULT），在从硬盘引导之后约零点一秒；注释掉它就不再崩，所以「崩」与「不通」是两件事。崩的原因没查到底，FCR 清 FIFO 与 MCR 拉 DTR/RTS 最可疑，而这两条在文件后端下都无害。三、pipe 后端两条语法都不通：--uartmode1 pipe <路径> 在 7.2 上报 Invalid parameter，--uart-mode1 'client pipe#名字' 把整串当设备名并报 VERR_INVALID_HANDLE；手册里的 server pipe#name 与实际解析器对不上。这三条实测记录也抄了一份在 boot/stage2.asm 的串口一节里，因为它们是客户机代码的约束。所以串口这条路到此为止：文件后端是唯一能用的，而它单向。要让主机把字节送进客户机，得换一条完全不同的路 —— 一块小盘当信箱是眼下最直的候选，立成 input-mailbox 那一条。"
     },
     {
@@ -290,9 +435,17 @@
       "scope": "stage",
       "status": "done",
       "parent": "resident",
-      "after": ["fs-open"],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["boot/stage2.asm", "tools/run.mjs", "design/FS.txt"],
+      "after": [
+        "fs-open"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "boot/stage2.asm",
+        "tools/run.mjs",
+        "design/FS.txt"
+      ],
       "notes": "为什么立这一条：serial-io 查到底之后，串口只有文件后端能用，而它只能往外说。可是「主机往里送一行」必须有一条路，所以路换了一条。做成的形态是第二块盘：一块 1 MB 的裸盘（VirtualBox 的 RAW medium，主机的普通文件就是它的全部内容），挂在 primary slave，BIOS 盘号 0x81。stage2 在实模式用 int 0x13 读它的第 0 个扇区到物理 0x50000，验八个字节的魔数 YUNOMBX 加一个 0；长模式里 run_shell 先看那一块，魔数对且字节数非零就把它当输入，否则退回主盘上的 cmd.txt。头 32 字节：魔数、版本 u16、留白 u16、字节数 u32、序列号 u32，内容从第 32 字节起，形状与 cmd.txt 一样是 ASCII 字节 —— 所以「认命令」那一段一个字都不用改，变的只是来源。判据两行：mailbox ok（魔数对）与 input from mailbox（那一行真的被当成 shell 的输入）。两行缺一不可，因为盘上 cmd.txt 里也是 files，只打一个文件列表看不出输入从哪来。红的验法是把信箱里的词换成 list：读到 shell> list 与 unknown command，而列目录的答案同时消失 —— 那才证明输入真的来自信箱而不是主盘。这一条给的是「换一行输入不必重建主盘」，不是交互；真要边打边算还要等一个运行时能收到东西的机制，而这块机器现在两样都没有。盘必须先造一次（createmedium 会注册一个 UUID，重建会让登记里那份失效），所以 run.mjs 只在缺的时候造，造完就只改内容。"
     },
     {
@@ -301,9 +454,16 @@
       "scope": "stage",
       "status": "done",
       "parent": "resident",
-      "after": ["paging"],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["boot/stage2.asm", "tools/run.mjs"],
+      "after": [
+        "paging"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "boot/stage2.asm",
+        "tools/run.mjs"
+      ],
       "notes": "在这之前，任何一个异常都是三重故障：CPU 找不到处理者，用 #DF 再失败一次，然后重启。症状只有一种 —— 串口停住，什么也不说。而这个症状与「还没跑到那里」在串口上长得一模一样，所以它的第一价值不是「处理异常」，是「让错误有名字」。表在 0x5000，256 项只填六个：除零、断点、未定义指令、双重故障、通用保护、页不存在；其余留零（present=0），访问到会 #GP，而 #GP 已经填了，于是还有话说。判据三件事：idt ok（表装上了）、exception 6（ud2 的 #UD 真的被接住）、handler returned 不出现（处理者没有假装无事发生）。第三件是前提式的：没有 trap test 就算红，否则一条跑不到的路径会白送它。踩到的坑有两个。一是段选择子：中断门里要 0x18（64 位代码段），写成 0x08（32 位那个）之后 ud2 触发、CPU 试着调用那扇门、发现长模式下不能用 32 位代码段，于是 #GP；而 #GP 走同一张表、同一处写错，再变成 #DF，然后三重故障 —— 一个错的选择子会把整张表一起废掉，症状是连异常号都打不出来。二是 puts64 的最后一个 lodsb 会读终止符并把 al 清零，而号码正放在 rax 里，于是 exception 6 被打成 exception 0；号码改放到 r15 就对了。这两件都不是「哪里算错了」，而是「两处各自正确的东西接在一起才错」，读代码很难看出来。红是用 nop 替换 ud2 验的：得到 handler returned，而 exception 那一段不存在。"
     },
     {
@@ -312,9 +472,17 @@
       "scope": "stage",
       "status": "done",
       "parent": "resident",
-      "after": ["idt", "ata-read"],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["boot/stage2.asm", "tools/run.mjs"],
+      "after": [
+        "idt",
+        "ata-read"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "boot/stage2.asm",
+        "tools/run.mjs"
+      ],
       "notes": "装 IDT 之后才看得见的事，查到底了，结论与最初的猜测完全不同。最初以为是 PIO 不稳：同一份盘连跑两次都在 ata same 512 之前崩，一次 #DF 一次 #GP。定位做到了那一步 —— 异常处理器改成按号码取 RIP（#DF、#GP、#PF 带错误码，RIP 在再往上一格），四趟抓到一次 #GP at 0x8F67，减掉 org 得偏移 0x1167，stage2.lst 里正落在 ata_read 的 in al, dx 之后。于是把它从主链上拿下来（开关借信箱头偏移 10 那个留白的 u16），主判据稳了，五趟连续退出码零。但那是把症状挪开，不是修好。真正的根因在接下来做键盘那一步露出来：加上 run_key_poll 之后崩溃点跑到了串口那一段，连 no input 都打不出来，而循环次数从五百万降到一千也照崩 —— 位置还在变。三条不同的路在不同位置抛不同号码的异常，这不是某条指令写错了的样子，是有东西随时插进来。long_entry 从进长模式起一直没关中断，而 BIOS 装的 PIC 仍在送定时器中断，IDT 里 32 号往后全是零（present=0）；于是一次定时器中断就是一次 #GP（向量 8 在 16 位的老映射里就是双重故障），而 #GP 的处理里再撞一次就成了 #DF。加了一句 cli 之后：键盘那行成了，三趟 --ata 全是 same 512，五趟默认全绿。所以 ata_read 从来没坏过，它只是最常被中断撞上的那一段。教训是「位置不固定、号码不固定」这个形状本身就是线索 —— 当时只盯着 ata，是因为它每次都出现在同一个位置附近。ATA 那条测试已经回到主链，信箱偏移 10 的开关也撤了。"
     },
     {
@@ -323,9 +491,16 @@
       "scope": "stage",
       "status": "done",
       "parent": "resident",
-      "after": ["idt"],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["boot/stage2.asm", "tools/run.mjs"],
+      "after": [
+        "idt"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "boot/stage2.asm",
+        "tools/run.mjs"
+      ],
       "notes": "为什么做：serial-io 查到底之后，串口只有文件后端能用，而它只能往外说；信箱能送一行进来，但要先写后启动，不是运行时的东西。键盘是第三条路，而且是这三条里唯一一条真正「运行时」的。手段是 VBoxManage controlvm keyboardputscancode —— 它把扫描码直接注入 8042，不需要窗口焦点，也不需要客人机装任何驱动。客人机这一侧轮询而不是中断：读 0x64 的 bit 0 看输出缓冲有没有东西，有就读 0x60。先轮询是为了把两件事分开 —— 先证明「能读到码」，再把 8259 重映射与 IDT 里的 IRQ1 接上；顺序反了的话，读不到码时会在中断配置里找问题，而那里本来没问题。注意只读 0x64 与 0x60，从不写它们：当初 A20 那一版是往 0x64 写，把 out 卡住了。扫描码集是 set 2，0x2B 是 F 按下、0xAB 是放开；这一版不翻译，只把收到的码原样打出来 —— 翻译表可以后加，而「究竟收到了什么」是一张表替代不了的事实。主机那一侧每轮都送一次，连送十秒：客人机只在一小段窗口里轮询，主机猜不准那一秒，而猜一次的代价是偶尔「没收到」，那看起来和「键盘不通」一模一样。判据就是那个字节本身（key 000000000000002B），不是「有没有收到」—— 收到的码若不对，说明端口读在别处，而「收到一个数」这件事仍然成立。做这一条的过程里撞出了 ata-flake 的真凶（中断没关），详见那一条。"
     },
     {
@@ -334,9 +509,16 @@
       "scope": "stage",
       "status": "done",
       "parent": "resident",
-      "after": ["input-mailbox"],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["boot/stage2.asm", "tools/run.mjs"],
+      "after": [
+        "input-mailbox"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "boot/stage2.asm",
+        "tools/run.mjs"
+      ],
       "notes": "这一条与 input-mailbox 是同一次改动落地的，分开记只为一件事：三件事的坏法不同，读数就要分得开。通道能读通（mailbox ok）不代表那一行被当成输入（input from mailbox），也不代表它被认出来（shell> files 与列目录）。做的改动只有一处：run_shell 在去翻 cmd.txt 之前先看物理 0x50000，魔数对且字节数非零就用它当 r14，否则原路不变。多打一行 input from mailbox 或 input from cmd.txt，因为只打 files 的答案看不出输入从哪来 —— 盘上那份也是 files。"
     },
     {
@@ -345,9 +527,17 @@
       "scope": "stage",
       "status": "done",
       "parent": "resident",
-      "after": ["second-stage"],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["boot/boot.asm", "boot/stage2.asm", "tools/build.mjs"],
+      "after": [
+        "second-stage"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "boot/boot.asm",
+        "boot/stage2.asm",
+        "tools/build.mjs"
+      ],
       "notes": "解释器装不下了：is_digit 之后实到 6684 字节，times 8192 只剩一千多，再塞一块砖就会中途撞上去。三十二个扇区给 16 KB。三个数字必须一起改 —— boot.asm 的 al = 32、stage2.asm 的 dap_lba = 33（三批各是 33 / 97 / 161）、build.mjs 的种子偏移 16896；它们只会在跑起来的时候一起失败，所以布局注释写在 build.mjs 一处。build.mjs 现在也报「实到多少字节」，因为 times 会把输出补到 16384，那个数字总像是用满了。"
     },
     {
@@ -356,9 +546,16 @@
       "scope": "stage",
       "status": "done",
       "parent": "resident",
-      "after": ["second-stage"],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["boot/stage2.asm", "tools/run.mjs"],
+      "after": [
+        "second-stage"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "boot/stage2.asm",
+        "tools/run.mjs"
+      ],
       "notes": "文件系统的前提是长模式下还能读盘，因为 BIOS 的 int 0x13 只活在实模式。主通道 0x1F0 那一组，LBA28 的 PIO 读。判据不是「读出来了」而是「与 BIOS 读的是同一份」：ATA 读 LBA 33，与 int 0x13 已经读到 0x20000 的那 512 字节逐字节比 —— 读错扇区也会读出一个结果，所以「读出来了」本身什么都说明不了。踩到的坑在机器那一侧：控制器原来是 AHCI，而 0x1F0 那组端口属于 IDE 兼容模式、AHCI 不映射，读 0x1F7 一直返回 0xFF，状态位看着永远忙、等待循环转到超时才放手，串口上只留一句没头没尾的 ata start；改成 PIIX4 就通了，run.mjs 现在检查控制器名、不是 IDE 就删了重建。"
     },
     {
@@ -367,9 +564,17 @@
       "scope": "stage",
       "status": "done",
       "parent": "resident",
-      "after": ["ata-read"],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["design/FS.txt", "boot/stage2.asm", "tools/build.mjs"],
+      "after": [
+        "ata-read"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "design/FS.txt",
+        "boot/stage2.asm",
+        "tools/build.mjs"
+      ],
       "notes": "先有了 design/FS.txt 那一份形状，才有这一块：第 1024 号扇区起是文件系统，超级块写着版本、扇区总数、根目录扇区与它占几个、数据起点、空闲数；目录是一串变长条目，遇到名字长度为 0 就结束；文件数据连续。build 按这份布局写进一个超级块、一个根目录、一份 hello.txt，stage2 用 ATA 读回来并打出「版本、根目录扇区、第一个名字」——三个数都来自盘上那份字节，所以那一行说明布局被读懂了。踩到的两个坑：ata_read 读完没有等 BSY 落，下一条命令被丢掉、insw 读回上一次的缓冲（看着像读成了）；build.mjs 卸盘还写着 SATA 控制器名，那是换 IDE 之前留下的，失败得很静，要到媒体登记那一步才露头。"
     },
     {
@@ -378,9 +583,16 @@
       "scope": "stage",
       "status": "done",
       "parent": "resident",
-      "after": ["fs-superblock"],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["boot/stage2.asm", "tools/run.mjs"],
+      "after": [
+        "fs-superblock"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "boot/stage2.asm",
+        "tools/run.mjs"
+      ],
       "notes": "四环：认盘符（α）、跳过 :/ 、在根目录里按名字比 UTF-16 码元、把数据扇区读出来。判据是那二十二个字节的内容 —— 任何一环错，读到的都不会是 Yunooka filesystem ok。未知盘符与找不到名字各有自己的声音（unknown drive / not found），而不是静悄悄给一个空。踩到的坑值得单记：rep insw 在虚拟机模拟的 IDE 控制器上偶尔挂住，而它只在前一行的时序稍有不同时才挂 —— 加一句诊断就好、删掉又坏，两次绿说明不了什么；改成逐 word 读的普通循环才稳。盘符是 UTF-16 希腊字，八位串口打不出来，所以判据行打的是名字。"
     },
     {
@@ -389,9 +601,13 @@
       "scope": "stage",
       "status": "open",
       "parent": "resident",
-      "after": ["filesystem"],
+      "after": [
+        "filesystem"
+      ],
       "verifiedBy": [],
-      "touches": ["README.md"],
+      "touches": [
+        "README.md"
+      ],
       "notes": "清单由用户定下：Ichiwatashi（像素层与美术资源，窗口 UI 图标都从它出来）、Nanodesu 与 Torikago（安防：找可执行文件与看着它们）、Volcano-Separator（活动隔离）、Oak-Barrels（中继站）、KID（Kohane Index Desuno，索引）。共同点是都不属于应用那一层：一台没装任何应用的新机器上也要能跑起来，所以只能住在基础库里。这一条现在只是清单，一行代码都没有；每一个都要先回答同一个问题 —— 它的哪一部分必须在还没有操作系统的机器上就存在。"
     },
     {
@@ -400,9 +616,13 @@
       "scope": "stage",
       "status": "open",
       "parent": "resident",
-      "after": ["system-software"],
+      "after": [
+        "system-software"
+      ],
       "verifiedBy": [],
-      "touches": ["README.md"],
+      "touches": [
+        "README.md"
+      ],
       "notes": "默认浏览器叫 ChuniHydra，四个来源：AikawaMei（相川 冥）、Vtuber's Monitor Link、Firefox、Chromium。前两个出功能，后两个出引擎 —— 四个现在都还不是它的一部分，而是它要长成的样子所依赖的四样东西。相川 冥 是从 SilentCrystal 副本长出来的防御工具（会话卫生审计、内容规则、归因与下架），VML 是打包发布的监视器、带自己的 web 前端。把这两半并进浏览器，理由我读出来是「它们都在持续看着某些东西」，而浏览器是看着整个网络的那一个 —— 这条是我读的，不是用户写的。还没回答的有三件：两套引擎是都要还是二选一；两套引擎在同一个系统里怎么并存；以及这个浏览器在「还没有操作系统」的那一层上占哪一块 —— 它与 Ichiwatashi 的像素层不是同一件事。"
     },
     {
@@ -411,9 +631,16 @@
       "scope": "stage",
       "status": "done",
       "parent": "resident",
-      "after": ["fs-open"],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["boot/stage2.asm", "tools/build.mjs"],
+      "after": [
+        "fs-open"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "boot/stage2.asm",
+        "tools/build.mjs"
+      ],
       "notes": "做成了：build 放两层（根目录的 hello.txt 与 docs 目录，docs 里的 note.txt），stage2 抽出 fs_lookup（在某个目录扇区里按名字找条目）并走两段，串口上 `open hello.txt` 与 `open docs/note.txt` 两行都出现，连续两次运行退出码 0。设计上这一块不需要「当前目录」—— 绝对路径从根往下走，每层只要知道「这一层是哪个扇区」，所以它能先于进程做出来。路上有三个坑，每个都记在这里：一、ATA PIO 在虚拟机模拟的 IDE 上不可靠（重试、0xFF、drain、逐 word、读前延迟，五轮补丁全失败），最后改成实模式预读 —— 五个扇区在进长模式之前用 int 0x13 读进 0x40000，长模式走 fs_load，从此这条路上不碰盘；代价是「能打开哪些文件」在启动时定死。二、最后那个卡住是 mov rdi, [rax+12] 把 u32 的扇区号读成八字节，高 32 位吃进了紧跟的数据起点，于是 fs_load 算出的地址在几十 GB 之外 —— 这个形状在这一版里出现第三次（指令数、状态字节、扇区号各一次）。三、诊断字符（o129 加两个地址）比任何推理都快：打出 rsi 是 0000020000040200 之后，一眼就看见了多出来的那一半。"
     },
     {
@@ -422,9 +649,21 @@
       "scope": "stage",
       "status": "open",
       "parent": "resident",
-      "after": ["builtins", "widen-stage2", "ata-read", "fs-superblock", "fs-open", "fs-multilevel"],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["design/FS.txt", "README.md"],
+      "after": [
+        "builtins",
+        "widen-stage2",
+        "ata-read",
+        "fs-superblock",
+        "fs-open",
+        "fs-multilevel"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "design/FS.txt",
+        "README.md"
+      ],
       "notes": "形状、路径、盘符、打开一条路径都做完了，写在 design/FS.txt。这一版新做完的是「按斜杠逐段解析」（fs_open_path，深度不再是限制，α:/docs/sub/deep.txt 是判据）与「盘符对一块盘」：α 是主盘，预读在 0x40000、从第 1024 个扇区起；β 是第二块盘，预读在 0x60000、从第 0 个扇区起，挂在 IDE 的 secondary master（BIOS 盘号 0x82）。fs_load 因此从两个常量变成两个变量（fs_base、fs_start），fs_open_path 认盘符之后拨它们。判据是同一个名字读两次：α:/hello.txt 给出 Yunooka filesystem ok，β:/hello.txt 给出 Yunooka second disk ok —— 内容不同才分得开盘，而「打开成功了」两行都有。路上踩了三个坑，都不是算错。一、run.mjs 判断「盘挂没挂」用的是键名在不在，而 showvminfo 对空槽位也输出 IDE-1-0=\"none\"，于是 attach 一次也没跑过；改成看值是不是 none。二、sts_open_path 返回前把基址拨回 α，而读文件在调用者那一侧 —— fs_load(2) 用 α 的起点 1024 做减法，借位成巨大偏移，表现是 #PF at 0xA1B4 而不是「读错了内容」。一个状态什么时候失效要由用完它的人决定。三、三层与两层的判据原来都想靠同一个打印函数，而它们现在各有一份 —— 那是可以合并的地方，留着是因为合并要动已通过的代码。写也做了，但只做到一半：fs_write_file 会算空闲扇区、在根目录追加条目、把数据拷进新扇区 —— 那是「文件系统这一层的写」，而数据落在预读区里，重启就没了。持久化是另一层（要 PIO 写回盘上），单独记成 fs-persist。判据是写一段只有这里才有的字节、再按路径读回来，同时 files 的列表里要多出那个名字 —— 目录里多了一条与数据落对地方是两件事，两件都得成立。踩过一个坑：fs_load 把地址交在 rsi，而下一句拿 rsi 去打提示词，于是打出来的是数据段里的字符串（wrote -> Yunooka: write fail）；先存进 fs_buf 就好了。这个坑与「puts64 的最后一个 lodsb 会改 al」是同一类 —— 打印函数会占用它碰到的寄存器，而这两次都发生在「刚拿到一个地址、马上要打印」的地方。"
     },
     {
@@ -433,9 +672,15 @@
       "scope": "stage",
       "status": "open",
       "parent": "resident",
-      "after": ["filesystem", "ata-read"],
+      "after": [
+        "filesystem",
+        "ata-read"
+      ],
       "verifiedBy": [],
-      "touches": ["boot/stage2.asm", "tools/run.mjs"],
+      "touches": [
+        "boot/stage2.asm",
+        "tools/run.mjs"
+      ],
       "notes": "fs_write_file 现在只改内存里的预读区：算空闲扇区、追加目录条目、拷数据，全对，而重启就没了。这一条要的是把同一批字节写回盘上。两件前置都欠着。一是 ata_write 不存在 —— ata_read 的写法在那儿（LBA28、等 BSY、等 DRQ、逐 word），写是它的镜像（0x1F7 送 0x30、再 256 个 out），但没写过。二是盘号参数：ata_read 的 0x1F6 硬编码主盘，而 β 是 secondary master、DEV 位不同 —— 要写盘而且能选盘，这个参数得先加。判据大概只能跨启动：写一次、重启、再读 —— 因为同一次运行里读到的永远是内存里那一份，而那一份证明不了盘上有没有。「跨两次启动」与「一次运行退出码零」是两条不同的纪律，怎么记要先定下来，不然后面每一步都会被它绊住。"
     },
     {
@@ -445,8 +690,13 @@
       "status": "done",
       "parent": "resident",
       "after": [],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["boot/stage2.asm", "tools/run.mjs"],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "boot/stage2.asm",
+        "tools/run.mjs"
+      ],
       "notes": "网卡从 nic1=none 变成了 nat 加 82540EM。第一步不是协议，是 PCI 枚举 —— 「有一块网卡」由它自己的 vendor 与 device 两个数说出来，而那两个数由硬件给出、不由我们解释。方法只有两个端口：0xCF8 写地址（bit 31 置一表示使能），0xCFC 读数据。扫 0 号总线的 32 个设备槽，读出六个：dev 0 与 dev 1 是 8086:1237（i440FX 与 PIIX3）、dev 2 是 80EE:BEEF（VirtualBox 图形）、dev 3 是 8086:100E（E1000，就是那块网卡）、dev 4 是 80EE:CAFE（VirtualBox 的另一个设备）、dev 7 是 8086:7113（ACPI）。判据是「有一行的号以 100E8086 结尾」。只扫 0 号总线与 func 0：这台机器的设备都在那里，而多扫两级要把「怎么认多功能设备」也写进来 —— 那一层对「有没有网卡」没有帮助。往后 ARP、IP、UDP、TCP 每一步都有它自己的判据，而它们与家庭组的关系要单独讲：把运输层做好不代表家庭组开始了一行。"
     },
     {
@@ -456,9 +706,15 @@
       "status": "open",
       "parent": "resident",
       "after": [],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["design/HOMEGROUP.txt", "boot/stage2.asm", "tools/run.mjs"],
-      "notes": "用户要的：把 Windows 家庭组魔改到 Yunooka。设计在 design/HOMEGROUP.txt。先拆开：家庭组是五个部件 —— 发现、边界、共享、权限、身份，而其中三件依赖网络与「第二台机器」，这两样这台机器都没有（网卡刚开、协议栈一个字没写，而且连两台机器都跑不起来）。所以魔改的结论是：先做那两件不需要网络的。共享做成目录条目类型上的一个位（0x80），不是一张单独的共享表 —— 表要与目录同步，而同步总有一个人先动，那个间隙里两边会不一致；位只有一份数据。边界是一个数（超块里的家 ID），不是一段可以说给别人听的密码 —— 后者在没有网络身份的地方没法验证。发现不做：盘在手里就知道它是哪一块。第一步做完了：fs_share 找条目、置位；run_shares 走根目录、列带位的条目，名字与类型都打（只打名字的话，一个被标记的目录与一个被标记的文件长得一样）。判据是走两遍：两遍都只该有一条 docs dir —— 一个「往清单里加一条」的实现走第一遍也是对的，只有第二遍分得开。踩过两个坑，都不是算错。一是 run_shares 读的是扇区 1024（超块）而不是 1025（根目录），清单因此永远是空的；那一句是照着别处抄的，而那两行连在一起时看着像「读根目录」。二是列清单的循环把游标托付给寄存器，而 put_hex64 与 put_utf16_n 会占用它们碰到的寄存器，于是循环只转一圈；游标改放内存变量就好了 —— 这一条与「puts64 改 al」「fs_load 的地址在 rsi」是同一族，打印函数会吃掉寄存器。跨机器在 Yunooka 上的形态写在设计里：把盘递过去，两边的家 ID 一样就看得见。第二步也做完了：超块偏移 28 放了一个 u32 的家 ID，主盘写 0x594B4E52、β 盘在 run.mjs 里故意写 0x11111111；run_home_test 读两个数、比一比、说出来 —— 串口上是 home 00000000594B4E52 与 beta 0000000011111111 not family。故意让它们不同，是因为同号时「比较过」与「根本没比较」在串口上完全一样，而那是这一条最该分得开的两件事。共享清单还不会因为「不是一家人」而拒绝什么 —— 那要有「列某块盘的共享」这个动作才谈得上，而它现在还没有。第三步也做完了：「加入」不再是一个悬空的动作，而是一条命令 —— run_join_test 把主盘的家写进第二块盘的超块，判据是同一个比较的结论翻过来：同一段代码、同一个读法，先 not family、后 family，只有盘上的数变了。这比「又打印了一次 family」结实得多，因为一个「总是说 family」的实现过不了前半段。比较那一段抽成了 betahome_report，两处都调它 —— 比较只该有一份，而两处结果不同正是判据要看的东西。用户在这期间说了一句要紧的话：先把功能做好，目前没办法找另一台机子装 hmyr。这句话把「跨机器」从设计前提降成了以后的验证方式 —— 而替代品已经在了：β 盘就是「另一台机器的盘」，它有自己独立的超块、目录、文件，和一台真机器的盘没有区别。所以家庭组可以在一块盘上做完整，判据不必等第二台机器。还没做的：权限分档（只读与可写）、共享的目录被删掉之后清单里那条算什么、以及「列另一块盘的共享」这个动作 —— 「列另一块盘的共享」也做完了：fs_shares_at 先比家 ID，同一家才列，不同一家只说 not family、一条都不列。判据走三步 —— 先在 β 上标记一个文件、再列 β 的共享（这时还不是一家人，被挡住）、然后 join、再列一次（这时列得出 hello.txt file）。第三次与第四次之间只发生了一件事：家 ID 被写过去了，所以两次读数的差别只能来自那里。挡住的判据必须是那一行 not family，不能只是「没有条目」—— 一块盘上本来就可能一条共享都没有，那种空与这种空看起来一样。列清单那一段抽成了 list_shares_here（在当前这块盘上列、不打前缀），run_shares 与 fs_shares_at 各加各的前缀：主盘不必报家 ID，另一块盘必须报。"
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "design/HOMEGROUP.txt",
+        "boot/stage2.asm",
+        "tools/run.mjs"
+      ],
+      "notes": "用户要的：把 Windows 家庭组魔改到 Yunooka。设计在 design/HOMEGROUP.txt。先拆开：家庭组是五个部件 —— 发现、边界、共享、权限、身份，而其中三件依赖网络与「第二台机器」，这两样这台机器都没有（网卡刚开、协议栈一个字没写，而且连两台机器都跑不起来）。所以魔改的结论是：先做那两件不需要网络的。共享做成目录条目类型上的一个位（0x80），不是一张单独的共享表 —— 表要与目录同步，而同步总有一个人先动，那个间隙里两边会不一致；位只有一份数据。边界是一个数（超块里的家 ID），不是一段可以说给别人听的密码 —— 后者在没有网络身份的地方没法验证。发现不做：盘在手里就知道它是哪一块。第一步做完了：fs_share 找条目、置位；run_shares 走根目录、列带位的条目，名字与类型都打（只打名字的话，一个被标记的目录与一个被标记的文件长得一样）。判据是走两遍：两遍都只该有一条 docs dir —— 一个「往清单里加一条」的实现走第一遍也是对的，只有第二遍分得开。踩过两个坑，都不是算错。一是 run_shares 读的是扇区 1024（超块）而不是 1025（根目录），清单因此永远是空的；那一句是照着别处抄的，而那两行连在一起时看着像「读根目录」。二是列清单的循环把游标托付给寄存器，而 put_hex64 与 put_utf16_n 会占用它们碰到的寄存器，于是循环只转一圈；游标改放内存变量就好了 —— 这一条与「puts64 改 al」「fs_load 的地址在 rsi」是同一族，打印函数会吃掉寄存器。跨机器在 Yunooka 上的形态写在设计里：把盘递过去，两边的家 ID 一样就看得见。第二步也做完了：超块偏移 28 放了一个 u32 的家 ID，主盘写 0x594B4E52、β 盘在 run.mjs 里故意写 0x11111111；run_home_test 读两个数、比一比、说出来 —— 串口上是 home 00000000594B4E52 与 beta 0000000011111111 not family。故意让它们不同，是因为同号时「比较过」与「根本没比较」在串口上完全一样，而那是这一条最该分得开的两件事。共享清单还不会因为「不是一家人」而拒绝什么 —— 那要有「列某块盘的共享」这个动作才谈得上，而它现在还没有。第三步也做完了：「加入」不再是一个悬空的动作，而是一条命令 —— run_join_test 把主盘的家写进第二块盘的超块，判据是同一个比较的结论翻过来：同一段代码、同一个读法，先 not family、后 family，只有盘上的数变了。这比「又打印了一次 family」结实得多，因为一个「总是说 family」的实现过不了前半段。比较那一段抽成了 betahome_report，两处都调它 —— 比较只该有一份，而两处结果不同正是判据要看的东西。用户在这期间说了一句要紧的话：先把功能做好，目前没办法找另一台机子装 hmyr。这句话把「跨机器」从设计前提降成了以后的验证方式 —— 而替代品已经在了：β 盘就是「另一台机器的盘」，它有自己独立的超块、目录、文件，和一台真机器的盘没有区别。所以家庭组可以在一块盘上做完整，判据不必等第二台机器。还没做的：权限分档（只读与可写）、共享的目录被删掉之后清单里那条算什么、以及「列另一块盘的共享」这个动作 —— 「列另一块盘的共享」也做完了：fs_shares_at 先比家 ID，同一家才列，不同一家只说 not family、一条都不列。判据走三步 —— 先在 β 上标记一个文件、再列 β 的共享（这时还不是一家人，被挡住）、然后 join、再列一次（这时列得出 hello.txt file）。第三次与第四次之间只发生了一件事：家 ID 被写过去了，所以两次读数的差别只能来自那里。挡住的判据必须是那一行 not family，不能只是「没有条目」—— 一块盘上本来就可能一条共享都没有，那种空与这种空看起来一样。列清单那一段抽成了 list_shares_here（在当前这块盘上列、不打前缀），run_shares 与 fs_shares_at 各加各的前缀：主盘不必报家 ID，另一块盘必须报。第四步做完了，这一步才让「共享」有约束力。在此之前 β 上的文件不管共不共享都读得到，那个位只是一句宣言。现在 fs_gate 立在 fs_open_path 的最后一段上：别的盘上的东西要过两关 ——同一个家，而且那一条带共享位。三次读数各分得开一种坏法：家不同时读不到（不然边界是装饰）、同一家共享过的读到（不然它挡住自家人）、同一家没共享的读不到（不然共享位是装饰）；第三条最要紧，一颗「只要同一家就放行」的实现前两条都对。给 β 加第二个文件 secret.txt 就是为了这一条。这一步踩了三个坑，形状都不一样。一、门挡住了标记动作本身：share 要走 fs_open_path，而它要标记的那一条在标记之前过不了门 ——「要共享才能访问、要访问才能共享」的闭环；解是加 gate_off，门只管读取，管理动作不走它。二、fs_gate 里想读主盘的家，写了 fs_load(1024)，而 fs_load 用的是「当前盘」那两个数 —— 在 β 上它算出 0x60000 加 1024 乘 512；先拨到 α 读、读完拨回。三、fs_open_path 返回的是扇区号，而「哪一块盘的扇区」那件事被它在 done 里拨回了 —— 调用者读文件时拿 α 的起点去减 β 的扇区号，借位成巨大偏移，症状是 #PF。这是同一个坑第二次踩（第一次在 run_fs_open4），说明 fs_open_path 该把地址一起交出来；那要改所有调用者，所以先在各处拨，并把这件事记在这里。另外 stage2 长到 16896 字节（33 个扇区），而「第二段多大」牵着四个数：boot.asm 里那句 mov al、build.mjs 的上限、stage2 末尾的 times、以及种子起始扇区（那里还有 build 的种子偏移与 run_ata_test 的 LBA）。少改一个的症状分别是：编不过、盘建不起来、种子魔数不对、ata differ at 0 —— 四个都不一样，这一轮四个都见过。还没做的：权限分档（只读与可写），以及共享的目录被删掉之后清单里那条算什么。"
     },
     {
       "id": "self-host",
@@ -466,9 +722,17 @@
       "scope": "stage",
       "status": "open",
       "parent": "resident",
-      "after": ["filesystem", "builtins"],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["README.md", "tools/build.mjs"],
+      "after": [
+        "filesystem",
+        "builtins"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "README.md",
+        "tools/build.mjs"
+      ],
       "notes": "这一条才是「真正的 OS」的门槛：现在构建与验证都还要 Windows（nasm、node、VBoxManage），所以它的「能跑」有一半是借来的。"
     },
     {
@@ -478,8 +742,16 @@
       "status": "active",
       "parent": null,
       "after": [],
-      "verifiedBy": ["tools/run.mjs"],
-      "touches": ["README.md", "boot/stage2.asm", "boot/boot.asm", "tools/build.mjs", "tools/run.mjs"],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "README.md",
+        "boot/stage2.asm",
+        "boot/boot.asm",
+        "tools/build.mjs",
+        "tools/run.mjs"
+      ],
       "notes": "上位路线在 HMYR 的 design/FULLSELF.txt 第八节：Hiou Rengo 负责写、Yunooka 负责跑。这一条是「跑」的进度条。"
     }
   ]

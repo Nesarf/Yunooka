@@ -44,21 +44,21 @@ stage2:
     ; 种子读到 0x20000 起，不是 0x8000 —— 第二段自己被加载在 0x7E00，32 扇区就是
     ; 16 KB，铺到 0xBE00，而 0x8000 起的种子会把它覆盖成零。0x20000 在实模式 1 MB
     ; 之内，离得够远。
-    mov dword [dap_lba], 33       ; 第 34 个扇区：引导 1 + 第二段 32
+    mov dword [dap_lba], 34       ; 第 35 个扇区：引导 1 + 第二段 33
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x2000
     mov word [dap_count], 64
     call read_batch
     jc .seed_fail
 
-    mov dword [dap_lba], 33 + 64
+    mov dword [dap_lba], 34 + 64
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x2800
     mov word [dap_count], 64
     call read_batch
     jc .seed_fail
 
-    mov dword [dap_lba], 33 + 128
+    mov dword [dap_lba], 34 + 128
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x3000
     mov word [dap_count], 18
@@ -592,11 +592,12 @@ long_entry:
     call run_fs_open
     call run_fs_open2
     call run_fs_open3
-    call run_fs_open4
     call run_fs_write
     call run_share_test
     call run_home_test
+    call run_gate_blocked
     call run_homeshare_test
+    call run_gate_test
     call run_pci_scan
     call run_shell
     call run_repl
@@ -2896,7 +2897,7 @@ run_ata_test:
     mov rax, 512
     call alloc64
     mov [ata_buf], rax            ; 缓冲区地址要留住：ata_read 会把 rax 用掉
-    mov rdi, 33                   ; 种子在盘上的第一个扇区：引导 1 + 第二段 32
+    mov rdi, 34                   ; 种子在盘上的第一个扇区：引导 1 + 第二段 33
     mov rsi, rax
     call ata_read
     jc ata_fail
@@ -3211,6 +3212,14 @@ fs_open_path:
     call fs_lookup
     test rax, rax
     jz .miss
+    ; 过边界。主盘是自家的盘，随便看；别的盘要过两关 —— 同一个家，而且这一条带了共享位。
+    ;
+    ; 这两件事分开查是有原因的：那个共享位在此之前只是一个能列出来的标记，没有任何
+    ; 约束力。一块盘上的文件不管共不共享都读得到，「共享」就是一句宣言。加上这一道之后
+    ; 它才是一个许可。
+    call fs_gate
+    test al, al
+    jz .miss
     mov rax, 1
     jmp .done
 .miss:
@@ -3222,6 +3231,124 @@ fs_open_path:
     ; 会让下一次 α 的读取落到第二块盘的地址上 —— 那种错很安静，读出来的是别人的字节。
     mov qword [fs_base], 0x40000
     mov qword [fs_start], 1024
+    ret
+
+; 过边界：当前盘（fs_start 指的）是不是自家的盘，以及那一条有没有共享位。
+; rdl = fs_lookup 交回来的类型（含 0x80 共享位）。出 al = 1 允许 / 0 拒绝。
+;
+; 主盘直接放行：那是自己的盘，自家的东西不必自己给自己发许可。
+fs_gate:
+    ; 管理动作不走这道门。share 要先找到那条才能标记它，而它被标记之前又过不了门 ——
+    ; 「要共享才能访问、要访问才能共享」是个闭环。所以门只管读取，由 gate_off 分开。
+    cmp qword [gate_off], 0
+    jne .yes
+    cmp qword [fs_start], 1024
+    je .yes
+    push rdx
+    ; fs_load 用的是「当前盘」的那两个数，所以读主盘的家要先把它们拨过去 ——
+    ; 直接 fs_load(1024) 会在 β 上算出 0x60000 + 1024*512，那是 β 的第 1024 个扇区。
+    push qword [fs_base]
+    push qword [fs_start]
+    mov qword [fs_base], 0x40000
+    mov qword [fs_start], 1024
+    mov rdi, 1024
+    call fs_load
+    mov eax, [rsi + 28]
+    mov [gate_a], eax
+    pop qword [fs_start]
+    pop qword [fs_base]
+    mov rdi, [fs_start]
+    call fs_load
+    mov eax, [rsi + 28]
+    mov [gate_b], eax
+    pop rdx
+    mov eax, [gate_a]
+    cmp eax, [gate_b]
+    jne .no
+    test dl, 0x80
+    jz .no
+.yes:
+    mov al, 1
+    ret
+.no:
+    xor al, al
+    ret
+
+; 家庭组的第四步：共享位要有约束力。
+;
+; 在此之前，β 上的文件不管共不共享都读得到 —— 那个位只是一个能列出来的标记，是一句
+; 宣言，不是许可。这一条给它加上约束：别的盘上的东西，要同一个家、而且那一条带共享位。
+;
+; 三次读数，各自分得开不同的坏法：
+;   家不同时读      → 必须被挡住（不然边界只是个装饰）
+;   同一家、共享过  → 必须读得到（不然边界挡住了自家人）
+;   同一家、没共享  → 必须被挡住（不然共享位只是个装饰）
+; 第三行是这一组里最要紧的：一颗「只要同一家就放行」的实现，前两行都对。
+run_gate_blocked:
+    mov rdi, fs_path4
+    call fs_open_path
+    test rax, rax
+    jnz .opened
+    mov rsi, line_gate_blocked
+    call puts64
+    ret
+.opened:
+    mov rsi, line_gate_leak
+    call puts64
+    ret
+
+run_gate_test:
+    ; 同一家、共享过的那个：读得到
+    mov rdi, fs_path4
+    call fs_open_path
+    test rax, rax
+    jz .failed
+    ; fs_open_path 返回的是「那块盘的扇区号」，而它已经把 fs_base 与 fs_start 拨回了 α ——
+    ; 「哪一块盘的扇区」那件事没有跟着返回值一起交出来。所以这里要自己再拨一次。
+    ;
+    ; 这是同一个坑第二次踩（第一次在 run_fs_open4，那时的症状是 read 落在 0x40000 上算出的
+    ; 巨大偏移）。两次都说明 fs_open_path 该把地址一起交出来，而不是只交扇区号 ——
+    ; 但那要改所有调用者，所以先在这里拨，并把这件事记在 homegroup 那一条里。
+    mov qword [fs_base], 0x60000
+    mov qword [fs_start], 0
+    mov rdi, r15
+    call fs_load
+    mov [fs_buf], rsi
+    mov qword [fs_base], 0x40000
+    mov qword [fs_start], 1024
+    mov rsi, line_gate_shared
+    call puts64
+    mov rsi, [fs_buf]
+    mov rcx, rbx
+.put:
+    test rcx, rcx
+    jz .put_done
+    mov al, [rsi]
+    push rsi
+    push rcx
+    call putc64
+    pop rcx
+    pop rsi
+    inc rsi
+    dec rcx
+    jmp .put
+.put_done:
+    call put_nl64
+    ; 同一家、没共享的那个：必须被挡住
+    mov rdi, fs_secret_path
+    call fs_open_path
+    test rax, rax
+    jnz .leak
+    mov rsi, line_gate_secret
+    call puts64
+    ret
+.leak:
+    mov rsi, line_gate_leak
+    call puts64
+    ret
+.failed:
+    mov rsi, line_gate_leak
+    call puts64
     ret
 
 run_fs_open2:
@@ -3481,7 +3608,9 @@ fs_write_lost:
 ; rdi = 路径（UTF-16，0 码元结尾）。出 rax = 1 成功 / 0 没找到。
 fs_share:
     push rdi
+    mov qword [gate_off], 1        ; 标记是管理动作，不走读取那道门
     call fs_open_path
+    mov qword [gate_off], 0
     pop rdi
     test rax, rax
     jz .miss
@@ -3612,11 +3741,14 @@ fs_shares_at:
 ;
 ; 第三步与第四步之间只发生了一件事：家 ID 被写过去了。所以两次读数的差别只能来自那里。
 run_homeshare_test:
-    mov rdi, fs_share_beta
-    call fs_share
+    ; 先列一次：家不同，该被挡住
     mov rdi, fs_beta_drive
     call fs_shares_at
     call run_join_test
+    ; 标记放在加入之后：share 要走 fs_open_path，而它现在有门 ——
+    ; 在加入之前标记一块外人的盘，门会把这条管理动作也挡住。
+    mov rdi, fs_share_beta
+    call fs_share
     mov rdi, fs_beta_drive
     call fs_shares_at
     ret
@@ -4170,6 +4302,11 @@ fs_start: dq 1024
 last_entry: dq 0
 ; 列共享时用的游标：循环变量放内存，不托付给任何寄存器。
 shares_ptr: dq 0
+; 过边界时要同时拿着两边的家 ID，而中间那两次 fs_load 会吃掉寄存器 —— 放内存。
+gate_a: dd 0
+gate_b: dd 0
+; 非零时门放行。只有标记这种管理动作会打开它，读取一律走门。
+gate_off: dq 0
 
 line_fn116: db "Yunooka: fn116 -> ", 0
 line_call: db "Yunooka: call -> ", 0
@@ -4319,6 +4456,13 @@ fs_share_path: dw 0x03B1, 0x003A, 0x002F, 0x0064, 0x006F, 0x0063, 0x0073, 0  ; �
 fs_share_beta: dw 0x03B2, 0x003A, 0x002F, 0x0068, 0x0065, 0x006C, 0x006C, 0x006F
                dw 0x002E, 0x0074, 0x0078, 0x0074, 0                        ; β:/hello.txt
 fs_beta_drive: dw 0x03B2, 0
+; 第二块盘上那个没被共享的文件。
+fs_secret_path: dw 0x03B2, 0x003A, 0x002F, 0x0073, 0x0065, 0x0063, 0x0072, 0x0065
+                dw 0x0074, 0x002E, 0x0074, 0x0078, 0x0074, 0       ; β:/secret.txt
+line_gate_blocked: db "Yunooka: read blocked by boundary", 13, 10, 0
+line_gate_shared: db "Yunooka: shared -> ", 0
+line_gate_secret: db "Yunooka: secret blocked", 13, 10, 0
+line_gate_leak: db "Yunooka: boundary leaked", 13, 10, 0
 line_shares: db "Yunooka: shares ", 0
 line_share_dir: db " dir", 0
 line_share_file: db " file", 0
@@ -4411,4 +4555,6 @@ heap_next: dq 0x400000
 ; 七万多字节，十六位装不下。放在数据区末尾，好让构建那一侧按符号表找到它。
 seed_bytes: dd 0
 
-times 16384-($-$$) db 0
+; 上限 = 引导之后那一段占的字节数。它与 boot.asm 里那句 mov al、build.mjs 里的上限、
+; 以及种子的起始扇区是同一组数 —— 四个数字一起改，少一个就会在别处报出来。
+times 16896-($-$$) db 0

@@ -65,6 +65,8 @@ const 全程 = [
   "Yunooka: share twice",
   "Yunooka: pci dev ",
   "Yunooka: beta ",
+  "Yunooka: read blocked by boundary",
+  "Yunooka: secret blocked",
   "Yunooka: shell> ",
   "Yunooka: repl> ",
   "Yunooka: math> average -> ",
@@ -244,6 +246,9 @@ if (!二槽 || 二槽[1] === "none") {
   if (挂.status !== 0) 做不了("β 盘挂不上去：" + String(挂.stderr || "").slice(0, 200));
 }
 const 二内容 = Buffer.from("Yunooka second disk ok\n", "utf8");
+// 第二个文件故意不共享。判据要能把「同一家」与「共享过」两件事分开 ——
+// 只有一个文件的话，一颗不管共享位的实现也能全过。
+const 二秘密 = Buffer.from("Yunooka secret\n", "utf8");
 const 二超 = Buffer.alloc(512);
 二超.write("YUNOFS", 0, "latin1");
 二超.writeUInt16LE(1, 6);               // 版本
@@ -257,18 +262,24 @@ const 二超 = Buffer.alloc(512);
 二超.writeUInt32LE(0x11111111, 28);
 const 二根 = Buffer.alloc(512);
 {
+  const 写一条 = (位, 名字, 类型, 起, 长) => {
+    二根.writeUInt16LE(名字.length, 位); 位 += 2;
+    for (const 字 of 名字) { 二根.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+    二根.writeUInt8(类型, 位); 位 += 1;
+    二根.writeUInt32LE(起, 位); 位 += 4;
+    二根.writeUInt32LE(长, 位); 位 += 4;
+    return 位;
+  };
   let 位 = 0;
-  二根.writeUInt16LE(9, 位); 位 += 2;                       // "hello.txt"
-  for (const 字 of "hello.txt") { 二根.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
-  二根.writeUInt8(0, 位); 位 += 1;                          // 类型：文件
-  二根.writeUInt32LE(2, 位); 位 += 4;                       // 起始扇区
-  二根.writeUInt32LE(二内容.length, 位); 位 += 4;            // 字节数
+  位 = 写一条(位, "hello.txt", 0, 2, 二内容.length);
+  写一条(位, "secret.txt", 0, 3, 二秘密.length);
 }
 const 二fd = fs.openSync(二盘, "r+");
 try {
   fs.writeSync(二fd, 二超, 0, 512, 0);
   fs.writeSync(二fd, 二根, 0, 512, 512);
   fs.writeSync(二fd, 二内容, 0, 二内容.length, 1024);
+  fs.writeSync(二fd, 二秘密, 0, 二秘密.length, 1536);
 } finally {
   fs.closeSync(二fd);
 }
@@ -476,10 +487,18 @@ const 更行 = /Yunooka: open docs\/sub\/deep\.txt -> (.+)/.exec(读到);
 const 更成 = 更行 !== null && 更行[1].trim() === "Yunooka three levels ok";
 // 第二块盘：同一个名字、同一段查找代码，读的却是另一块盘上的另一份字节。
 // 判据必须是那段内容本身 —— 「打开成功了」两行都有，只有内容分得开盘。
-const 二行 = /Yunooka: open hello\.txt -> (.+)/g;
-const 二集 = [...读到.matchAll(/Yunooka: open hello\.txt -> (.+)/g)].map((m) => m[1].trim());
-const 二成 = 二集.length === 2 && 二集[0] === "Yunooka filesystem ok"
-  && 二集[1] === "Yunooka second disk ok";
+// 「两块盘」这件事现在由「共享之后读得到 β 的内容」来证明：同一个名字 hello.txt，
+// 主盘读到的是 filesystem ok，β 盘读到的是 second disk ok。
+// 原来有一条专门验它的 run_fs_open4，加了边界之后它必然被挡住 —— 而挡住是对的。
+const 二集 = [...读到.matchAll(/Yunooka: shared -> (.+)/g)].map((m) => m[1].trim());
+const 二成 = 二集.length === 1 && 二集[0] === "Yunooka second disk ok";
+// 边界真的有约束力：三次读数各分得开一种坏法。
+//   家不同时读不到（不然边界是装饰）／同一家共享过的读到（不然它挡住自家人）
+//   ／同一家没共享的读不到（不然共享位是装饰）。
+// 第三行最要紧：一颗「只要同一家就放行」的实现，前两行都对。
+const 阻成 = /Yunooka: read blocked by boundary/.test(读到);
+const 秘成 = /Yunooka: secret blocked/.test(读到);
+const 门成 = 阻成 && 二成 && 秘成;
 // 写：造一个不存在的名字、写一段只有这里才有的字节、再按路径打开它。
 // 判据是那段内容本身 —— 而且 files 的列表里也要多出这个名字，因为「目录里多了一条」
 // 与「数据落对了地方」是两件事，两件都得成立。
@@ -606,8 +625,8 @@ console.log("三层      " + (更行 ? "docs/sub/deep.txt -> " + 更行[1].trim(
   + (更成 ? "  —— 按斜杠逐段查，深度只是循环转了几圈"
     : "  —— 不对：应当读到 Yunooka three levels ok"));
 console.log("第二块盘  " + (二集.length ? 二集.join("  /  ") : "(没走到)")
-  + (二成 ? "  —— 同一个名字，两次读到不同的字节：盘符决定读哪块盘，不是读哪种格式"
-    : "  —— 不对：应当是先 filesystem ok 再 second disk ok"));
+  + (二成 ? "  —— 同一个名字，共享之后读到的是 β 的那一份：盘符决定读哪块盘"
+    : "  —— 不对：应当读到 Yunooka second disk ok"));
 console.log("写        " + (写行 ? "wrote -> " + 写行[1].trim() : "(没跑到)")
   + (写成 ? "  —— 空闲扇区的账、目录条目、数据落点三样都对，再按路径读回来"
     : "  —— 不对：应当读到 Yunooka wrote this，且 files 里有 new.txt"));
@@ -627,6 +646,10 @@ console.log("加入      " + (贝集.length ? 贝集.map(([i, v]) => i + " " + v
 console.log("共享见面  " + (家共行 ? "挡住过" : "(没挡住)") + "  " + (家共列 ? "列出来了" : "(没列出来)")
   + (家共成 ? "  —— 共享与边界接上了：同一块盘，加入之前一条不列，加入之后列得出来"
     : "  —— 不对：应当先 not family 挡住、加入后列出 hello.txt file"));
+console.log("门        " + (阻成 ? "挡住过" : "(没挡住)") + "  " + (二成 ? "共享的读到" : "(没读到)")
+  + "  " + (秘成 ? "没共享的挡住" : "(漏了)")
+  + (门成 ? "  —— 边界有约束力：不是一家人读不到，同一家没共享也读不到"
+    : "  —— 不对：三次读数应当依次是挡住、读到、挡住"));
 console.log("壳        " + (壳行 ? "shell> files" : "(没跑到)")
   + (列行 ? "  → " + 列行[0] : "  → (没列出来)")
   + (壳成 ? "  —— 那一行认得出来、回答得出（来源见上一行）"
@@ -679,6 +702,7 @@ const 结构成 = 有种子
     && 家成
     && 加成
     && 家共成
+    && 门成
     && 壳成
     && 重求成
     && 除成

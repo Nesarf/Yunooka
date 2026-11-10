@@ -67,7 +67,7 @@ start:
     mov es, ax
     mov bx, 0x7E00
     mov ah, 0x02            ; 读扇区
-    mov al, 32              ; 读三十二个：第二段占 16 KB（GDT、页表、64 位代码与整个解释器）
+    mov al, 33              ; 读三十三个：第二段长过 16 KB 了，它是长出来的，不是被设计成这么大的
     mov ch, 0               ; 柱面 0
     mov cl, 2               ; 第 2 个扇区（从 1 数）
     mov dh, 0               ; 磁头 0
