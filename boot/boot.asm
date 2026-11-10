@@ -67,7 +67,7 @@ start:
     mov es, ax
     mov bx, 0x7E00
     mov ah, 0x02            ; 读扇区
-    mov al, 52              ; stage2-sectors: 第二段占多少个扇区，这个数由 build 核对
+    mov al, 54              ; stage2-sectors: 第二段占多少个扇区，这个数由 build 核对
     mov ch, 0               ; 柱面 0
     mov cl, 2               ; 第 2 个扇区（从 1 数）
     mov dh, 0               ; 磁头 0

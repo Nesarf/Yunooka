@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 52
+stage2_sectors equ 54
 seed_lba       equ 1 + stage2_sectors   ; 引导占 1 个扇区，种子紧跟着第二段
 
 ; ======================================================================
@@ -127,9 +127,17 @@ stage2:
     ; 这件事要由截图看，串口只能证明内存可写可读。
     mov ax, 0x0013
     int 0x10
-    ; 文件系统的六个扇区先读进来：超级块、根目录、docs 目录、hello.txt、note.txt、
-    ; cmd.txt。盘上的东西每多一份，这个数就跟一次；而它也必须与 build 写进去的
-    ; 布局一致，否则预读区里少一份、fs_load 却照算不误。
+    ; 文件系统的扇区先读进来：超级块、根目录、docs 目录、docs/sub、hello.txt、
+    ; note.txt、cmd.txt、repl.txt、math.txt、prog.hmtn、eicar.txt、clean.txt、
+    ; rules.txt、plot.txt、fake.txt —— 一共十六个，从第 1024 号起。
+    ;
+    ; 这个数曾经是十五，而盘上那时已经有十六份了：fake.txt 落在第 1039 号扇区，
+    ; 而预读只盖到 1038。于是 fs_load(1039) 照样算出地址，只是那个地址在预读区之外，
+    ; 里面不是这个文件 —— 症状是 identify 把 fake.txt 认成 unknown，而「魔数不对」与
+    ; 「根本没读进来」在输出上分不开，于是那一条红着挂了好几轮。
+    ;
+    ; 盘上的东西每多一份，这个数就要跟一次；而它也必须与 build 写进去的布局一致，
+    ; 否则预读区里少一份、fs_load 却照算不误。
     ;
     ; 为什么不留给长模式：长模式里没有 BIOS，而 ATA PIO 在虚拟机模拟的 IDE 上不稳定 ——
     ; 重试、0xFF、drain、逐 word、读前延迟，五轮补丁都没让它站住。BIOS 读盘从加电到
@@ -140,7 +148,7 @@ stage2:
     mov dword [dap_lba], 1024
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x4000
-    mov word [dap_count], 15
+    mov word [dap_count], 16
     call read_batch
     jnc .fs_ready
     mov si, line_fs_preread
@@ -634,6 +642,7 @@ long_entry:
     call run_index_test
     call run_explorer_test
     call run_kohane_list_test
+    call run_kohane_stat_test
     call run_identify_test
     call run_pci_scan
     call run_shell
@@ -3658,8 +3667,10 @@ fs_write_lost:
 ; 真相：表要跟目录同步，而同步总有一个人先动 —— 那个间隙里两边会不一致。位上则只有
 ; 一份数据，改它就是改目录。
 ;
-; 代价是类型那一个字节现在有两个含义：低七位是文件还是目录，最高位是共享。这种挤在
-; 一起的字段要靠约定守住，所以下面凡是用类型的地方都先 and 0x7F。
+; 代价是类型那一个字节现在有三个含义：低六位是文件还是目录，bit 7 是共享，bit 6 是只读。
+; 这种挤在一起的字段要靠约定守住，所以下面凡是用类型的地方都先 and 0x3F。
+; 只读位进来之前掩码是 0x7F —— 加一个位就要把每一处掩码都收窄一格，而漏掉的那一处不会
+; 报错：它只会把一个只读的目录算成别的值，症状与只读这件事看起来毫无关系。
 ;
 ; rdi = 路径（UTF-16，0 码元结尾）。出 rax = 1 成功 / 0 没找到。
 fs_share:
@@ -3709,7 +3720,7 @@ list_shares_here:
     add rdi, 2
     call put_utf16_n               ; rcx 已经是名字长度
     pop r10
-    and r10b, 0x7F
+    and r10b, 0x3F                  ; 共享是 bit 7、只读是 bit 6，所以类型只剩低六位
     cmp r10b, 1
     je .as_dir
     mov rsi, line_share_file
@@ -5495,7 +5506,7 @@ fs_list_disk:
     call putc64
     ; 类型：目录打 d，其余打 f
     mov rdx, [list_type]
-    and edx, 0x7F
+    and edx, 0x3F
     mov al, 'f'
     cmp rdx, 1
     jne .type_out
@@ -5576,6 +5587,204 @@ run_kohane_list_test:
     call fs_list_disk
     mov [list_count], rax
     call put_list_count
+    ret
+
+; ======================================================================
+; Kohane 第四层：一个文件的详情
+; ======================================================================
+;
+; 六列：名字、起始扇区、字节数、类型、共享位、只读位。
+;
+; 这一层真正值钱的不是「六列都打得出来」，是**交叉验证**：那个起始扇区要走两条完全
+; 不同的路各算一遍 ——
+;   一条是目录：fs_open_path 按斜杠逐段查找，落在 last_entry 指向的那一条上；
+;   一条是索引：index_build 先把整张表建好，再按名字查。
+; 两条路算出同一个数，才说明这个字段在两边是同一个意思。同一条路自己算两遍，
+; 什么也证明不了 —— 那正是这一层与「再多打一列」的区别。
+;
+; 只读位是这一层新开的一个位。目录条目的类型字节原先只用掉 bit 7（共享），现在 bit 6
+; 是只读。所以**凡是用类型的地方，掩码都要跟着收窄**，从 0x7F 到 0x3F。漏一处，症状是
+; 「标记只读之后那个目录就不是目录了」—— 与只读这件事看起来毫无关系。
+;
+; 判据四条：
+;   一、hello.txt 的起始扇区与索引那一行相同（两条独立路径，客人机自己比）；
+;   二、docs 是 d、0 字节、共享位 1（它在前面的 run_share_test 里被标记过）；
+;   三、hello.txt 标记之前共享位 0、只读位 0；
+;   四、标记之后只读位变 1 而共享位仍是 0 —— 两个位各管各的，不互相串。
+
+; 把一个文件的只读位标上。与 fs_share 同族：只改条目上的一个位，不往任何清单里加一项。
+; rdi = 路径。出 rax = 1 标了 / 0 没找到。
+fs_readonly:
+    push rdi
+    mov qword [gate_off], 1        ; 标记是管理动作，不走读取那道门
+    call fs_open_path
+    mov qword [gate_off], 0
+    pop rdi
+    test rax, rax
+    jz .miss
+    mov rax, [last_entry]
+    test rax, rax
+    jz .miss
+    movzx ecx, word [rax]
+    lea rdx, [rax + 2 + rcx * 2]   ; 名字之后就是类型
+    or byte [rdx], 0x40
+    mov rax, 1
+    ret
+.miss:
+    xor eax, eax
+    ret
+
+; 取一个条目的六列，放进那几个变量。rdi = 路径。出 rax = 1 取到了 / 0 没找到。
+fs_stat_path:
+    mov qword [gate_off], 1        ; 统计也是管理动作：看一个没共享的文件不该被门挡住
+    call fs_open_path
+    mov qword [gate_off], 0
+    test rax, rax
+    jz .miss
+    mov rax, [last_entry]
+    test rax, rax
+    jz .miss
+    mov [stat_entry], rax
+    movzx eax, word [rax]
+    mov [stat_namelen], rax
+    lea r9, [rax * 2 + 2]          ; 2 字节名字长度 + 名字的码元
+    add r9, [stat_entry]           ; 类型字节的位置
+    movzx r10d, byte [r9]
+    mov [stat_type], r10
+    mov eax, [r9 + 1]              ; 起始扇区 u32
+    mov [stat_start], rax
+    mov eax, [r9 + 5]              ; 字节长 u32
+    mov [stat_size], rax
+    mov rax, 1
+    ret
+.miss:
+    xor eax, eax
+    ret
+
+; 把那六列打成一行。名字从条目里读，与层三同一个走法。
+print_stat_line:
+    mov rsi, line_stat_head
+    call puts64
+    mov rdi, [stat_entry]
+    add rdi, 2
+    mov rcx, [stat_namelen]
+    call put_utf16_n
+    mov rsi, line_fs_arrow
+    call puts64
+    mov rax, [stat_start]
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, [stat_size]
+    call put_num64
+    mov al, ' '
+    call putc64
+    ; 类型：掩码是 0x3F 而不是 0x7F —— 只读位进来之后，两位都要让开
+    mov rdx, [stat_type]
+    and edx, 0x3F
+    mov al, 'f'
+    cmp rdx, 1
+    jne .type_out
+    mov al, 'd'
+.type_out:
+    call putc64
+    mov al, ' '
+    call putc64
+    ; 共享位
+    mov rax, [stat_type]
+    and eax, 0x80
+    jz .s_plain
+    mov al, '1'
+    jmp .s_out
+.s_plain:
+    mov al, '0'
+.s_out:
+    call putc64
+    mov al, ' '
+    call putc64
+    ; 只读位
+    mov rax, [stat_type]
+    and eax, 0x40
+    jz .r_plain
+    mov al, '1'
+    jmp .r_out
+.r_plain:
+    mov al, '0'
+.r_out:
+    call putc64
+    jmp put_nl64
+
+; 三次 stat 加一次交叉核对。
+;
+; 三次的顺序有意义：hello.txt（标记前）、docs、hello.txt（标记后）。第一与第三行只差
+; 一件事 —— 中间那次 fs_readonly 改了 bit 6。所以两行的差别只能来自那里，而共享位那一列
+; 必须两行一样（否则说明 or 0x40 顺手把 0x80 也带上了，或者掩码写错）。
+run_kohane_stat_test:
+    mov rdi, fs_hello_path
+    call fs_stat_path
+    test rax, rax
+    jz .miss
+    call print_stat_line
+    mov rdi, fs_docs_path
+    call fs_stat_path
+    test rax, rax
+    jz .miss
+    call print_stat_line
+    mov rdi, fs_hello_path
+    call fs_readonly
+    mov rdi, fs_hello_path
+    call fs_stat_path
+    test rax, rax
+    jz .miss
+    call print_stat_line
+    ; 第四次：把一个**目录**标成只读。这一行是掩码那件事唯一的判据 ——
+    ; 只读位在类型字节的 bit 6，而「是不是目录」的掩码从 0x7F 收窄到 0x3F 之后，
+    ; 一个被标了只读的目录必须仍然是 d。漏改一处掩码，这一行就会把 docs 打成 f，
+    ; 而这件事与只读看起来毫无关系。
+    mov rdi, fs_docs_path
+    call fs_readonly
+    mov rdi, fs_docs_path
+    call fs_stat_path
+    test rax, rax
+    jz .miss
+    call print_stat_line
+    ; 交叉核对：目录那条与索引那条，各算一遍。
+    ;
+    ; 这里要把 hello.txt 再 stat 一次：上面最后一次 stat 是 docs，stat_start 已经是
+    ; docs 的扇区了，而索引查的是 hello.txt —— 拿两个不同名字的扇区去比，结论只会是
+    ; differ，而那不是「两条路不一致」，是「比了两个不同的东西」。
+    mov rdi, fs_hello_path
+    call fs_stat_path
+    test rax, rax
+    jz .miss
+    call index_build
+    lea rdi, [name_hello]
+    call index_find
+    mov [stat_index], rax
+    mov rsi, line_stat_cross
+    call puts64
+    mov rax, [stat_start]
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, [stat_index]
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, [stat_start]
+    cmp rax, [stat_index]
+    jne .differ
+    mov rsi, line_stat_same
+    call puts64
+    jmp .tail
+.differ:
+    mov rsi, line_stat_differ
+    call puts64
+.tail:
+    jmp put_nl64
+.miss:
+    mov rsi, line_stat_miss
+    call puts64
     ret
 
 ; ======================================================================
@@ -6280,6 +6489,9 @@ fs_share_beta: dw 0x03B2, 0x003A, 0x002F, 0x0068, 0x0065, 0x006C, 0x006C, 0x006F
                dw 0x002E, 0x0074, 0x0078, 0x0074, 0                        ; β:/hello.txt
 fs_beta_drive: dw 0x03B2, 0
 fs_alpha_drive: dw 0x03B1, 0     ; 只当盘符用：不指任何路径，只指「哪一块盘」
+; α:/docs。与 fs_share_path 同一个名字，但那一处是「要标记共享的路径」，
+; 这一处是「要 stat 的目录」—— 两件事，所以两个符号，谁改谁的不牵连对方。
+fs_docs_path: dw 0x03B1, 0x003A, 0x002F, 0x0064, 0x006F, 0x0063, 0x0073, 0
 ; 第二块盘上那个没被共享的文件。
 fs_secret_path: dw 0x03B2, 0x003A, 0x002F, 0x0073, 0x0065, 0x0063, 0x0072, 0x0065
                 dw 0x0074, 0x002E, 0x0074, 0x0078, 0x0074, 0       ; β:/secret.txt
@@ -6366,6 +6578,19 @@ list_count: dq 0
 list_tag: db 'a'
 line_list_count: db "Yunooka: listed ", 0
 line_list_miss: db "Yunooka: list -> unknown drive", 13, 10, 0
+
+; 第四层（一个文件的详情）的六列。与层三同一族理由：要跨好几个打印函数。
+stat_entry: dq 0
+stat_namelen: dq 0
+stat_type: dq 0
+stat_start: dq 0
+stat_size: dq 0
+stat_index: dq 0
+line_stat_head: db "Yunooka: stat ", 0
+line_stat_cross: db "Yunooka: cross ", 0
+line_stat_same: db "same", 0
+line_stat_differ: db "differ", 0
+line_stat_miss: db "Yunooka: stat -> no file", 13, 10, 0
 line_ident_head: db "Yunooka: identify ", 0
 line_ident_miss: db "Yunooka: identify -> no file", 13, 10, 0
 line_kind_text: db "text", 0
