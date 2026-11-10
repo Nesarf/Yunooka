@@ -115,6 +115,15 @@ stage2:
 
 ; ---- 进 32 位保护模式 ----
 .go32:
+    ; 从这里到 build_idt 装好之前，任何中断都是三重故障 —— IDT 里那些项还是零
+    ; （present = 0），而处理器遇到一个没有处理者的中断只会一路往下栽。
+    ; 症状是一行字打到一半就没了：实测见过「protected mod」断在半路，看起来像串口
+    ; 出了问题，其实是 CPU 复位了。
+    ;
+    ; 这一句 cli 与 long_entry 里那一句是同一个治法，理由也一样。而它是**偶发**的：
+    ; 定时器在 stage2 开头的 sti 之后一直在走，撞不撞上只看那几毫秒里恰不恰好来一次。
+    ; 所以这类东西「一次绿」从来不算验过。
+    cli
     ; 设 VGA 320x200x256：一个字节一个像素，帧缓冲落在 0xA0000。
     ;
     ; 为什么在实模式做：长模式里没有 BIOS，而「设显示模式」只有 BIOS 会。所以这件事
@@ -148,7 +157,7 @@ stage2:
     mov dword [dap_lba], 1024
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x4000
-    mov word [dap_count], 17
+    mov word [dap_count], 17       ; preread-sectors: 预读几个扇区，这个数由 build 核对
     call read_batch
     jnc .fs_ready
     mov si, line_fs_preread
