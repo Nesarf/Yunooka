@@ -611,6 +611,7 @@ long_entry:
     call run_homeshare_test
     call run_gate_test
     call run_pixel_test
+    call run_line_test
     call run_pci_scan
     call run_shell
     call run_repl
@@ -3941,6 +3942,113 @@ run_pixel_test:
     call put_nl64
     ret
 
+; 画一条线：从 (r12, r13) 到 (r14, r15)，颜色在 dl。
+;
+; 整数 Bresenham。为什么用它而不是「按 x 采样、算 y」：采样法要么每步一次除法，
+; 要么漏掉陡的地方 —— 而一条斜率大于 1 的线会断成点。Bresenham 只用加、减、比，
+; 每步恰好落一个像素，且不需要浮点：这条路径上没有 f64 的事。
+;
+; 布局：0x13 是 320 字节一行，所以一个点是 0xA0000 + y*320 + x。
+draw_line:
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    mov r8b, dl                    ; 颜色：r8 的高位要留着算别的，所以只在写的时候用 r8b
+    ; dx = |x1 - x0|, sx = 方向
+    mov rbx, r14
+    sub rbx, r12
+    mov r9, 1
+    test rbx, rbx
+    jns .dx_ok
+    neg rbx
+    mov r9, -1
+.dx_ok:
+    mov rbp, r15
+    sub rbp, r13
+    mov r10, 1
+    test rbp, rbp
+    jns .dy_ok
+    neg rbp
+    mov r10, -1
+.dy_ok:
+    mov r11, rbx
+    sub r11, rbp                   ; err = dx - dy
+.loop:
+    ; 画 (r12, r13)
+    mov rax, r13
+    imul rax, rax, 320
+    add rax, r12
+    mov rdi, 0xA0000
+    add rdi, rax
+    mov [rdi], r8b
+    cmp r12, r14
+    jne .step
+    cmp r13, r15
+    je .done
+.step:
+    mov rax, r11
+    add rax, rax                   ; e2 = 2*err
+    mov rcx, rbp
+    neg rcx
+    cmp rax, rcx
+    jle .maybe_y
+    sub r11, rbp
+    add r12, r9
+.maybe_y:
+    cmp rax, rbx
+    jge .loop
+    add r11, rbx
+    add r13, r10
+    jmp .loop
+.done:
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    ret
+
+; 画一条对角线，然后读回线上的两个点。
+;
+; 判据不靠眼睛：读回的字节说明「这条线上真的有像素」。截图那一层仍然留给人 ——
+; 一条一像素宽的对角线在缩放的截图里本来就淡，让它承担自动判据是把脆弱当成了严谨。
+run_line_test:
+    mov r12, 0
+    mov r13, 0
+    mov r14, 319
+    mov r15, 199
+    mov dl, 0x2F
+    call draw_line
+    mov rdi, 0xA0000
+    movzx eax, byte [rdi]          ; (0,0)
+    mov r12d, eax
+    movzx eax, byte [rdi + 100 * 320 + 160]   ; 对角线在 x=160 附近落在 y≈100
+    mov r13d, eax
+    mov rsi, line_line
+    call puts64
+    mov rax, r12
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, r13
+    call put_hex64
+    call put_nl64
+    ret
+
 ; 打一串 UTF-16 码元，只取低字节。这一版的名字都是 ASCII，够用；非 ASCII 的名字会
 ; 在这里变成别的字节，而那是「打印」这一层的限制，不是名字本身的。
 put_utf16_ascii:
@@ -4520,6 +4628,7 @@ line_home_beta: db "Yunooka: beta ", 0
 line_family: db "family", 13, 10, 0
 line_not_family: db "not family", 13, 10, 0
 line_pixel: db "Yunooka: pixel ", 0
+line_line: db "Yunooka: line ", 0
 
 ; shell 的两样：要从盘上找的文件名，与它认得的第一条命令。
 ; 命令是 ASCII（不是 UTF-16）—— 因为 cmd.txt 的内容就是 ASCII 字节，
