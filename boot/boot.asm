@@ -67,7 +67,7 @@ start:
     mov es, ax
     mov bx, 0x7E00
     mov ah, 0x02            ; 读扇区
-    mov al, 64              ; stage2-sectors: 第二段占多少个扇区，这个数由 build 核对
+    mov al, 8               ; loader-sectors: 加载器占多少个扇区，这个数由 build 核对
     mov ch, 0               ; 柱面 0
     mov cl, 2               ; 第 2 个扇区（从 1 数）
     mov dh, 0               ; 磁头 0
@@ -75,6 +75,11 @@ start:
     int 0x13
     jc disk_fail
 
+    ; 跳过去之前把 dl 再设一次。int 0x13 之后 dl 是不是还是那个盘号由 BIOS 决定，
+    ; 而下一段（加载器）拿它当驱动器号用 —— 实测 VBox 的 BIOS 在这里会留下别的值，
+    ; 而症状是加载器那一侧 int 0x13 返回 AH=0x01（无效的驱动器号），
+    ; 看起来像「加载器的参数写错了」。一行比一个猜便宜。
+    mov dl, [boot_drive]
     jmp 0x0000:0x7E00       ; 远跳过去。段 0、偏移 0x7E00，与上面 es:bx 是同一个地址
 
 disk_fail:
