@@ -101,6 +101,18 @@ stage2:
 
 ; ---- 进 32 位保护模式 ----
 .go32:
+    ; 设 VGA 320x200x256：一个字节一个像素，帧缓冲落在 0xA0000。
+    ;
+    ; 为什么在实模式做：长模式里没有 BIOS，而「设显示模式」只有 BIOS 会。所以这件事
+    ; 与读盘一样，必须发生在还叫得上 int 的时候。
+    ;
+    ; 为什么不设更高（比如 VBE 的 1024x768）：这一版只要「一块能写能读的内存」。
+    ; 0x13 是唯一一个不需要额外协议、不需要问能力就能得到的模式 —— 它老、它小、它一定在。
+    ;
+    ; 设完不清屏反而好：屏上留着模式切换那一刻的内容，而「写进去的东西出现在屏幕上」
+    ; 这件事要由截图看，串口只能证明内存可写可读。
+    mov ax, 0x0013
+    int 0x10
     ; 文件系统的六个扇区先读进来：超级块、根目录、docs 目录、hello.txt、note.txt、
     ; cmd.txt。盘上的东西每多一份，这个数就跟一次；而它也必须与 build 写进去的
     ; 布局一致，否则预读区里少一份、fs_load 却照算不误。
@@ -598,6 +610,7 @@ long_entry:
     call run_gate_blocked
     call run_homeshare_test
     call run_gate_test
+    call run_pixel_test
     call run_pci_scan
     call run_shell
     call run_repl
@@ -3896,6 +3909,38 @@ run_join_test:
     jmp betahome_report
 
 
+; ======================================================================
+; 像素层：帧缓冲能写能读
+; ======================================================================
+;
+; system-software 那一份里五件事的共同标准是「它的哪一部分必须在还没有操作系统的机器上
+; 就存在」。像素层是唯一一件不需要进程的：它只是一块可写可读的内存，写进去的东西最后
+; 变成光。所以它先做。
+;
+; 判据分两层。串口那一行证明「帧缓冲能写能读」—— 写一个已知字节、读回来比。它证明不了
+; 「屏幕上真的有」，所以第二层是截图：那是人（和 read_image）看的证据，不作自动判据 ——
+; 而这一层不能作判据的原因是这台机器 headless，屏幕上有没有东西，串口说不了话。
+;
+; 0x13 的布局：320 字节一行，200 行，0xA0000 起。所以「第 y 行第 x 列」是 0xA0000 + y*320 + x。
+run_pixel_test:
+    mov rdi, 0xA0000
+    mov byte [rdi], 0x2F           ; 左上角一个像素
+    mov byte [rdi + 320 * 100 + 160], 0x1C   ; 正中一个像素
+    movzx eax, byte [rdi]
+    mov r12d, eax
+    movzx eax, byte [rdi + 320 * 100 + 160]
+    mov r13d, eax
+    mov rsi, line_pixel
+    call puts64
+    mov rax, r12
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, r13
+    call put_hex64
+    call put_nl64
+    ret
+
 ; 打一串 UTF-16 码元，只取低字节。这一版的名字都是 ASCII，够用；非 ASCII 的名字会
 ; 在这里变成别的字节，而那是「打印」这一层的限制，不是名字本身的。
 put_utf16_ascii:
@@ -4474,6 +4519,7 @@ line_home: db "Yunooka: home ", 0
 line_home_beta: db "Yunooka: beta ", 0
 line_family: db "family", 13, 10, 0
 line_not_family: db "not family", 13, 10, 0
+line_pixel: db "Yunooka: pixel ", 0
 
 ; shell 的两样：要从盘上找的文件名，与它认得的第一条命令。
 ; 命令是 ASCII（不是 UTF-16）—— 因为 cmd.txt 的内容就是 ASCII 字节，
