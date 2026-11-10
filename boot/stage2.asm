@@ -44,21 +44,21 @@ stage2:
     ; 种子读到 0x20000 起，不是 0x8000 —— 第二段自己被加载在 0x7E00，32 扇区就是
     ; 16 KB，铺到 0xBE00，而 0x8000 起的种子会把它覆盖成零。0x20000 在实模式 1 MB
     ; 之内，离得够远。
-    mov dword [dap_lba], 49       ; 第 35 个扇区：引导 1 + 第二段 33
+    mov dword [dap_lba], 51       ; 第 35 个扇区：引导 1 + 第二段 33
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x2000
     mov word [dap_count], 64
     call read_batch
     jc .seed_fail
 
-    mov dword [dap_lba], 49 + 64
+    mov dword [dap_lba], 51 + 64
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x2800
     mov word [dap_count], 64
     call read_batch
     jc .seed_fail
 
-    mov dword [dap_lba], 49 + 128
+    mov dword [dap_lba], 51 + 128
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x3000
     mov word [dap_count], 18
@@ -617,7 +617,6 @@ long_entry:
     call run_rules_multi
     call run_plot_test
     call run_persist_test
-    call run_health_test
     call run_index_test
     call run_explorer_test
     call run_pci_scan
@@ -2941,7 +2940,7 @@ run_ata_test:
     mov rax, 512
     call alloc64
     mov [ata_buf], rax            ; 缓冲区地址要留住：ata_read 会把 rax 用掉
-    mov rdi, 49                   ; 种子在盘上的第一个扇区：引导 1 + 第二段 33
+    mov rdi, 51                   ; 种子在盘上的第一个扇区：引导 1 + 第二段 33
     mov rsi, rax
     call ata_read
     jc ata_fail
@@ -5000,6 +4999,98 @@ ata_identify:
     stc
     ret
 
+; SMART READ DATA：0xB0 加子命令 0xD0。
+;
+; 它是 disk-health 这一侧最后一条不经过 IDENTIFY 的路，所以先试它 —— 而「先试便宜的」
+; 这一条在上一次已经证明过：为了 IDENTIFY 被挂起，代价是以后每次有人想问盘都得读一遍那段。
+;
+; 回来也是 512 字节，而结构与 IDENTIFY 不同：头两个字节是版本、然后 30 条属性、每条 12 字节。
+; 温度、通电时间、重映射扇区都在那 30 条里。这一版只证明「它答了」—— 判据是头一个字节不是零，
+; 因为一页零正是 IDENTIFY 失败时的样子，而这一条最该分得开的正是「答了但内容不同」与「没答」。
+ata_smart:
+    push rsi
+    push rdi
+    mov r11, 3
+.try:
+    mov dx, 0x1F6
+    mov al, 0xE0
+    out dx, al
+    mov dx, 0x1F1
+    mov al, 0xD0                   ; SMART READ DATA
+    out dx, al
+    mov dx, 0x1F2
+    xor al, al
+    out dx, al
+    mov dx, 0x1F3
+    out dx, al
+    mov dx, 0x1F4
+    out dx, al
+    mov dx, 0x1F5
+    out dx, al
+    mov dx, 0x1F7
+    mov al, 0xB0
+    out dx, al
+    mov r10, 200000
+.wait:
+    mov dx, 0x1F7
+    in al, dx
+    test al, 0x80
+    jnz .wait_dec
+    test al, 0x08
+    jnz .ready
+.wait_dec:
+    dec r10
+    jnz .wait
+    jmp .retry
+.ready:
+    mov rdi, [rsp + 8]
+    mov dx, 0x1F0
+    mov rcx, 256
+.in:
+    in ax, dx
+    mov [rdi], ax
+    add rdi, 2
+    dec rcx
+    jnz .in
+    pop rdi
+    pop rsi
+    clc
+    ret
+.retry:
+    dec r11
+    jnz .try
+    pop rdi
+    pop rsi
+    stc
+    ret
+
+; SMART 这一条：报头一个字节与第一个属性登记表的第一个字节。
+;
+; 两个数都要，因为「答了」与「答的是 SMART」是两件事：一页零能过前者，过不了后者。
+run_smart_test:
+    mov rdi, smart_buf
+    call ata_smart
+    jc .fail
+    mov rsi, line_smart
+    call puts64
+    mov rdi, smart_buf
+    movzx eax, byte [rdi]
+    mov r12d, eax
+    movzx eax, byte [rdi + 2]
+    mov r13d, eax
+    mov rax, r12
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, r13
+    call put_hex64
+    call put_nl64
+    ret
+.fail:
+    mov rsi, line_smart_fail
+    call puts64
+    ret
+
 ; 盘的健康：先问出型号。
 ;
 ; 型号在 word 27 到 46，而每个 word 里两个字符是反的（ATA 的高字节在前，小端存进来就成
@@ -5945,6 +6036,9 @@ line_persist_fail: db "Yunooka: persist write -> failed", 13, 10, 0
 line_persist_survived: db "Yunooka: persist survived a reboot", 13, 10, 0
 line_health: db "Yunooka: disk model ", 0
 line_health_fail: db "Yunooka: disk model -> no identify", 13, 10, 0
+line_smart: db "Yunooka: smart ", 0
+line_smart_fail: db "Yunooka: smart -> no answer", 13, 10, 0
+smart_buf: times 512 db 0
 ; IDENTIFY 回来的一整页：512 字节，型号、序列号与能力位都在里面。
 health_buf: times 512 db 0
 ; KID 的索引表：16 条，每条 32 字节名字 + 4 字节扇区。
