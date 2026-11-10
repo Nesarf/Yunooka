@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 63
+stage2_sectors equ 64
 seed_lba       equ 1 + stage2_sectors   ; 引导占 1 个扇区，种子紧跟着第二段
 
 ; ======================================================================
@@ -627,6 +627,7 @@ long_entry:
     call run_fs_open2
     call run_fs_open3
     call run_fs_write
+    call run_guard_test
     call run_share_test
     call run_home_test
     call run_gate_blocked
@@ -645,8 +646,11 @@ long_entry:
     call run_kohane_stat_test
     call run_identify_test
     call run_pci_scan
-    call run_ahci_probe
-    call run_ahci_identify
+    ; AHCI 那两个探测不再上主链。它在两个芯片组上都判死了（六个 port 的 PxSSTS 全零，
+    ; 而 BIOS 通过同一个控制器访问过盘），而一条已经查清的失败不该继续占着串口 ——
+    ; 与 run_health_test / run_smart_test 同一个处理。
+    ; 代码留着不删：map_page_2m 与 pci_write 是通用的（一 GB 之外的物理地址、以及
+    ; 配置空间的写），而整条链、九条读数与六条排除写在 design/AHCI.txt 里。
     call run_nvme_probe
     call run_nvme_health
     call run_shell
@@ -3569,6 +3573,35 @@ fs_write_file:
     movzx eax, word [r9]
     test eax, eax
     jz .have_slot
+    ; 同名检查。这一段是新加的：在这个函数里它原先只找空槽，于是同名的第二次写会造出
+    ; 第二条同名条目，而目录里两条都算数。一条「谁都写得上」的文件系统里，只读位只是
+    ; stat 里的一列，不是一道门。
+    xor rdx, rdx
+.cmp_name:
+    cmp rdx, rax
+    jae .cmp_end
+    mov cx, [r9 + 2 + rdx * 2]
+    cmp cx, [r12 + rdx * 2]
+    jne .not_same
+    inc rdx
+    jmp .cmp_name
+.cmp_end:
+    cmp word [r12 + rax * 2], 0    ; 输入的名字也要在这里结束，才算同名
+    jne .not_same
+    ; 同名。带只读位就拒绝 —— 系统保护的第一层，而在这一块砖之前它什么也没挡。
+    lea rcx, [r9 + 2 + rax * 2]
+    movzx edx, byte [rcx]
+    test dl, 0x40
+    jz .exists
+    mov rsi, line_write_ro
+    call puts64
+    jmp .fail
+.exists:
+    mov rsi, line_write_exists
+    call puts64
+    jmp .fail
+.not_same:
+    movzx eax, word [r9]
     lea r9, [r9 + 11 + rax * 2]
     jmp .find_free
 .have_slot:
@@ -3603,6 +3636,7 @@ fs_write_file:
     mov rdi, rsi
     mov rsi, r13
     mov rcx, r14
+    cld                            ; rep 系列的搬运要看方向位，而不该假设别人留了 0
     rep movsb
     dec dword [rbx + 24]           ; 空闲数减一
     mov rax, 1
@@ -3615,6 +3649,64 @@ fs_write_file:
     pop r14
     pop r13
     pop r12
+    ret
+
+; ======================================================================
+; 系统保护的第一层：只读位真的挡住写
+; ======================================================================
+;
+; 目录条目的类型字节 bit 6 是只读位，从 Kohane 第四层起就在了 —— 而它在此之前什么也
+; 没挡：fs_write_file 只找空槽新建，同名的第二次写会造出第二条同名条目，两条都被
+; 算数。所以「只读」当时只是 stat 里的一列，不是一道门。
+;
+; 这一块补两件事：查重名（已有就不许再建一条），以及同名的条目带只读位时拒绝写。
+; 两条走同一条失败路径，但报出来的话不同 —— 「这个名字有了」与「这个名字被保护了」
+; 对要写的人是两条不一样的消息。
+;
+; 判据三条，第三条是为了让前两条有意义：
+;   一、写一个新名字，成功；
+;   二、把它标成只读之后再写，失败，而且报的是只读；
+;   三、换一个名字再写，成功 —— 少了这条，「拒绝」可能只是「整个写坏了」，
+;       而两种看起来完全一样。
+run_guard_test:
+    mov rdi, fs_guard_name
+    mov rsi, fs_guard_data
+    mov rcx, fs_guard_len
+    call fs_write_file
+    test rax, rax
+    jz .lost
+    mov rsi, line_guard_write
+    call puts64
+    mov rdi, fs_guard_path
+    call fs_readonly
+    test rax, rax
+    jz .lost
+    mov rsi, line_guard_ro
+    call puts64
+    mov rdi, fs_guard_name
+    mov rsi, fs_guard_data
+    mov rcx, fs_guard_len
+    call fs_write_file
+    test rax, rax
+    jnz .not_blocked
+    mov rsi, line_guard_refused
+    call puts64
+    mov rdi, fs_guard2_name
+    mov rsi, fs_guard_data
+    mov rcx, fs_guard_len
+    call fs_write_file
+    test rax, rax
+    jz .lost
+    mov rsi, line_guard_other
+    call puts64
+    ret
+.not_blocked:
+    mov rsi, line_guard_leaked
+    call puts64
+    ret
+.lost:
+    mov rsi, line_guard_fail
+    call puts64
     ret
 
 ; 写一次再读回来。判据是读到的内容 —— 「写了」这件事没有别的观测点。
@@ -3925,6 +4017,17 @@ run_pci_scan:
 map_page_2m:
     push r12
     push r13
+    push r14
+    mov r14, rdi                   ; 入参保在 r14 里。这一条路上 rdi 会被改成 PD 页的地址
+                                   ; （下面 rep stosq 要用它），于是末尾那句「返回 rdi」
+                                   ; 交出去的是 PD 页 —— 而调用者拿它当设备寄存器读。
+                                   ;
+                                   ; 这个 bug 藏了很久，因为它只在**第一次**映射某一个
+                                   ; 4 GB 区段时显形（那一格还没有 PD）；第二次走复用分支、
+                                   ; rdi 不被改，返回值就对了。于是「设备寄存器读得出值」
+                                   ; 与「读到的是页表页」在同一段代码里同时成立。
+                                   ; AHCI 那一整章的所有怪读数（CAP 0x18920F、写 CAP 读回
+                                   ; 自己、三个芯片组同值）全部来自这里。
     mov r12, rdi
     shr r12, 30
     and r12, 0x1FF                 ; PDPT 索引（bits 38:30）
@@ -3951,6 +4054,8 @@ map_page_2m:
     mov rdi, rax
     xor eax, eax
     mov ecx, 512
+    cld                            ; rep 系列的清零要看方向位。这一页是页表，
+                                   ; 填反了就是「映射上了而内容全是垃圾」
     rep stosq                      ; 512 个 qword = 4 KB
     pop rax
     or rax, 3                      ; present + writable
@@ -3958,11 +4063,15 @@ map_page_2m:
 .have_pd:
     mov rax, [0x2000 + r12 * 8]
     and rax, 0x000FFFFFFFFFF000    ; PD 的物理地址
-    mov rdx, rdi
+    mov rdx, r14                   ; 用保住的那份入参，不是 rdi —— 新建 PD 页那一支里
+                                   ; rdi 已经被改成 PD 页的地址了，而这一句如果照旧取 rdi，
+                                   ; 写进 PD 的就是「堆的地址」，于是那一段虚拟地址会映到
+                                   ; 堆上：读设备寄存器读到的是内存，而写入读回自己。
     and rdx, 0xFFE00000            ; 2 MB 对齐
     or rdx, 0x83                   ; present + writable + large page
     mov [rax + r13 * 8], rdx
-    mov rax, rdi
+    mov rax, r14
+    pop r14
     pop r13
     pop r12
     ret
@@ -4567,6 +4676,22 @@ run_nvme_probe:
     mov rdi, [nvme_bar]
     call map_page_2m
     mov r13, rax
+    ; 诊断：PDPT[3] 那一项（0x2000 + 3*8）与 map_page_2m 交回的地址。
+    ; 「映射上了而读不到」有两种样子：项没写进去（PDPT[3] 是零或者没有 present 位），
+    ; 或者项写了而 PD 那一格不对。这两个数能把它们分开。
+    mov rax, [0x2018]
+    mov [nvme_vs], rax
+    mov rax, r13
+    mov [nvme_cap], rax
+    mov rsi, line_nvme_map
+    call puts64
+    mov rax, [nvme_vs]
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, [nvme_cap]
+    call put_hex64
+    call put_nl64
     mov eax, [r13 + 8]             ; VS：版本
     mov [nvme_vs], rax
     mov eax, [r13]                 ; CAP 低半：MQES 在 bits 15:0
@@ -7469,6 +7594,20 @@ fs_write_len: equ $ - fs_write_data
 line_fs_write: db "Yunooka: wrote -> ", 0
 line_fs_write_fail: db "Yunooka: write failed", 13, 10, 0
 line_fs_write_lost: db "Yunooka: wrote but lost", 13, 10, 0
+; 系统保护那一块。名字是 UTF-16（目录里的名字），而两个拒绝的理由要分开报。
+fs_guard_name: dw 0x0067, 0x0075, 0x0061, 0x0072, 0x0064, 0x002E, 0x0074, 0x0078, 0x0074, 0
+fs_guard2_name: dw 0x0067, 0x0075, 0x0061, 0x0072, 0x0064, 0x0032, 0x002E, 0x0074, 0x0078, 0x0074, 0
+fs_guard_path: dw 0x03B1, 0x003A, 0x002F, 0x0067, 0x0075, 0x0061, 0x0072, 0x0064, 0x002E, 0x0074, 0x0078, 0x0074, 0
+fs_guard_data: db "Yunooka guard test", 10
+fs_guard_len: equ $ - fs_guard_data
+line_write_ro: db "Yunooka: write refused (readonly)", 13, 10, 0
+line_write_exists: db "Yunooka: write refused (exists)", 13, 10, 0
+line_guard_write: db "Yunooka: guard write ok", 13, 10, 0
+line_guard_ro: db "Yunooka: guard readonly set", 13, 10, 0
+line_guard_refused: db "Yunooka: guard rewrite refused", 13, 10, 0
+line_guard_other: db "Yunooka: guard other name ok", 13, 10, 0
+line_guard_leaked: db "Yunooka: guard rewrite LEAKED", 13, 10, 0
+line_guard_fail: db "Yunooka: guard setup failed", 13, 10, 0
 ; 家庭组第一步的那几样。
 fs_share_path: dw 0x03B1, 0x003A, 0x002F, 0x0064, 0x006F, 0x0063, 0x0073, 0  ; α:/docs
 ; 第二块盘上的一个文件与它的盘符 —— 共享与边界见面那一条用的。
@@ -7554,6 +7693,7 @@ line_nvme_nstimeout: db "Yunooka: nvme ns timeout", 13, 10, 0
 line_nvme_diag: db "Yunooka: nvme diag ", 0
 line_nvme_stuck: db "Yunooka: nvme stuck ", 0
 line_nvme_pcicmd: db "Yunooka: nvme pcicmd ", 0
+line_nvme_map: db "Yunooka: nvme map ", 0
 nvme_pcicmd_before: dq 0
 nvme_pcicmd: dq 0
 ahci_cap_after: dq 0
