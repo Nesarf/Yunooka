@@ -72,6 +72,7 @@ const 全程 = [
   "Yunooka: calc ready",
   "Yunooka: scan eicar -> FOUND",
   "Yunooka: rules eicar.txt = eicar",
+  "Yunooka: plot ",
   "Yunooka: shell> ",
   "Yunooka: repl> ",
   "Yunooka: math> average -> ",
@@ -546,6 +547,12 @@ const 扫成 = 扫行 && 净行;
 const 规行 = /Yunooka: rules eicar\.txt = eicar/.test(读到);
 const 规净 = /Yunooka: rules clean\.txt = none/.test(读到);
 const 规成 = 规行 && 规净;
+// 绘图：盘上一行表达式 → 320 个采样点 → 屏幕。判据是读回曲线上两个已知位置的点，
+// 而那两个位置由表达式自己算出来（f(0)=0 在 (0,100)，f(160)=25.6 在 (160,74)），
+// 不是挑了两个看起来对的坐标。截图那层仍然留给人。
+const 图行 = /Yunooka: plot ([0-9A-F]+) ([0-9A-F]+)/.exec(读到);
+const 图成 = 图行 !== null && 图行[1] === "000000000000002F"
+  && 图行[2] === "000000000000002F";
 // 写：造一个不存在的名字、写一段只有这里才有的字节、再按路径打开它。
 // 判据是那段内容本身 —— 而且 files 的列表里也要多出这个名字，因为「目录里多了一条」
 // 与「数据落对了地方」是两件事，两件都得成立。
@@ -715,6 +722,9 @@ console.log("扫描      " + (扫行 ? "eicar -> FOUND" : "(没命中)") + "  " 
 console.log("规则      " + (规行 ? "eicar.txt = eicar" : "(没命中)") + "  " + (规净 ? "clean.txt = none" : "(误报)")
   + (规成 ? "  —— 三行规则里只有真的那条报了名字：多行、有名字、假规则不误报"
     : "  —— 不对：应当 eicar.txt = eicar、clean.txt = none"));
+console.log("曲线      " + (图行 ? "f(0) 与 f(160) 都在 " + 图行[1].slice(-2) : "(没跑到)")
+  + (图成 ? "  —— 盘上一行表达式，320 个采样点，屏幕上有了一条线"
+    : "  —— 不对：曲线上那两个位置都该有点"));
 console.log("壳        " + (壳行 ? "shell> files" : "(没跑到)")
   + (列行 ? "  → " + 列行[0] : "  → (没列出来)")
   + (壳成 ? "  —— 那一行认得出来、回答得出（来源见上一行）"
@@ -773,6 +783,7 @@ const 结构成 = 有种子
     && 算成
     && 扫成
     && 规成
+    && 图成
     && 壳成
     && 重求成
     && 除成

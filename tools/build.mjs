@@ -71,10 +71,10 @@ if (引导[510] !== 0x55 || 引导[511] !== 0xaa) {
   失败("末两字节应当是 55 AA，实际 " + 引导[510].toString(16) + " " + 引导[511].toString(16));
 }
 const 清单 = path.join(建, "stage2.lst");
-const 二段 = 编一段("第二段", 源二, 像二, 19456, 清单);
+const 二段 = 编一段("第二段", 源二, 像二, 20480, 清单);
 // 第二段自带签名（它也是一段可引导的代码，只是不经过 BIOS），所以这里只查长度上限。
 console.log("引导扇区  " + 引导.length + " 字节，签名 55 AA 对");
-console.log("第二段    " + 二段.length + " 字节（上限 19456，占三十二个扇区）");
+console.log("第二段    " + 二段.length + " 字节（上限 20480，占三十二个扇区）");
 
 // ---- 二、种子 ----
 // 给不给种子都建得出来，这很重要：Yunooka 不欠 HMYR 仓库任何东西，所以没有种子时
@@ -101,7 +101,7 @@ console.log("种子      " + 种子说明);
 // 布局（BIOS 从 1 数扇区，数组从 0 数偏移）：
 //   第 1 个扇区（偏移 0）         引导扇区
 //   第 2 到 33 个扇区（偏移 512） 第二段，三十二个扇区（16 KB）
-//   第 34 个扇区起（偏移 19456）  种子的第一个字节
+//   第 34 个扇区起（偏移 20480）  种子的第一个字节
 // stage2.asm 里写的是 dap_lba = 33，也就是第 34 个扇区；引导扇区写的是 al = 32，也就是
 // 读三十二个扇区。三处数字对得上才建得对，所以它们写在同一段注释里。
 //
@@ -120,7 +120,7 @@ const 盘大小MB = (() => {
 // 种子从第 34 个扇区起：引导 1 个 + 第二段 33 个。
 // 这个数与第二段的上限、boot.asm 里那句 mov al 是一组 —— 第二段变长它就要往后挪，
 // 而它的症状会是「种子魔数不对」，看起来像盘坏了。
-const 种子偏移 = 39 * 512;
+const 种子偏移 = 41 * 512;
 const 盘字节数 = 盘大小MB * 1024 * 1024;
 if (种子偏移 + 种子内容.length > 盘字节数) 失败("种子比盘还大，装不下");
 
@@ -134,12 +134,12 @@ if (种子内容.length) {
   // nasm 的清单给的是段内偏移（-f bin 的输出与 org 无关），所以这里直接用；
   // 万一哪天它改成给绝对地址，减去 org 之后才对，所以两种都认。
   const 段内 = 格 >= 0x7e00 ? 格 - 0x7e00 : 格;
-  if (段内 < 0 || 段内 + 4 > 19456) 失败("seed_bytes 落在第二段外面：偏移 " + 段内);
+  if (段内 < 0 || 段内 + 4 > 20480) 失败("seed_bytes 落在第二段外面：偏移 " + 段内);
   二段.writeUInt32LE(种子内容.length, 段内);
   console.log("字节数    " + 种子内容.length + " 写进第二段偏移 " + 段内);
   // seed_bytes 是 times 之前的最后一项，所以它之后就是「这一段实际用到哪」。
-  // 不报这个数的话，19456 那个数字总像是用满了，而下一块砖就会在没人预料的时候撞上去。
-  console.log("实到      " + (段内 + 4) + " 字节，余 " + (19456 - 段内 - 4));
+  // 不报这个数的话，20480 那个数字总像是用满了，而下一块砖就会在没人预料的时候撞上去。
+  console.log("实到      " + (段内 + 4) + " 字节，余 " + (20480 - 段内 - 4));
 }
 
 // ---- 三·五、文件系统 ----
@@ -180,6 +180,13 @@ const 规则文件 = Buffer.from([
   "never:00112233445566778899AABBCCDDEEFF",
   "also:DEADBEEFCAFEBABE",
 ].join("\n") + "\n", "latin1");
+// 要画的那条曲线。UTF-16，因为它要被 calc_expr 读，而那个求值器读的是码元。
+//
+// 为什么是 x*x/1000：x 从 0 到 319 时它从 0 长到约 101.8，整条落在上半屏 ——
+// 值域进得了 -100 到 100 这个范围，所以一个点都不会被裁掉。换成 x*x 就会飞出去，
+// 而那时「曲线没画出来」与「坐标变换错了」在截图上长得一样。
+const 绘图文件 = Buffer.from("x*x/1000", "utf16le");
+const 绘图起 = 文件系统起 + 14;
 const 示例文件 = Buffer.from("Yunooka filesystem ok\n", "utf8");
 const 子文件 = Buffer.from("Yunooka subdirectory ok\n", "utf8");
 const 深层文件 = Buffer.from("Yunooka three levels ok\n", "utf8");
@@ -237,7 +244,8 @@ const 示例扇区数 = Math.ceil(示例文件.length / 512) + Math.ceil(子文�
   + Math.ceil(数学输入.length / 512) + Math.ceil(程序字节.length / 512)
   + 1 + Math.ceil(深层文件.length / 512)   // sub 目录自己占一个扇区，再加 deep.txt
   + Math.ceil(含毒样本.length / 512) + Math.ceil(干净样本.length / 512)
-  + Math.ceil(规则文件.length / 512);
+  + Math.ceil(规则文件.length / 512)
+  + Math.ceil(绘图文件.length / 512);
 
 const 码元 = (s) => {
   const 列 = [];
@@ -281,7 +289,8 @@ let 根位 = 写条目(根目录, 0, "hello.txt", 0, 数据起, 示例文件.len
 根位 = 写条目(根目录, 根位, "prog.hmtn", 0, 数据起 + 5, 程序字节.length);
 根位 = 写条目(根目录, 根位, "eicar.txt", 0, 毒样本起, 含毒样本.length);
 根位 = 写条目(根目录, 根位, "clean.txt", 0, 干净样本起, 干净样本.length);
-写条目(根目录, 根位, "rules.txt", 0, 规则起, 规则文件.length);
+根位 = 写条目(根目录, 根位, "rules.txt", 0, 规则起, 规则文件.length);
+写条目(根目录, 根位, "plot.txt", 0, 绘图起, 绘图文件.length);
 
 const 子目录 = Buffer.alloc(512);
 let 子位 = 写条目(子目录, 0, "note.txt", 0, 数据起 + 1, 子文件.length);
@@ -320,6 +329,7 @@ try {
   fs.writeSync(fd, 含毒样本, 0, 含毒样本.length, 毒样本起 * 512);
   fs.writeSync(fd, 干净样本, 0, 干净样本.length, 干净样本起 * 512);
   fs.writeSync(fd, 规则文件, 0, 规则文件.length, 规则起 * 512);
+  fs.writeSync(fd, 绘图文件, 0, 绘图文件.length, 绘图起 * 512);
 } finally {
   fs.closeSync(fd);
 }

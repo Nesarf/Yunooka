@@ -44,21 +44,21 @@ stage2:
     ; 种子读到 0x20000 起，不是 0x8000 —— 第二段自己被加载在 0x7E00，32 扇区就是
     ; 16 KB，铺到 0xBE00，而 0x8000 起的种子会把它覆盖成零。0x20000 在实模式 1 MB
     ; 之内，离得够远。
-    mov dword [dap_lba], 39       ; 第 35 个扇区：引导 1 + 第二段 33
+    mov dword [dap_lba], 41       ; 第 35 个扇区：引导 1 + 第二段 33
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x2000
     mov word [dap_count], 64
     call read_batch
     jc .seed_fail
 
-    mov dword [dap_lba], 39 + 64
+    mov dword [dap_lba], 41 + 64
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x2800
     mov word [dap_count], 64
     call read_batch
     jc .seed_fail
 
-    mov dword [dap_lba], 39 + 128
+    mov dword [dap_lba], 41 + 128
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x3000
     mov word [dap_count], 18
@@ -126,7 +126,7 @@ stage2:
     mov dword [dap_lba], 1024
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x4000
-    mov word [dap_count], 14
+    mov word [dap_count], 15
     call read_batch
     jnc .fs_ready
     mov si, line_fs_preread
@@ -615,6 +615,7 @@ long_entry:
     call run_calc_live
     call run_scan_test
     call run_rules_multi
+    call run_plot_test
     call run_pci_scan
     call run_shell
     call run_repl
@@ -2936,7 +2937,7 @@ run_ata_test:
     mov rax, 512
     call alloc64
     mov [ata_buf], rax            ; 缓冲区地址要留住：ata_read 会把 rax 用掉
-    mov rdi, 39                   ; 种子在盘上的第一个扇区：引导 1 + 第二段 33
+    mov rdi, 41                   ; 种子在盘上的第一个扇区：引导 1 + 第二段 33
     mov rsi, rax
     call ata_read
     jc ata_fail
@@ -4148,6 +4149,18 @@ calc_factor:
     xorpd xmm0, xmm1
     ret
 .number:
+    ; 变量 x。绘图这件事的全部要求就在这里 —— 一个求值器只要认一个变量，
+    ; 就能对 320 个不同的 x 求 320 次值，而每一次都是一条曲线的采样点。
+    ;
+    ; 为什么变量表只有一格：这一版只画 y = f(x)，而 f 里除了 x 没有别的自由变量。
+    ; 等到要画参数方程（x = f(t), y = g(t)）时才需要第二格，那时加，不是现在。
+    movzx eax, word [rdi]
+    cmp ax, 'x'
+    jne .digits
+    movsd xmm0, [var_x]
+    add rdi, 2
+    ret
+.digits:
     mov rcx, 32                    ; 上限：一个数在这一版里不会长过 32 个码元
     call parse_decimal
     lea rdi, [rdi + rax * 2]
@@ -4607,6 +4620,116 @@ run_scan_test:
     call puts64
     ret
 
+; ======================================================================
+; 把一条曲线画出来
+; ======================================================================
+;
+; 这是 math-console 里最后一块砖：像素层、画线、求值三件都已经有了，缺的是把数学坐标
+; 变成屏幕坐标那一步。
+;
+; 坐标变换放在这一侧、不放在 HMYR 那一侧，理由是一条边界：HMYR 那一侧不知道屏幕有多少
+; 像素，也不该知道 —— 它的表达式说的是 x 与 y 的关系，而「x = 0 落在第 0 列、y = 0 落在
+; 第 100 行」是这一台机器的屏幕的事。把屏幕尺寸写进语言里，换一块分辨率就要求表达式跟着变。
+;
+; 约定：屏幕 x = 数学 x（0 到 319），屏幕 y = 100 - 数学 y（因为屏幕的 y 往下长）。
+; 这一版没有缩放也没有平移参数，所以 f 的值域要自己落在 -100 到 100 之间 —— 超出界外的点
+; 被裁掉，而不是被压到边上（压到边上会让一条抛物线的两端看起来像贴了一条直线）。
+plot_curve:
+    mov qword [prev_x], -1         ; 还没有上一个点
+    xor r12, r12                   ; 数学 x：0 到 319
+.loop_x:
+    cmp r12, 320
+    jae .done
+    cvtsi2sd xmm0, r12
+    movsd [var_x], xmm0
+    lea rdi, [plot_expr]
+    call calc_expr
+    movsd xmm2, [const_100]
+    subsd xmm2, xmm0               ; 屏幕 y = 100 - f(x)
+    cvttsd2si r13, xmm2
+    test r13, r13
+    js .next                       ; 裁掉界外：负的行号没有意义
+    cmp r13, 200
+    jae .next
+    mov [cur_x], r12
+    mov [cur_y], r13
+    ; 打一个点，再与上一个点连线 —— 只打点的话，斜率大的地方会断成虚线，
+    ; 而那正是「按列采样」本身的形状，不是屏幕的问题。
+    mov rax, r13
+    imul rax, rax, 320
+    add rax, r12
+    mov rdi, 0xA0000
+    add rdi, rax
+    mov byte [rdi], 0x2F
+    cmp qword [prev_x], -1
+    je .first
+    mov r12, [prev_x]
+    mov r13, [prev_y]
+    mov r14, [cur_x]
+    mov r15, [cur_y]
+    mov dl, 0x2F
+    call draw_line
+    mov r12, [cur_x]
+    mov r13, [cur_y]
+.first:
+    mov [prev_x], r12
+    mov [prev_y], r13
+.next:
+    inc r12
+    jmp .loop_x
+.done:
+    ret
+
+; 从盘上读一行表达式、画出来、读回两个已知位置的点。
+;
+; 判据不靠眼睛：f(0) = 0 所以 (0,100) 该有点，f(160) = 25.6 所以 (160,74) 该有点。
+; 这两个位置由那条表达式自己算出来，不是挑了两个看起来对的坐标。
+run_plot_test:
+    mov rdi, fs_plot_path
+    call fs_open_path
+    test rax, rax
+    jz .no_expr
+    ; 表达式拷进 plot_expr：它是 UTF-16 且 0 结尾，而盘上那一行只有换行结尾。
+    mov rsi, [last_addr]
+    lea rdi, [plot_expr]
+    mov rcx, rbx
+    xor rdx, rdx
+.copy:
+    cmp rdx, rcx
+    jae .copied
+    cmp rdx, 120                   ; 留一格给结尾的 0
+    jae .copied
+    mov ax, [rsi + rdx * 2]
+    cmp ax, 10
+    je .copied
+    cmp ax, 13
+    je .copied
+    mov [rdi + rdx * 2], ax
+    inc rdx
+    jmp .copy
+.copied:
+    mov word [rdi + rdx * 2], 0
+    call plot_curve
+    mov rdi, 0xA0000
+    movzx eax, byte [rdi + 100 * 320]          ; f(0) = 0 落在 (0, 100)
+    mov r12d, eax
+    movzx eax, byte [rdi + 74 * 320 + 160]     ; f(160) = 25.6 落在 (160, 74)
+    mov r13d, eax
+    mov rsi, line_plot
+    call puts64
+    mov rax, r12
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, r13
+    call put_hex64
+    call put_nl64
+    ret
+.no_expr:
+    mov rsi, line_plot_none
+    call puts64
+    ret
+
 ; 打一串 UTF-16 码元，只取低字节。这一版的名字都是 ASCII，够用；非 ASCII 的名字会
 ; 在这里变成别的字节，而那是「打印」这一层的限制，不是名字本身的。
 put_utf16_ascii:
@@ -5030,6 +5153,14 @@ rules_left: dq 0
 data_ptr: dq 0
 data_len: dq 0
 rule_name: times 32 db 0
+; 绘图那一层要的几个数：当前 x、两次求值的结果、上一个屏幕点。
+; 而它们必须是内存变量 —— draw_line 自己要用 r12 到 r15，与绘图循环抢的正是同一组寄存器。
+var_x: dq 0
+plot_y: dq 0
+cur_x: dq 0
+cur_y: dq 0
+prev_x: dq 0
+prev_y: dq 0
 
 line_fn116: db "Yunooka: fn116 -> ", 0
 line_call: db "Yunooka: call -> ", 0
@@ -5226,6 +5357,14 @@ line_rules_none: db "Yunooka: rules -> no rule", 13, 10, 0
 line_rules_head_e: db "Yunooka: rules eicar.txt = ", 0
 line_rules_head_c: db "Yunooka: rules clean.txt = ", 0
 line_rule_none: db "none", 0
+line_plot: db "Yunooka: plot ", 0
+line_plot_none: db "Yunooka: plot -> no expression", 13, 10, 0
+; 绘图那条表达式的落点：盘上读进来之后放在这里（UTF-16，0 结尾）。
+plot_expr: times 128 dw 0
+fs_plot_path: dw 0x03B1, 0x003A, 0x002F, 0x0070, 0x006C, 0x006F, 0x0074
+              dw 0x002E, 0x0074, 0x0078, 0x0074, 0
+; 100.0 的八字节位模式：屏幕中线。写成一个常量而不是算出来，因为它就是「半个高度」。
+const_100: dq 0x4059000000000000
 
 ; shell 的两样：要从盘上找的文件名，与它认得的第一条命令。
 ; 命令是 ASCII（不是 UTF-16）—— 因为 cmd.txt 的内容就是 ASCII 字节，
