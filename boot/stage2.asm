@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 60
+stage2_sectors equ 62
 seed_lba       equ 1 + stage2_sectors   ; 引导占 1 个扇区，种子紧跟着第二段
 
 ; ======================================================================
@@ -648,6 +648,7 @@ long_entry:
     call run_ahci_probe
     call run_ahci_identify
     call run_nvme_probe
+    call run_nvme_health
     call run_shell
     call run_repl
     call run_div_test
@@ -4510,6 +4511,34 @@ run_nvme_probe:
     inc r12
     jmp .dev
 .found:
+    ; PCI 命令寄存器的 Memory Space 与 Bus Master。这一次不是「顺手」——
+    ; 没有 Bus Master，控制器取不到提交队列里的命令（DMA 被禁），而 CSTS 照样会
+    ; 报 RDY=1：于是「控制器就绪」与「命令能跑」看起来是同一件事，而实际差着一整条
+    ; DMA 通道。AHCI 那个设备我置过，NVMe 是另一个设备，得单独置。
+    ; 实测的形状：CC 的 EN 起了、CSTS 的 RDY 起了、两个队列基址读回也都是我写的值，
+    ; 而写门铃之后 SQ 的 head 一动不动 —— 那就是「命令没被取走」，而原因不在队列。
+    mov edi, [pci_devbase]
+    or edi, 0x04
+    call pci_read
+    mov [nvme_pcicmd_before], rax
+    mov esi, eax
+    or esi, 6
+    mov edi, [pci_devbase]
+    or edi, 0x04
+    call pci_write
+    mov edi, [pci_devbase]
+    or edi, 0x04
+    call pci_read
+    mov [nvme_pcicmd], rax
+    mov rsi, line_nvme_pcicmd
+    call puts64
+    mov rax, [nvme_pcicmd_before]
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, [nvme_pcicmd]
+    call put_hex64
+    call put_nl64
     ; BAR0 是 64 位的：低半在 0x10、高半在 0x14。高半不移上去的话，
     ; 落在 4 GB 之外的 BAR 会被读成一个低地址，而那看起来像「设备在低处」。
     mov edi, [pci_devbase]
@@ -4556,6 +4585,239 @@ run_nvme_probe:
     mov rsi, line_nvme_none
     call puts64
     ret
+
+; ======================================================================
+; NVMe 的第一条命令：Get Log Page 拿 SMART / Health
+; ======================================================================
+;
+; 为什么这一条比 IDENTIFY 更值：Get Log Page（opcode 0x02，LID 0x02）一页里就有
+; Composite Temperature、Available Spare、Percentage Used、Media Errors、
+; Data Units Read/Written —— 盘健康要的那五样全在，而它不需要先过「盘认不认得这组
+; 命令」那一道门。所以这条路的第一条命令就是它，而不是 IDENTIFY。
+;
+; 初始化五步（规范 3.1.1 的顺序）：
+;   一、CC.EN 清零，等 CSTS.RDY 落下 —— 控制器跑着的时候改队列基址是未定义行为
+;   二、AQA 写队列深度（我们只要 4 项，一条命令一次）
+;   三、ASQ / ACQ 写 64 位物理地址，两块都要页对齐
+;   四、CC 置 EN、IOSQES=6、IOCQES=4（提交项 64 字节、完成项 16 字节）
+;   五、等 CSTS.RDY 起来
+;
+; 三块内存都从堆里分、取整到 4 KB。不用固定地址：0x1000 到 0x7E00 那一段已经满了
+; （页表、IDT、第二段自己），而 AHCI 那一块刚刚为这件事付过一次学费 ——
+; 池子起点写错，清掉的是 IDT。
+run_nvme_health:
+    mov rax, 8192
+    call alloc64
+    add rax, 4095
+    and rax, -4096
+    mov [nvme_asq], rax
+    mov rdi, rax
+    mov rcx, 4096
+    xor eax, eax
+    rep stosb
+    mov rax, 8192
+    call alloc64
+    add rax, 4095
+    and rax, -4096
+    mov [nvme_acq], rax
+    mov rdi, rax
+    mov rcx, 4096
+    xor eax, eax
+    rep stosb
+    mov rax, 8192
+    call alloc64
+    add rax, 4095
+    and rax, -4096
+    mov [nvme_log], rax
+    mov rdi, rax
+    mov rcx, 4096
+    xor eax, eax
+    rep stosb
+    mov r13, [nvme_bar]
+    ; 一、停
+    mov eax, [r13 + 0x14]
+    and eax, -2
+    mov [r13 + 0x14], eax
+    mov rcx, 20000000
+.w0:
+    mov eax, [r13 + 0x1C]
+    test eax, 1
+    jz .stop
+    dec rcx
+    jnz .w0
+.stop:
+    ; 二、队列深度：两边都是 4 项，所以字段写 3
+    mov dword [r13 + 0x24], 0x00030003
+    ; 三、两个基址（64 位，缓冲区在 4 MB 起，所以高位真的是零）
+    mov rax, [nvme_asq]
+    mov [r13 + 0x28], rax
+    mov rax, [nvme_acq]
+    mov [r13 + 0x30], rax
+    ; 四、CC：EN | IOSQES=6 | IOCQES=4
+    mov eax, 6
+    shl eax, 16
+    mov edx, 4
+    shl edx, 20
+    or eax, edx
+    or eax, 1
+    mov [r13 + 0x14], eax
+    ; 五、等 RDY
+    mov rcx, 20000000
+.w1:
+    mov eax, [r13 + 0x1C]
+    test eax, 1
+    jnz .ready
+    dec rcx
+    jnz .w1
+    mov rsi, line_nvme_noen
+    call puts64
+    ret
+.ready:
+    ; 诊断：CC、CSTS、以及两个队列基址读回来是不是我写进去的。
+    ; 「命令不完成」有四种样子，而这四个数能把它们分开：
+    ;   CC 的 EN 没置上 —— 写没生效；
+    ;   CSTS 的 RDY 没起来 —— 控制器没就绪（上面那一关已经挡住这一种）；
+    ;   两个基址读回来不对 —— 寄存器没接受那两个地址；
+    ;   三个都对而队列不动 —— 问题在命令项或门铃那一侧。
+    mov eax, [r13 + 0x14]
+    mov [nvme_cw], rax
+    mov eax, [r13 + 0x1C]
+    mov [nvme_spare], rax
+    mov eax, [r13 + 0x28]
+    mov [nvme_used], rax
+    mov eax, [r13 + 0x30]
+    mov [nvme_media], rax
+    mov rsi, line_nvme_diag
+    call puts64
+    mov rax, [nvme_cw]
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, [nvme_spare]
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, [nvme_used]
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, [nvme_media]
+    call put_hex64
+    call put_nl64
+    ; 命令项 64 字节：opcode 在 byte 0，NSID 在 dword 1，PRP1 在 qword 3，
+    ; CDW10 在 0x28。
+    ;
+    ; 这一条是 Identify Controller（opcode 0x06，CDW10 的 CNS 写 1）。
+    ; 先要的为什么不是 SMART / Health：那一条也跑通了（status 是 0，命令成功），
+    ; 而 VBox 的 NVMe 返回的那一页全是零 —— 它没有真的温度与寿命可报。
+    ; 而 Identify Controller 的 offset 24 那 40 个字节是型号，是盘自己报的，
+    ; 也是 Kohane 第五层那条判据的原话：「型号那几个字符是盘自己报的，
+    ; 不是代码里写死的」。所以这一条更值得先钉住。
+    mov rbx, [nvme_asq]
+    mov dword [rbx + 0x00], 0x06
+    mov dword [rbx + 0x04], 0
+    mov rax, [nvme_log]
+    mov [rbx + 0x18], rax
+    mov dword [rbx + 0x28], 1
+    ; 门铃：SQ0 的 tail 走到 1
+    mov dword [r13 + 0x1000], 1
+    ; 完成项 16 字节，最后那个 word 的 bit 0 是 phase —— 从零翻成一就是「完成了」
+    mov rbx, [nvme_acq]
+    mov rcx, 50000000
+.wcq:
+    mov eax, [rbx + 0x0E]
+    test eax, 1
+    jnz .got
+    dec rcx
+    jnz .wcq
+    ; 超时也要留下证据。「命令不完成」的两种样子在这里分得开：
+    ;   SQ 的 head doorbell 还是零 —— 控制器没把命令取走（门铃或队列深度那一侧）；
+    ;   head 走了一 —— 命令被取走了，而完成项没写回来（PRP 或 status 那一侧）。
+    ; CQ 的第一项也打出来：phase 没翻，但里面的 CID 与 status 已经写着内容，
+    ; 说明写回来过、只是我认的方式不对，那也是另一种解释。
+    mov rsi, line_nvme_stuck
+    call puts64
+    mov eax, [r13 + 0x1004]
+    mov [nvme_status], rax
+    mov rax, [nvme_status]
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rbx, [nvme_acq]
+    mov eax, [rbx + 0x0C]
+    mov [nvme_status], rax
+    mov rax, [nvme_status]
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov eax, [rbx + 0x0E]
+    mov [nvme_status], rax
+    mov rax, [nvme_status]
+    call put_hex64
+    call put_nl64
+    mov rsi, line_nvme_timeout
+    call puts64
+    ret
+.got:
+    ; 完成项的 status 在 bits 15:1，非零就是命令回了错
+    mov eax, [rbx + 0x0E]
+    mov [nvme_status], rax
+    ; Identify Controller 的布局：offset 4 是序列号（20 字节），
+    ; offset 24 是型号（40 字节）。两个都是定长、尾部用空格补齐。
+    ; 拷出来之后自己修剪尾部 —— 不修剪的话，串口上那一行会带着一串看不见的空白，
+    ; 而判据要从这一行里认型号。
+    cld
+    mov rbx, [nvme_log]
+    lea rsi, [rbx + 24]
+    lea rdi, [nvme_model]
+    mov rcx, 40
+.cm:
+    lodsb
+    stosb
+    dec rcx
+    jnz .cm
+    mov byte [rdi], 0
+    lea rdi, [nvme_model + 40]
+.trim:
+    dec rdi
+    cmp rdi, nvme_model
+    jb .trim_done
+    cmp byte [rdi], ' '
+    jne .trim_done
+    mov byte [rdi], 0
+    jmp .trim
+.trim_done:
+    mov rsi, line_nvme_model
+    call puts64
+    lea rsi, [nvme_model]
+    call puts64
+    call put_nl64
+    ; 序列号也报一下：它是另一段独立的位置，而两段都对才说明这一页真的是盘给的
+    mov rbx, [nvme_log]
+    lea rsi, [rbx + 4]
+    lea rdi, [nvme_serial]
+    mov rcx, 20
+.cs:
+    lodsb
+    stosb
+    dec rcx
+    jnz .cs
+    mov byte [rdi], 0
+    lea rdi, [nvme_serial + 20]
+.s_trim:
+    dec rdi
+    cmp rdi, nvme_serial
+    jb .s_done
+    cmp byte [rdi], ' '
+    jne .s_done
+    mov byte [rdi], 0
+    jmp .s_trim
+.s_done:
+    mov rsi, line_nvme_serial
+    call puts64
+    lea rsi, [nvme_serial]
+    call puts64
+    jmp put_nl64
 
 ; ======================================================================
 ; 家庭组的第二步：边界是一个可以比较的数
@@ -7209,6 +7471,27 @@ nvme_cap: dq 0
 line_nvme_found: db "Yunooka: nvme dev ", 0
 line_nvme_regs: db "Yunooka: nvme regs ", 0
 line_nvme_none: db "Yunooka: nvme none", 13, 10, 0
+nvme_asq: dq 0
+nvme_acq: dq 0
+nvme_log: dq 0
+nvme_status: dq 0
+nvme_cw: dq 0
+nvme_temp: dq 0
+nvme_spare: dq 0
+nvme_used: dq 0
+nvme_media: dq 0
+line_nvme_noen: db "Yunooka: nvme no enable", 13, 10, 0
+line_nvme_timeout: db "Yunooka: nvme cmd timeout", 13, 10, 0
+line_nvme_smart: db "Yunooka: nvme smart ", 0
+line_nvme_model: db "Yunooka: nvme model ", 0
+line_nvme_serial: db "Yunooka: nvme serial ", 0
+nvme_model: times 48 db 0
+nvme_serial: times 24 db 0
+line_nvme_diag: db "Yunooka: nvme diag ", 0
+line_nvme_stuck: db "Yunooka: nvme stuck ", 0
+line_nvme_pcicmd: db "Yunooka: nvme pcicmd ", 0
+nvme_pcicmd_before: dq 0
+nvme_pcicmd: dq 0
 ahci_cap_after: dq 0
 pci_devbase: dq 0
 ahci_bohc: dq 0

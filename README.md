@@ -811,12 +811,10 @@ Yunooka: persist survived a reboot           第二次启动
 | `browser` | 网络栈（ARP/IP/TCP）与 `system-software` 的窗口层 |
 | `self-host` | HMYR 编译器本身能在字节码里跑 |
 | `android-port` | arm64 安卓那一整套（它与 x86-64 不共享一行代码） |
-| `disk-health` | NVMe 的初始化（控制器已验证是活的，见 [design/AHCI.txt](design/AHCI.txt) 第七节） |
 | `system-software` | 隔离要进程、中继要音频；五件里两件的砖已铺好 |
 | `homegroup` | 一个「改动已有条目」的动作（写已有文件、删除） |
 
-**`disk-health` 的代码是写完的** —— `ata_identify` 在，只是那块盘不答这一条。
-失败不在命令、不在时序、不在缓冲区。
+**`disk-health` 的那条已经通了**，只是不在这个表里了 —— 见下面「型号是盘报的」。
 
 ### 一条 MMIO 的通道：走到 port 就停住
 
@@ -887,6 +885,50 @@ nvme regs 0x00010200 0x0A010FFF
 Composite Temperature、Available Spare、Percentage Used、Media Errors、Data Units
 Read/Written 全给出来 —— 那是 SMART 想要的那五样，而它**不需要先过 IDENTIFY 那道门**。
 
+### Bus Master 那一个位
+
+初始化做完之后命令不完成，四步诊断把范围缩到一处：
+
+```
+nvme diag CC=0x00460001 CSTS=0x1 ASQ=0x406000 ACQ=0x408000
+nvme stuck SQ_head=0 CQ_CID=0 CQ_status=0
+```
+
+`CC` 的 EN 起了、IOSQES 与 IOCQES 是该有的值、`CSTS` 的 RDY 起了、两个队列基址读回来
+也全是我写进去的。而 **SQ 的 head doorbell 一动不动** —— 那是「命令根本没被取走」，
+不是「取走了而没完成」，两件事要改的地方完全不同。
+
+原因是 PCI 命令寄存器：**这个设备的 Bus Master 位（bit 2）是零**。
+
+```
+nvme pcicmd 0x100003 -> 0x100007
+```
+
+置上之后命令立刻完成。这一条最难看出来，因为 **`CSTS` 在 Bus Master 关着的时候照样报
+`RDY=1`** —— 「控制器就绪」与「控制器能把队列读进来」是两件事，而前者看起来像后者。
+AHCI 那个设备我置过这一位，可 NVMe 是另一个设备；**上一块设备的开关不会跟着新设备走**。
+
+### 型号是盘报的
+
+第一个跑通的是 `Get Log Page`（SMART / Health），它成功完成了（status field 是零），
+而 VBox 返回的那一页**全是零** —— 它没有真的温度与寿命可报。所以健康那五样在这台机器上
+暂时只有形状没有内容，这件事要写明，不能拿零当读数。
+
+换成 `Identify Controller`（opcode `0x06`，CDW10 的 CNS 写 1），它答了：
+
+```
+nvme model ORCL-VBOX-NVME-VER12
+nvme serial VB1234-56789
+```
+
+型号在 Identify 那一页的 offset 24（40 字节）、序列号在 offset 4（20 字节），两段都是
+定长、尾部用空格补齐，所以读出来之后要自己修剪。
+
+判据的原话在 [design/KOHANE.txt](design/KOHANE.txt) 第五层：「型号那几个字符是盘自己报的，
+不是代码里写死的」。所以那条判据不只查「读到了非空的串」—— 一颗打印固定字符串的实现也能
+过 —— **它还查第二段的源里有没有那个型号**。验过：把型号加进一行注释，判据报的是
+「型号被写进了代码（那就不是盘报的）」，退出码一。
+
 
 ## 那些名字：同名不同物
 
@@ -913,7 +955,7 @@ Yunooka 让路。
 | 二 | 窗口：边框、标题栏、导航栏、内容区 | 已做 |
 | 三 | 进一个盘：名字、大小、类型、共享位 | 已做 |
 | 四 | 一个文件的详情（与索引那条路交叉验证） | 已做 |
-| 五 | 盘的健康（`disk-health` 的 AHCI 通道走到 port 就停住） | 等前提 |
+| 五 | 盘的健康（型号是盘报的；温度这台虚拟机给不出来） | 已做 |
 | 六 | 分析：按魔数判断，而不是看扩展名 | 已做 |
 
 **KID 集成了很多功能，能过来的只有三样**：文件索引、即刻文件分析、盘健康。音频、插件、
