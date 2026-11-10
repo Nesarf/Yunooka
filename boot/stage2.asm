@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 54
+stage2_sectors equ 58
 seed_lba       equ 1 + stage2_sectors   ; 引导占 1 个扇区，种子紧跟着第二段
 
 ; ======================================================================
@@ -645,6 +645,8 @@ long_entry:
     call run_kohane_stat_test
     call run_identify_test
     call run_pci_scan
+    call run_ahci_probe
+    call run_ahci_identify
     call run_shell
     call run_repl
     call run_div_test
@@ -3863,6 +3865,21 @@ pci_read:
     in eax, dx
     ret
 
+; 写配置空间里那一个 dword。rdi 与 pci_read 同形，esi = 要写的值。
+;
+; 为什么需要写：设备的 MMIO 那一片要先由 PCI 命令寄存器的 Memory Space 位（bit 1）
+; 打开，它才会响应访问。不开的时候读回来的是总线上别的东西 —— 而「读出了数」会让
+; 这件事看起来像「设备在工作」，这是这一台机器上最会骗人的一种失败。
+pci_write:
+    mov eax, edi
+    or eax, 0x80000000
+    mov dx, 0xCF8
+    out dx, eax
+    mov dx, 0xCFC
+    mov eax, esi
+    out dx, eax
+    ret
+
 ; 扫 0 号总线上的 32 个设备槽，凡是有 vendor 的都报出来。
 ;
 ; 只扫 0 号总线、只扫 func 0：这台机器的设备都在那里，而多扫两级要把「怎么认多功能的
@@ -3890,6 +3907,444 @@ run_pci_scan:
     cmp r12, 32
     jb .dev
     ret
+
+; 把一个物理地址所在的那个 2 MB 页映进页表（身份映射）。rdi = 物理地址，出 rax = 同一地址。
+;
+; 为什么需要它：页表只映了前 1 GB，而 AHCI 的 ABAR 是 0xF0804000 —— 分页开着的时候，
+; 一条普通的读就会 #PF。而 #PF 在这里看起来像「那一片不存在」，与「那个控制器没有寄存器」
+; 分不开，所以先把它变成普通内存，再去判断别的事。
+;
+; 四级分页的三层已经有了：PML4 在 0x1000、PDPT 在 0x2000、PD 在 0x3000。这里补的是
+; 「PDPT 的某一项还没有 PD」那一格 —— 前 1 GB 用的恰好是 PDPT[0]，而 0xF0804000 落在
+; PDPT[3]，那一项是零。所以第一次来的时候要现造一个全零的 PD 页。
+;
+; 池从 0x4000 起：页表占 0x1000 到 0x4000，0x4000 往上到 0x7E00（第二段被加载的地方）
+; 是空的。一页一个 PD，够用很久。
+map_page_2m:
+    push r12
+    push r13
+    mov r12, rdi
+    shr r12, 30
+    and r12, 0x1FF                 ; PDPT 索引（bits 38:30）
+    mov r13, rdi
+    shr r13, 21
+    and r13, 0x1FF                 ; PD 索引（bits 29:21）
+    mov rax, [0x2000 + r12 * 8]
+    test al, 1
+    jnz .have_pd
+    ; 这一格还没有 PD：从池里取一页，清干净，再挂上去
+    mov rax, [pd_pool]
+    lea rdx, [rax + 0x1000]
+    mov [pd_pool], rdx
+    push rax
+    mov rdi, rax
+    xor eax, eax
+    mov ecx, 512
+    rep stosq                      ; 512 个 qword = 4 KB
+    pop rax
+    or rax, 3                      ; present + writable
+    mov [0x2000 + r12 * 8], rax
+.have_pd:
+    mov rax, [0x2000 + r12 * 8]
+    and rax, 0x000FFFFFFFFFF000    ; PD 的物理地址
+    mov rdx, rdi
+    and rdx, 0xFFE00000            ; 2 MB 对齐
+    or rdx, 0x83                   ; present + writable + large page
+    mov [rax + r13 * 8], rdx
+    mov rax, rdi
+    pop r13
+    pop r12
+    ret
+
+; ======================================================================
+; AHCI：先看见那条不是 0x1F* 的通道
+; ======================================================================
+;
+; 盘健康的五个探测都在 IDE 那条路上回一页零，所以下一步不是再试一次，是换一条路。
+; 换之前要先看见那条路存在：一个 AHCI 控制器，它的寄存器在 MMIO 那一片（ABAR 指的
+; 那一段），不在 0x1F0 到 0x1F7 这几个端口上。
+;
+; 这一块只做两件事：找到它、报出它的 ABAR。不碰盘、不发命令。
+; 为什么切在这里：ABAR 的地址要先看得见，才知道后面能不能走 —— 如果它落在恒等映射的
+; 那一 GB 之外，那就要先把一个任意物理地址映进页表，而那是另一块砖，不该混在这一块里猜。
+;
+; PCI 配置空间 offset 0x08 的高 24 位是 class/subclass/prog-if。
+; SATA/AHCI 是 0x010601：class 01 大容量存储、subclass 06 SATA、prog-if 01 AHCI。
+; 比 class 而不比 vendor/device：VBox 的 AHCI 是 8086:2829，换一台机器就不一样，
+; 而 class code 跟的是规范。
+run_ahci_probe:
+    xor r12, r12
+.dev:
+    cmp r12, 32
+    jae .none
+    mov edi, r12d
+    shl edi, 11
+    or edi, 0x08
+    call pci_read
+    mov r13d, eax
+    shr r13d, 8
+    cmp r13d, 0x010601
+    je .found
+    inc r12
+    jmp .dev
+.found:
+    ; 先把 PCI 命令寄存器的 Memory Space（bit 1）与 Bus Master（bit 2）置上。
+    ; 这一步在规范里是「设备能不能被访问」的开关，而不是优化 —— 不置的时候 MMIO
+    ; 那一片读回来的是总线上的别的东西，而它会有结构、会变、写入还能读回来，
+    ; 于是看起来像一个活着的控制器。这一条假设是照着已经读到的三个怪现象立的：
+    ; PxSIG 是零、PxIS 写 0xFFFFFFFF 就读回 0xFFFFFFFF、CAP 两次不同。
+    mov edi, r12d
+    shl edi, 11
+    or edi, 0x04
+    call pci_read
+    mov [pci_cmd_before], rax
+    mov esi, eax
+    or esi, 6
+    mov edi, r12d
+    shl edi, 11
+    or edi, 0x04
+    call pci_write
+    mov edi, r12d
+    shl edi, 11
+    or edi, 0x04
+    call pci_read
+    mov [pci_cmd], rax
+    mov rsi, line_ahci_pcicmd
+    call puts64
+    mov rax, [pci_cmd_before]
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, [pci_cmd]
+    call put_hex64
+    call put_nl64
+    mov edi, r12d
+    shl edi, 11
+    or edi, 0x24                   ; BAR5：AHCI 的 ABAR
+    call pci_read
+    and eax, 0xFFFFFFF0            ; 低四位是标志位，ABAR 按 4 KB 对齐
+    mov [ahci_abar], rax
+    mov rsi, line_ahci_found
+    call puts64
+    mov rax, r12
+    call put_num64
+    mov al, ' '
+    call putc64
+    mov rax, [ahci_abar]
+    call put_hex64
+    call put_nl64
+    ; 映上去，再读 CAP 与 PI。读了它们，才说明那一片真的能当内存用 ——
+    ; 「BAR 报了一个数」与「那个数指的地址读得通」是两件事。
+    mov rdi, [ahci_abar]
+    call map_page_2m
+    mov r13, rax
+    mov eax, [r13]                 ; CAP：能力位，低五位是命令槽数减一
+    mov [ahci_cap], rax
+    ; GHC.AE（bit 31）：AHCI 规范要求驱动先把这一位置上，MMIO 那一片才算启用。
+    ; 置之前读 PI 得到的是一个零 —— 而那个零有两种解释：「一个 port 都没接东西」
+    ; 与「控制器还没被启用」，两种在串口上一模一样。
+    mov eax, [r13 + 4]
+    mov [ahci_ghc_before], rax
+    or eax, 0x80000000
+    mov [r13 + 4], eax
+    mov eax, [r13 + 4]
+    mov [ahci_ghc], rax
+    mov eax, [r13 + 0x0C]          ; PI：哪些 port 上接了东西，一位一个 port
+    mov [ahci_pi], rax
+    ; PxSSTS：port 0 的状态。低四位是设备检测（三表示有设备且通信已建立），
+    ; 它比 PI 更细 —— PI 说「这个 port 属于这个控制器」，SSTS 说「这里真的有东西」。
+    mov eax, [r13 + 0x100 + 0x28]
+    mov [ahci_ssts], rax
+    mov rsi, line_ahci_cap
+    call puts64
+    mov rax, [ahci_cap]
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, [ahci_pi]
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, [ahci_ssts]
+    call put_hex64
+    call put_nl64
+    ; 启用的前后各一个 GHC：AE 真的写进去了才叫启用
+    mov rsi, line_ahci_ghc
+    call puts64
+    mov rax, [ahci_ghc_before]
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, [ahci_ghc]
+    call put_hex64
+    call put_nl64
+    ret
+.none:
+    mov rsi, line_ahci_none
+    call puts64
+    ret
+
+; ======================================================================
+; AHCI 的第一条命令：IDENTIFY DEVICE
+; ======================================================================
+;
+; 盘健康那五个探测在 IDE 那条路上全回一页零。AHCI 这一侧现在已经证明三件事：控制器在
+; 13 号槽、ABAR 是 0xF0804000、那一片映射好之后 CAP 与 GHC 都读得出来（置 AE 位能写进去
+; 再读回来）。剩下的就是「发一条命令，让盘自己说话」。
+;
+; PI 与 PxSSTS 报出来都是零，而 VBox 的日志说 port 0 上有一块盘
+; （AHCI: LUN#0: disk, total number of sectors 2048）。这两件事不矛盾：VBox 在驱动
+; 初始化之前不填 PI。所以这一块不按 PI 枚举 port —— 直接对 port 0 做初始化，而它到底
+; 有没有东西，由 PxSIG 与 IDENTIFY 的成败回答。
+;
+; 四个缓冲区，其中三个有对齐要求（规范定的，不是偏好）：
+;   命令列表 1 KB，1024 字节对齐；FIS 接收区 256 字节；命令表 128 字节。
+; alloc64 只保证 16 字节，所以分配之后自己往上取整 —— 取整，而不是希望它刚好对齐。
+run_ahci_identify:
+    mov rax, 2048
+    call alloc64
+    add rax, 1023
+    and rax, -1024                 ; 命令列表要 1024 字节对齐，而 alloc64 只保证 16
+    mov [ahci_cmdlist], rax
+    mov rdi, rax
+    mov rcx, 1024
+    xor eax, eax
+    rep stosb
+    mov rax, 512
+    call alloc64
+    add rax, 255
+    and rax, -256
+    mov [ahci_fis], rax
+    mov rdi, rax
+    mov rcx, 256
+    xor eax, eax
+    rep stosb
+    mov rax, 512
+    call alloc64
+    add rax, 127
+    and rax, -128
+    mov [ahci_cmdtbl], rax
+    mov rdi, rax
+    mov rcx, 512
+    xor eax, eax
+    rep stosb
+    mov rax, 512
+    call alloc64
+    mov [ahci_idbuf], rax
+    mov rdi, rax
+    mov rcx, 512
+    xor eax, eax
+    rep stosb
+    ; 只置 AE，不发起 HBA reset。
+    ;
+    ; 规范里 AE 之后要一次 HR 才算切到 AHCI 模式，而这一台机器上 HR 写进去之后
+    ; 一直不清零：写之前 GHC 是 0x80008E00（HR=0），写之后是 0x80000001（HR=1），
+    ; 而它再也不回来了。而 HR 期间访问 port 寄存器是非法的 —— 于是 PI 与整片 port 区
+    ; 读出来都是零。这一条把之前几轮的读数解释干净了：「控制器说没有设备」与
+    ; 「控制器还在复位里」在串口上一模一样。
+    ;
+    ; 所以这一版不发 HR：它需要更长的等待，或者根本不该由这一层发起（BIOS 已经做过
+    ; 一次，VBox 的日志里是 Reset the HBA）。这件事记在 design/AHCI.txt 里。
+    mov r13, [ahci_abar]
+    mov eax, [r13 + 4]
+    or eax, 0x80000000
+    mov [r13 + 4], eax
+    mov eax, [r13 + 4]
+    mov [ahci_ghc], rax
+    mov eax, [r13 + 0x0C]
+    mov [ahci_pi], rax
+    mov rsi, line_ahci_pi2
+    call puts64
+    mov rax, [ahci_pi]
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, [ahci_ghc]
+    call put_hex64
+    call put_nl64
+    ; 六个 BAR 全报一遍。AHCI 规范把 ABAR 放在 BAR5，而 VS 读成零说明那一片
+    ; 不是 AHCI 的寄存器组 —— 那就先把「VBox 把这个控制器放在哪些 BAR 上」看清楚，
+    ; 再谈偏移。一次六个数比继续猜便宜。
+    mov qword [ahci_cap], 0
+.bar_loop:
+    mov rax, [ahci_cap]
+    cmp rax, 6
+    jae .bar_done
+    mov edi, 13
+    shl edi, 11
+    add edi, 0x10
+    lea eax, [rax * 4]
+    add edi, eax
+    call pci_read
+    mov [ahci_tfd], rax
+    mov rsi, line_ahci_bar
+    call puts64
+    mov rax, [ahci_tfd]
+    call put_hex64
+    call put_nl64
+    inc qword [ahci_cap]
+    jmp .bar_loop
+.bar_done:
+    ; port 0 的寄存器从 ABAR + 0x100 起
+    mov r13, [ahci_abar]
+    add r13, 0x100
+    mov [ahci_port], r13
+    ; 先停：清 ST，再等 CR 真的落下 —— 控制器跑着的时候改 CLB 是未定义行为
+    mov eax, [r13 + 0x18]
+    and eax, -2
+    mov [r13 + 0x18], eax
+.wait_cr:
+    mov eax, [r13 + 0x18]
+    test eax, 0x8000
+    jnz .wait_cr
+    ; 四个基址：命令列表与 FIS 接收区。高 32 位都写零 —— 缓冲区都在 4 MB 起，
+    ; 物理地址不到 4 GB，所以高位真的没有东西可写。
+    mov rax, [ahci_cmdlist]
+    mov [r13 + 0x00], eax
+    mov dword [r13 + 0x04], 0
+    mov rax, [ahci_fis]
+    mov [r13 + 0x08], eax
+    mov dword [r13 + 0x0C], 0
+    ; FIS 接收使能，再让命令处理跑起来。分两次写：规范要求 FRE 先于 ST。
+    mov eax, [r13 + 0x18]
+    or eax, 0x10
+    mov [r13 + 0x18], eax
+    mov eax, [r13 + 0x18]
+    or eax, 1
+    mov [r13 + 0x18], eax
+    ; COMRESET。VBox 的日志说得很清楚：BIOS 通过 AHCI 认出了 port 0 上的盘
+    ; （AHCI 0-P#0: 0x800 sectors），随后自己 Reset the HBA —— 于是 port 的状态归零，
+    ; 而 SSTS 与 PxSIG 都读成零。真实驱动在这种时候要主动把 PHY 重跑一遍：
+    ; PxSCTL 的 DET（bits 3:0）写 1，等它自己回 0，再看 PxSSTS 的 DET 是否变成 3。
+    ; 「控制器说没设备」与「PHY 还没握手」在读数上一模一样，区别只在于有没有重跑过。
+    mov eax, [r13 + 0x2C]
+    and eax, 0xFFFFFFF0
+    or eax, 1
+    mov [r13 + 0x2C], eax
+    mov rcx, 10000000
+.com_wait:
+    mov eax, [r13 + 0x2C]
+    and eax, 0xF
+    jz .com_done
+    dec rcx
+    jnz .com_wait
+.com_done:
+    mov rcx, 100000000
+.det_wait:
+    mov eax, [r13 + 0x28]
+    and eax, 0xF
+    cmp eax, 3
+    je .det_ok
+    dec rcx
+    jnz .det_wait
+.det_ok:
+    ; 置 ST 之后再读一次这两样：probe 那一次是在 ST 之前读的，那时 SSTS 是零
+    ; 只说明「控制器还没开始处理这一条 port」，与「这条线没东西」不是一回事。
+    mov eax, [r13 + 0x24]
+    mov [ahci_sig], rax
+    mov eax, [r13 + 0x28]
+    mov [ahci_ssts], rax
+    ; PxSIG：ATA 盘应当是 0x101。它不是零，就说明这个 port 后面真的有东西，
+    ; 而这一读数与 PI 那个零不冲突 —— 一个说「控制器认领了哪些 port」，
+    ; 一个说「这一条线上握手了没有」。
+    mov eax, [r13 + 0x24]
+    mov [ahci_sig], rax
+    ; 命令头（32 字节一条）：CFL 是 5 个 dword 的 FIS，一条 PRDT 表项
+    mov rbx, [ahci_cmdlist]
+    mov dword [rbx + 0], 5
+    mov dword [rbx + 4], 1
+    mov rax, [ahci_cmdtbl]
+    mov [rbx + 8], eax
+    mov dword [rbx + 12], 0
+    ; 命令表：CFIS 在偏移 0，PRDT 在偏移 0x80
+    mov rbx, [ahci_cmdtbl]
+    mov byte [rbx + 0], 0x27       ; H2D Register FIS
+    mov byte [rbx + 1], 0x80       ; C = 1：这一条是命令，不是控制
+    mov byte [rbx + 2], 0xEC       ; IDENTIFY DEVICE
+    mov rax, [ahci_idbuf]
+    mov [rbx + 0x80], eax          ; PRDT 的数据基址
+    mov dword [rbx + 0x84], 0
+    mov dword [rbx + 0x8C], 511    ; DBC = 512 - 1，少一才是字节数
+    ; 发命令：先清 PxIS，再置 PxCI 的槽 0
+    mov r13, [ahci_port]
+    mov dword [r13 + 0x10], 0xFFFFFFFF
+    mov dword [r13 + 0x38], 1
+    mov rcx, 50000000
+.wait:
+    mov eax, [r13 + 0x38]
+    test eax, 1
+    jz .issued
+    dec rcx
+    jnz .wait
+    ; 超时也要留下证据。「命令没完成」有四种样子，而四种要改的地方完全不同：
+    ;   PxCMD 的 ST 位没置上 —— 写没生效（或者控制器不接受这一次写）
+    ;   PxIS 报了某一位 —— 命令被拒，理由写在状态里
+    ;   PxTFD 的 ERR 位 —— 命令执行了而盘回了错
+    ;   三个都是零而 CI 仍是一 —— 命令根本没被取走，问题在命令列表或命令表那一侧
+    mov rsi, line_ahci_timeout
+    call puts64
+    mov eax, [r13 + 0x18]
+    mov [ahci_pxcmd], rax
+    mov eax, [r13 + 0x10]
+    mov [ahci_pxis], rax
+    mov eax, [r13 + 0x20]
+    mov [ahci_tfd], rax
+    mov rsi, line_ahci_stuck
+    call puts64
+    mov rax, [ahci_sig]
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, [ahci_pxcmd]
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, [ahci_pxis]
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, [ahci_tfd]
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, [ahci_ssts]
+    call put_hex64
+    call put_nl64
+    ret
+.issued:
+    mov eax, [r13 + 0x20]          ; PxTFD：bit 0 是 ERR、bit 6 是 DRDY
+    mov [ahci_tfd], rax
+    mov rsi, line_ahci_sig
+    call puts64
+    mov rax, [ahci_sig]
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, [ahci_tfd]
+    call put_hex64
+    call put_nl64
+    ; 型号在 IDENTIFY 的 word 27 到 46，每个 word 是大端（高字节在前）——
+    ; 而这一台是小端机，所以两个字节要换一下位置，否则打出来是倒着的。
+    mov rsi, [ahci_idbuf]
+    add rsi, 54                    ; 27 * 2
+    lea rdi, [ahci_model]
+    mov rcx, 20
+.model_loop:
+    mov ax, [rsi]
+    xchg al, ah
+    mov [rdi], al
+    inc rdi
+    mov [rdi], ah
+    inc rdi
+    add rsi, 2
+    dec rcx
+    jnz .model_loop
+    mov byte [rdi], 0
+    mov rsi, line_ahci_model
+    call puts64
+    lea rsi, [ahci_model]
+    call puts64
+    jmp put_nl64
 
 ; ======================================================================
 ; 家庭组的第二步：边界是一个可以比较的数
@@ -6506,6 +6961,39 @@ line_share_first: db "Yunooka: share once", 13, 10, 0
 line_share_again: db "Yunooka: share twice", 13, 10, 0
 line_share_failed: db "Yunooka: share failed", 13, 10, 0
 line_pci: db "Yunooka: pci dev ", 0
+; AHCI 那一条：找到控制器只证明「那条路在」，ABAR 的地址才说明后面能不能走。
+ahci_abar: dq 0
+ahci_cap: dq 0
+ahci_pi: dq 0
+ahci_ssts: dq 0
+ahci_ghc: dq 0
+ahci_ghc_before: dq 0
+; IDENTIFY 那一条的四个缓冲区与三个读数
+ahci_cmdlist: dq 0
+ahci_fis: dq 0
+ahci_cmdtbl: dq 0
+ahci_idbuf: dq 0
+ahci_port: dq 0
+ahci_sig: dq 0
+ahci_tfd: dq 0
+ahci_model: times 48 db 0
+ahci_pxcmd: dq 0
+ahci_pxis: dq 0
+line_ahci_sig: db "Yunooka: ahci sig ", 0
+line_ahci_model: db "Yunooka: ahci model ", 0
+line_ahci_timeout: db "Yunooka: ahci timeout", 13, 10, 0
+line_ahci_stuck: db "Yunooka: ahci stuck ", 0
+line_ahci_pcicmd: db "Yunooka: ahci pcicmd ", 0
+line_ahci_pi2: db "Yunooka: ahci pi2 ", 0
+line_ahci_regs: db "Yunooka: ahci regs ", 0
+line_ahci_bar: db "Yunooka: ahci bar ", 0
+pci_cmd_before: dq 0
+pci_cmd: dq 0
+pd_pool: dq 0x4000
+line_ahci_found: db "Yunooka: ahci dev ", 0
+line_ahci_cap: db "Yunooka: ahci cap ", 0
+line_ahci_ghc: db "Yunooka: ahci ghc ", 0
+line_ahci_none: db "Yunooka: ahci none", 13, 10, 0
 line_home: db "Yunooka: home ", 0
 line_home_beta: db "Yunooka: beta ", 0
 line_family: db "family", 13, 10, 0

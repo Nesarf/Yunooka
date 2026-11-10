@@ -292,6 +292,41 @@ try {
   fs.closeSync(二fd);
 }
 
+// ---- 二·七、SATA（AHCI）----
+//
+// 盘健康那一条要一条不是 0x1F* 的通道，而控制器与盘都是配置：控制器是 storagectl，
+// 盘是一块 1 MB 的 RAW。两样都只在缺的时候造与挂 —— 造盘会注册一个 UUID，重建会让
+// 登记里那份失效（信箱那块踩过一次）。
+//
+// 这一块与别的挂载有一处不同：SATA 的槽位名是 SATA-0-0，而控制器本身也要先存在。
+// 所以顺序是「控制器、再盘」，中间重新读一次机器信息 —— 用加控制器之前读到的那份
+// 去找 SATA-0-0，会永远找不着，而症状是「挂不上」而不是「控制器没加」。
+//
+// 盘挂 port 0，引导链完全不经过它：引导盘还在 IDE 上。所以这一块的失败不该影响
+// 任何别的判据，只是 AHCI 那几行会变成 none。
+const 阿希 = path.join(建, "ahci.raw");
+if (!fs.existsSync(阿希)) {
+  const 造 = vbox(["createmedium", "disk", "--filename", 阿希, "--size", "1",
+    "--format", "RAW", "--variant", "Fixed"]);
+  if (造.status !== 0) 做不了("AHCI 盘造不出来：" + String(造.stderr || "").slice(0, 200));
+}
+const 机器信息3 = String(vbox(["showvminfo", 机名, "--machinereadable"]).stdout || "");
+// 键名不带引号（storagecontrollername1="SATA"），而槽位名带（"SATA-0-0"=...）——
+// 这两处的形状不一样，第一次写成带引号的版本，于是它认为控制器不存在、又去加一次，
+// 而 VBox 拒绝重名的控制器，整个 run 在准备阶段就退出了（退出码 2）。
+if (!/storagecontrollername\d+="SATA"/.test(机器信息3)) {
+  const 加 = vbox(["storagectl", 机名, "--name", "SATA", "--add", "sata",
+    "--controller", "IntelAhci", "--portcount", "2", "--bootable", "off"]);
+  if (加.status !== 0) 做不了("SATA 控制器加不上：" + String(加.stderr || "").slice(0, 200));
+}
+const 机器信息4 = String(vbox(["showvminfo", 机名, "--machinereadable"]).stdout || "");
+const 阿槽 = /"SATA-0-0"="([^"]*)"/.exec(机器信息4);
+if (!阿槽 || 阿槽[1] === "none") {
+  const 挂 = vbox(["storageattach", 机名, "--storagectl", "SATA", "--port", "0", "--device", "0",
+    "--type", "hdd", "--medium", 阿希, "--mtype", "normal"]);
+  if (挂.status !== 0) 做不了("AHCI 盘挂不上去：" + String(挂.stderr || "").slice(0, 200));
+}
+
 // ---- 三、跑 ----
 const 起 = vbox(["startvm", 机名, "--type", "headless"]);
 if (起.status !== 0) 做不了("起不来：" + String(起.stderr || "").slice(0, 200));

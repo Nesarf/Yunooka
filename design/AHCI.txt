@@ -1,0 +1,87 @@
+AHCI：一条 MMIO 的通道，走到 port 那一片就停住了
+
+一、为什么要换这条路
+
+盘健康那五个探测（IDENTIFY、SMART、DEV 位、DRDY、400ns 延迟）在 IDE 的 PIIX4 上
+全部回一页零。那不是命令写错，是那块实现不答这两条。所以出路只有换一条通道：
+SATA/AHCI。它的寄存器在 MMIO 那一片，不在 0x1F0 到 0x1F7 这几个端口上。
+设计在 design/KOHANE.txt 第五层，账在 design/PLAN.json 的 disk-health 那一条。
+
+二、已经成立的事（五件，都有串口读数撑着）
+
+一、控制器在 PCI 上。0 号总线的 13 号槽，vendor:device 是 8086:2829。
+    按 class code 0x010601（大容量存储 / SATA / AHCI）找的，不按 vendor 比 ——
+    class 跟的是规范，换一台机器也一样。
+
+二、它的六个 BAR 看清楚了。BAR0 到 BAR4 是 I/O 端口（0xD041、0xD049、0xD051、
+    0xD059、0xD061），BAR5 是内存 BAR，值 0xF0804000。规范说 ABAR 在 BAR5，
+    所以这个数是 ABAR，不是猜的。
+
+三、0xF0804000 那一片进得了页表。页表原先只映前 1 GB（PML4 0x1000、PDPT 0x2000、
+    PD 0x3000），而 0xF0804000 落在 PDPT[3]，那一项是空的。map_page_2m 从 0x4000
+    起的池里取一页做 PD，把那个 2 MB 页映上去。这是这台机器第一次映一 GB 之外的
+    物理地址，而它现在是一个普通函数。
+
+四、PCI 命令寄存器本来就是开的。Memory Space（bit 1）与 Bus Master（bit 2）都在，
+    0x100007 读写一致。这一条排除了一个很容易被当成原因的假设。
+
+五、GHC.AE 置得上，也读得回来。写之前 GHC 是 0x8E00，写之后 0x80008E00。
+
+三、已经排除的六条
+
+一、PCI 命令寄存器没开 —— 见上，本来就开着。
+二、按 PI 枚举 port 这条路 —— PI 读出来是零，而 VBox 的日志说 port 0 有盘。
+    所以这一版直接对 port 0 做初始化，不按 PI 走。
+三、COMRESET —— PxSCTL.DET 写 1，等它回 0，再等 PxSSTS.DET 变成 3。没有变。
+四、HBA Reset —— 这一条最值得记：写了 HR 之后它一直不清零（GHC 从 0x80008E00
+    变成 0x80000001，然后停在那里）。而 HR 期间访问 port 寄存器是非法的，
+    于是不该在复位没完成时做后面的任何事。现在这一版不发 HR，把这一条记成
+    「没做成的事」而不是「试过没用」。
+五、AE 与 HR 的顺序 —— AE、HR、再置 AE，三种顺序都走过，PI 仍是零。
+六、port 区是不是地址算错 —— port 1 的 PxCMD 读出来是零，而 port 0 的是自己写进去的
+    0x11。两个 port 是两个不同的地方，所以地址算术没有错位。
+
+四、现在卡在哪（读数的原样）
+
+  ahci pcicmd 0x100007 0x100007        命令寄存器开着，读写一致
+  ahci dev 13 0xF0804000               13 号槽，ABAR 是它
+  ahci cap 0x18920F 0 0                CAP 读得出来，但 shape 可疑（见下）
+  ahci ghc 0x8E00 0x80008E00           AE 置得上
+  ahci pi2 0 0x80000000                HR 退出去之后：PI 仍是零，AE 还在
+  ahci bar 0xD041 ... 0xF0804000       六个 BAR
+  ahci timeout                         命令发出去，PxCI 的槽 0 一直不清
+  ahci stuck 0 0x11 0xFFFFFFFF 0 0     sig、PxCMD、PxIS、PxTFD、PxSSTS
+
+三个数合起来指向同一件事：port 那一片不是活的。
+  PxSIG 是零（ATA 盘应当是 0x101）；
+  PxIS 写 0xFFFFFFFF 就读回 0xFFFFFFFF（它是 RW1C，本来就该读回零）；
+  PxSSTS 是零（DET 应当是 3）。
+
+而 CAP 与 GHC 读得出东西。CAP 是 0x18920F —— 按规范解读，bits 4:0 是 NCS，
+所以 NCS 是 0x0F（16 个命令槽）。VBox 的实现通常是 32 个槽，所以这个值可疑。
+IS（偏移 8）、VS（偏移 0x10）、CAP2（偏移 0x24）三个都读成零，而 VS 是这个怀疑
+最硬的一条：AHCI 1.0 的版本寄存器是 0x00010000，任何真实现都不会给零。
+
+所以现在最可能的解释是两条之一：
+  A、ABAR 那一片是 VBox 的设备模型给的，而 port 侧没有被激活（控制器停在
+     IDE 兼容模式，CAP 的 bit 18 SAM 是零，也不否认这一点）；
+  B、0xF0804000 上的东西根本不是 AHCI 的寄存器组 —— CAP 与 GHC 那两个读数
+     来自别的什么，写 AE 能读回来只是因为那里可写。
+
+五、下一步的三条候选（按便宜到贵）
+
+一、换芯片组。这台 VM 是 piix3（showvminfo 里 chipset="piix3"），而它报的
+    AHCI 是 ICH9 的 8086:2829 —— 一个 ICH9 的控制器住在 i440fx 上，这组合本身
+    就不像被完整验过的。VBoxManage modifyvm Yunooka --chipset ich9 可以换，
+    代价是引导链要重测一遍（那是这台机器上最贵的一条路，所以要放在最后）。
+二、在 ICH9 之前先读清楚 GHC 的其它位与 CAP 的 SAM 位，看控制器自己说不说自己
+    在 IDE 兼容模式；以及读 BOHC（偏移 0x28）看 BIOS 交接状态。
+三、给 SATA 控制器换一个类型（--controller ICH6 之类），看 port 侧是否就活了。
+    这一条最便宜，因为它不动芯片组、不动引导链。
+
+六、这一块留下的两样东西
+
+map_page_2m 是通用的：任何一 GB 之外的物理地址都能用它映进来。它不属于 AHCI，
+下一次要用 MMIO 的东西（网卡、显示、别的 PCI 设备）都会用到它。
+
+pci_write 也是通用的，在那之前这一份文件里只有 pci_read。
