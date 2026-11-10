@@ -70,6 +70,7 @@ const 全程 = [
   "Yunooka: pixel ",
   "Yunooka: line ",
   "Yunooka: calc ready",
+  "Yunooka: scan eicar -> FOUND",
   "Yunooka: shell> ",
   "Yunooka: repl> ",
   "Yunooka: math> average -> ",
@@ -534,12 +535,20 @@ const 线成 = 线行 !== null && 线行[1] === "000000000000002F"
 // 求值的结果 —— 少一样（解析、加法、打印）都给不出来。名字那半（=x）还没通，见下面那一行注释。
 const 算行 = /Yunooka: calc ready[\s\S]*?=([0-9.]+)/.exec(读到);
 const 算成 = 算行 !== null && 算行[1] === "2.000000";
+// 签名匹配：一条规则、两个文件。两条判据都要 —— 一个永远报 FOUND 的实现过第一条，
+// 一个永远报 clean 的过第二条，只有两条一起才分得开口。
+const 扫行 = /Yunooka: scan eicar -> FOUND/.test(读到);
+const 净行 = /Yunooka: scan clean -> clean/.test(读到);
+const 扫成 = 扫行 && 净行;
 // 写：造一个不存在的名字、写一段只有这里才有的字节、再按路径打开它。
 // 判据是那段内容本身 —— 而且 files 的列表里也要多出这个名字，因为「目录里多了一条」
 // 与「数据落对了地方」是两件事，两件都得成立。
 const 写行 = /Yunooka: wrote -> (.+)/.exec(读到);
+// 判据要求那一段内容本身，以及 files 的列表里多出这个名字。
+// 列表那一半不能用写死的全名串：盘上每加一个文件它就会红一次，而红的理由与「写」无关。
+// 这里只要求「以 hello.txt docs 开头的那一行里出现 new.txt」。
 const 写成 = 写行 !== null && 写行[1].trim() === "Yunooka wrote this"
-  && /hello\.txt docs cmd\.txt repl\.txt math\.txt prog\.hmtn new\.txt/.test(读到);
+  && /hello\.txt docs[^\r\n]*new\.txt/.test(读到);
 // 家庭组第一步：共享是目录条目上的一个位。走两遍，两遍都只该有一条 ——
 // 「往清单里加一条」的实现走两遍会出现两个 docs，而那样第一次也是对的。
 const 共集 = [...读到.matchAll(/Yunooka: shares ([^\r\n]*)/g)].map((m) => m[1].trim());
@@ -694,6 +703,9 @@ console.log("画线      " + (线行 ? "线上两点 " + 线行[1].slice(-2) + "
 console.log("算数      " + (算行 ? "1+1 = " + 算行[1] : "(没跑到)")
   + (算成 ? "  —— 两级求值走通了：解析、f64 加、六位小数打印"
     : "  —— 不对：应当是 2.000000"));
+console.log("扫描      " + (扫行 ? "eicar -> FOUND" : "(没命中)") + "  " + (净行 ? "clean -> clean" : "(误报)")
+  + (扫成 ? "  —— 一条规则、两个文件：命中的是真命中，没命中的没误报"
+    : "  —— 不对：应当命中 eicar、放过 clean"));
 console.log("壳        " + (壳行 ? "shell> files" : "(没跑到)")
   + (列行 ? "  → " + 列行[0] : "  → (没列出来)")
   + (壳成 ? "  —— 那一行认得出来、回答得出（来源见上一行）"
@@ -750,6 +762,7 @@ const 结构成 = 有种子
     && 像成
     && 线成
     && 算成
+    && 扫成
     && 壳成
     && 重求成
     && 除成

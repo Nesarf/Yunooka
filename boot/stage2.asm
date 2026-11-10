@@ -44,21 +44,21 @@ stage2:
     ; 种子读到 0x20000 起，不是 0x8000 —— 第二段自己被加载在 0x7E00，32 扇区就是
     ; 16 KB，铺到 0xBE00，而 0x8000 起的种子会把它覆盖成零。0x20000 在实模式 1 MB
     ; 之内，离得够远。
-    mov dword [dap_lba], 35       ; 第 35 个扇区：引导 1 + 第二段 33
+    mov dword [dap_lba], 36       ; 第 35 个扇区：引导 1 + 第二段 33
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x2000
     mov word [dap_count], 64
     call read_batch
     jc .seed_fail
 
-    mov dword [dap_lba], 35 + 64
+    mov dword [dap_lba], 36 + 64
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x2800
     mov word [dap_count], 64
     call read_batch
     jc .seed_fail
 
-    mov dword [dap_lba], 35 + 128
+    mov dword [dap_lba], 36 + 128
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x3000
     mov word [dap_count], 18
@@ -126,7 +126,7 @@ stage2:
     mov dword [dap_lba], 1024
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x4000
-    mov word [dap_count], 12
+    mov word [dap_count], 13
     call read_batch
     jnc .fs_ready
     mov si, line_fs_preread
@@ -613,6 +613,7 @@ long_entry:
     call run_pixel_test
     call run_line_test
     call run_calc_live
+    call run_scan_test
     call run_pci_scan
     call run_shell
     call run_repl
@@ -2934,7 +2935,7 @@ run_ata_test:
     mov rax, 512
     call alloc64
     mov [ata_buf], rax            ; 缓冲区地址要留住：ata_read 会把 rax 用掉
-    mov rdi, 35                   ; 种子在盘上的第一个扇区：引导 1 + 第二段 33
+    mov rdi, 36                   ; 种子在盘上的第一个扇区：引导 1 + 第二段 33
     mov rsi, rax
     call ata_read
     jc ata_fail
@@ -4219,6 +4220,99 @@ run_calc_live:
     call puts64
     ret
 
+; ======================================================================
+; 签名匹配：Nanodesu 与 Torikago 的第一件事
+; ======================================================================
+;
+; 设计在 design/SIGNATURE.txt。本机有四件现成的素材（ClamAV 1.5.4 与它 108 MB 的库、
+; YARA 4.5.5、YARA-X 1.21.0、Torikago），而它们的库是 .cvd/.cld —— 压缩包，读不了；
+; 能直接进来的是文本形态的签名。
+;
+; 所以第一批素材用 EICAR：一段公开的、专为测杀毒软件而造的字符串。它不是恶意代码，
+; 而是一段打印得出来、命不命中当场看得见的串。用它当素材的理由不是简单，是合法且可核对 ——
+; 不需要从任何一个病毒库里搬真东西进这台机器。
+;
+; 「训练」这个词在这里要读准：ClamAV 的库是签名，YARA 的规则是文本，两者都是数据加匹配，
+; 不是梯度下降。所以这一层做的是「照着签名的形状比字节」，做对了之后换成谁的库都只是换数据。
+;
+; 这一版只做一条规则、一个固定串、子串搜索（不是固定偏移）：ClamAV 的 ndb 允许用 * 表示
+; 任意偏移，那是通配而不是数值，而通配是下一条的事。
+;
+; rdi = 内容，rcx = 长度。出 rax = 1 命中。
+scan_eicar:
+    mov r8, eicar_len
+    cmp rcx, r8
+    jb .no
+    sub rcx, r8                    ; 最后一个还放得下的起点
+    xor r9, r9
+.outer:
+    cmp r9, rcx
+    ja .no
+    xor r10, r10
+.inner:
+    cmp r10, r8
+    jae .yes
+    mov r11, r9
+    add r11, r10                   ; 不能直接 inc r9：失配时要回到起点加一
+    mov al, [rdi + r11]
+    cmp al, [eicar_sig + r10]
+    jne .next
+    inc r10
+    jmp .inner
+.next:
+    inc r9
+    jmp .outer
+.yes:
+    mov rax, 1
+    ret
+.no:
+    xor eax, eax
+    ret
+
+; 扫两个文件：一个含那个串、一个不含。两条判据都要 —— 一个永远报 FOUND 的实现过第一条，
+; 一个永远报 clean 的过第二条，只有两条一起才分得开口。
+run_scan_test:
+    mov rdi, fs_eicar_path
+    call fs_open_path
+    test rax, rax
+    jz .no_eicar
+    mov rdi, [last_addr]
+    mov rcx, rbx
+    call scan_eicar
+    test rax, rax
+    jz .missed
+    mov rsi, line_scan_found
+    call puts64
+    jmp .clean_one
+.missed:
+    mov rsi, line_scan_missed
+    call puts64
+.clean_one:
+    mov rdi, fs_clean_path
+    call fs_open_path
+    test rax, rax
+    jz .no_clean
+    mov rdi, [last_addr]
+    mov rcx, rbx
+    call scan_eicar
+    test rax, rax
+    jnz .false_pos
+    mov rsi, line_scan_clean
+    call puts64
+    ret
+.false_pos:
+    mov rsi, line_scan_false
+    call puts64
+    ret
+.no_eicar:
+    mov rsi, line_scan_nofile
+    call puts64
+    ret
+.no_clean:
+    mov rsi, line_scan_nofile
+    call puts64
+    ret
+
 ; 打一串 UTF-16 码元，只取低字节。这一版的名字都是 ASCII，够用；非 ASCII 的名字会
 ; 在这里变成别的字节，而那是「打印」这一层的限制，不是名字本身的。
 put_utf16_ascii:
@@ -4806,6 +4900,18 @@ line_line: db "Yunooka: line ", 0
 line_calc_ready: db "Yunooka: calc ready", 13, 10, 0
 line_calc_arrow: db "=", 0
 line_calc_timeout: db "Yunooka: no line", 13, 10, 0
+; 签名匹配那几样。EICAR 是公开的测试串，写在这里是为了让「一条规则」有具体的形状。
+eicar_sig: db 'X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*'
+eicar_len equ $ - eicar_sig
+fs_eicar_path: dw 0x03B1, 0x003A, 0x002F, 0x0065, 0x0069, 0x0063, 0x0061, 0x0072
+               dw 0x002E, 0x0074, 0x0078, 0x0074, 0
+fs_clean_path: dw 0x03B1, 0x003A, 0x002F, 0x0063, 0x006C, 0x0065, 0x0061, 0x006E
+               dw 0x002E, 0x0074, 0x0078, 0x0074, 0
+line_scan_found: db "Yunooka: scan eicar -> FOUND", 13, 10, 0
+line_scan_missed: db "Yunooka: scan eicar -> missed", 13, 10, 0
+line_scan_clean: db "Yunooka: scan clean -> clean", 13, 10, 0
+line_scan_false: db "Yunooka: scan clean -> false positive", 13, 10, 0
+line_scan_nofile: db "Yunooka: scan -> no file", 13, 10, 0
 
 ; shell 的两样：要从盘上找的文件名，与它认得的第一条命令。
 ; 命令是 ASCII（不是 UTF-16）—— 因为 cmd.txt 的内容就是 ASCII 字节，
@@ -4889,4 +4995,4 @@ seed_bytes: dd 0
 
 ; 上限 = 引导之后那一段占的字节数。它与 boot.asm 里那句 mov al、build.mjs 里的上限、
 ; 以及种子的起始扇区是同一组数 —— 四个数字一起改，少一个就会在别处报出来。
-times 17408-($-$$) db 0
+times 17920-($-$$) db 0
