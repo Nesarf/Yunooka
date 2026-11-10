@@ -3220,6 +3220,15 @@ fs_open_path:
     call fs_gate
     test al, al
     jz .miss
+    ; 把地址一起算出来交出去。
+    ;
+    ; 之前只交扇区号，而「这是哪一块盘的扇区」那件事在 .done 里被拨回了主盘 —— 调用者
+    ; 自己再调 fs_load 时，拿 α 的起点去减 β 的扇区号，借位成巨大偏移，症状是 #PF。
+    ; 这个坑踩过两次（run_fs_open4 与 run_gate_test），两次看起来都像别的问题。
+    ; 所以地址在这里算：此刻 fs_base 与 fs_start 还是那块盘的。
+    mov rdi, r15
+    call fs_load
+    mov [last_addr], rsi
     mov rax, 1
     jmp .done
 .miss:
@@ -3303,19 +3312,10 @@ run_gate_test:
     call fs_open_path
     test rax, rax
     jz .failed
-    ; fs_open_path 返回的是「那块盘的扇区号」，而它已经把 fs_base 与 fs_start 拨回了 α ——
-    ; 「哪一块盘的扇区」那件事没有跟着返回值一起交出来。所以这里要自己再拨一次。
-    ;
-    ; 这是同一个坑第二次踩（第一次在 run_fs_open4，那时的症状是 read 落在 0x40000 上算出的
-    ; 巨大偏移）。两次都说明 fs_open_path 该把地址一起交出来，而不是只交扇区号 ——
-    ; 但那要改所有调用者，所以先在这里拨，并把这件事记在 homegroup 那一条里。
-    mov qword [fs_base], 0x60000
-    mov qword [fs_start], 0
-    mov rdi, r15
-    call fs_load
+    ; 地址由 fs_open_path 一起交出来了 —— 这段拨盘的代码原来在这里，因为只交扇区号时
+    ; 调用者得自己知道「那是哪一块盘的扇区」。现在不必了，这也是那笔债还掉的样子。
+    mov rsi, [last_addr]
     mov [fs_buf], rsi
-    mov qword [fs_base], 0x40000
-    mov qword [fs_start], 1024
     mov rsi, line_gate_shared
     call puts64
     mov rsi, [fs_buf]
@@ -3356,8 +3356,7 @@ run_fs_open2:
     call fs_open_path
     test rax, rax
     jz fs_open_miss
-    mov rdi, r15
-    call fs_load
+    mov rsi, [last_addr]
     mov [fs_buf], rsi
     mov rsi, line_fs_open
     call puts64
@@ -3390,8 +3389,7 @@ run_fs_open3:
     call fs_open_path
     test rax, rax
     jz fs_open_miss
-    mov rdi, r15
-    call fs_load
+    mov rsi, [last_addr]           ; 地址由 fs_open_path 算好：它知道那一条属于哪块盘
     mov [fs_buf], rsi
     mov rsi, line_fs_open
     call puts64
@@ -3559,8 +3557,7 @@ run_fs_write:
     call fs_open_path
     test rax, rax
     jz fs_write_lost
-    mov rdi, r15
-    call fs_load
+    mov rsi, [last_addr]
     mov [fs_buf], rsi              ; 先存：下一句要拿 rsi 去打提示词
     mov rsi, line_fs_write
     call puts64
@@ -4300,6 +4297,9 @@ fs_start: dq 1024
 ; fs_lookup 命中的那一条在预读区里的地址。改共享位要用它 —— 而 lookup 本来就找到了
 ; 那一条，只是以前没把位置留下来。
 last_entry: dq 0
+; 最后一条被打开的路径的「数据在哪儿」。fs_open_path 算好它 —— 因为只有它知道
+; 那一条属于哪一块盘，而调用者知道的时候已经太晚了。
+last_addr: dq 0
 ; 列共享时用的游标：循环变量放内存，不托付给任何寄存器。
 shares_ptr: dq 0
 ; 过边界时要同时拿着两边的家 ID，而中间那两次 fs_load 会吃掉寄存器 —— 放内存。
