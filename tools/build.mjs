@@ -117,10 +117,30 @@ const 盘大小MB = (() => {
   const v = i >= 0 && i + 1 < process.argv.length ? Number(process.argv[i + 1]) : 64;
   return Number.isInteger(v) && v >= 1 ? v : 64;
 })();
-// 种子从第 34 个扇区起：引导 1 个 + 第二段 33 个。
-// 这个数与第二段的上限、boot.asm 里那句 mov al 是一组 —— 第二段变长它就要往后挪，
-// 而它的症状会是「种子魔数不对」，看起来像盘坏了。
+// 种子从第 44 个扇区起。它与下面那四个数是一组，而下面那段检查会把它们一次核完。
 const 种子偏移 = 44 * 512;
+// 「第二段多大」牵着四个数：boot.asm 里那句 mov al、这里的上限、stage2 末尾的 times、
+// 以及种子的起始扇区。少改一个的症状各不相同（编不过、盘建不起来、种子魔数不对、ata differ），
+// 而为了这一组数返工过五次，每次都像四个不同的毛病。所以在这里一次核完 ——
+// 上游的算术错误不该等到第五次 build 才被人看见。
+{
+  const 扇区数 = Math.ceil(二段.length / 512);
+  const 引导源 = fs.readFileSync(path.join("boot", "boot.asm"), "utf8");
+  const 读扇区 = /mov al,\s*(\d+)\s*;\s*stage2-sectors/.exec(引导源);
+  const 段源 = fs.readFileSync(path.join("boot", "stage2.asm"), "utf8");
+  const 种子LBA = /mov dword \[dap_lba\],\s*(\d+)\s*;/.exec(段源);
+  const 问题 = [];
+  if (!读扇区) 问题.push("boot.asm 里找不到 mov al");
+  else if (Number(读扇区[1]) < 扇区数)
+    问题.push("boot.asm 读 " + 读扇区[1] + " 个扇区，而第二段占 " + 扇区数 + " 个 —— 把它改成 " + 扇区数);
+  if (!种子LBA) 问题.push("stage2.asm 里找不到 dap_lba");
+  else if (Number(种子LBA[1]) !== 1 + 扇区数)
+    问题.push("种子应当从第 " + (1 + 扇区数) + " 个扇区起，而 dap_lba 写的是 " + 种子LBA[1]);
+  if (种子偏移 !== (1 + 扇区数) * 512)
+    问题.push("种子偏移应当是 " + ((1 + 扇区数) * 512) + "，而这里写的是 " + 种子偏移);
+  if (问题.length) 失败("第二段的四个数对不上：\n  " + 问题.join("\n  "));
+  console.log("第二段    " + 扇区数 + " 个扇区，种子从第 " + (1 + 扇区数) + " 个起 —— 四个数一致");
+}
 const 盘字节数 = 盘大小MB * 1024 * 1024;
 if (种子偏移 + 种子内容.length > 盘字节数) 失败("种子比盘还大，装不下");
 

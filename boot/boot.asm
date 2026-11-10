@@ -67,7 +67,7 @@ start:
     mov es, ax
     mov bx, 0x7E00
     mov ah, 0x02            ; 读扇区
-    mov al, 43              ; 读三十三个：第二段长过 16 KB 了，它是长出来的，不是被设计成这么大的
+    mov al, 43              ; stage2-sectors: 第二段占多少个扇区，这个数由 build 核对
     mov ch, 0               ; 柱面 0
     mov cl, 2               ; 第 2 个扇区（从 1 数）
     mov dh, 0               ; 磁头 0
