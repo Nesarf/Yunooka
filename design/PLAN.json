@@ -688,7 +688,7 @@
       "touches": [
         "README.md"
       ],
-      "notes": "清单由用户定下：Ichiwatashi（像素层与美术资源，窗口 UI 图标都从它出来）、Nanodesu 与 Torikago（安防：找可执行文件与看着它们）、Volcano-Separator（活动隔离）、Oak-Barrels（中继站）、KID（Kohane Index Desuno，索引）。共同点是都不属于应用那一层：一台没装任何应用的新机器上也要能跑起来，所以只能住在基础库里。这一条现在只是清单，一行代码都没有；每一个都要先回答同一个问题 —— 它的哪一部分必须在还没有操作系统的机器上就存在。 【移出 open】需要的条件按五件分开写，因为这一条从来不是一件事：Ichiwatashi 的像素层 —— 已经有了（pixel-layer 那条：实模式设 VGA 0x13、长模式写读 0xA0000、以及 Bresenham 画线与坐标变换）。安防那两件（Nanodesu 与 Torikago）的第一块砖也有了（signature-match：盘上规则、多行、报名字）。Volcano-Separator 的活动隔离——需要的条件是进程：它要隔开的是「正在跑的东西」，而 Yunooka 只有一个执行流。Oak-Barrels 的中继站——需要的条件是音频：它站在宿主与音频引擎之间，而这一层不存在。KID（索引）——这一件不需要任何新前提，它是五件里唯一还能直接开工的那件：扫盘、建一个名字到扇区的索引、按名字查。它没有被做，是时间而不是条件。所以它单独记在这里，条件一到它就该是下一个。结论：这一条作为整体不成立，所以移出 open；但它的五件里有两件的砖已经铺好，一件事只差时间，另外两件各等一个不存在的前提。把它写成 blocked 是为了让「还剩什么」一眼看得出来。 第六层（按魔数分析）起了一块砖：identify 认 HMYRB 魔数为包、认头 32 字节全可打印为文本。三条判据里前两条成立（hello.txt 认成 text、prog.hmtn 认成 package），而第三条 —— 一个改名成 fake.txt 的包 —— 回的是 unknown。**它没有成立，也没有被删掉。**为什么那一条最要紧：只有前两条的测试，一颗「按扩展名猜」的实现全过。所以第三条留着，而它现在红着；原因未查（最可能是 fake.txt 那个扇区写进去的字节与程序字节不一致，或者条目里的起始扇区对不上 —— 两条都能用一次读回前五个字节定位）。一条删掉关键项的判据比一条红的判据更贵：红的那条会有人来查，绿的那条不会。 【语言归属已定（用户点下）】这五件与 KID 全部要用 Himeyuri 写，不是 Yunooka 的内置功能，而是跑在它上面的包 —— 纯净的 Yunooka 原则上只认识 HMYR 写出来的东西。所以这一条的判据不是「Yunooka 里有一个叫 Nanodesu 的函数」，而是「盘上有一个 Nanodesu 的包，identify 认它为 package，而它能跑」。分层与判据写在新的 design/LAYERS.txt：引导链必须是机器码（总得有人把第一段字节放进第 0 个扇区），内核现在也是汇编而它就是要被重写的那一层，系统软件与应用全部是 HMYR，而 SDK 不在四层里（HIREN 是 Himeyuri 的 SDK，Yunooka 只负责跑 —— 所以「Yunooka 没有自己的 SDK」不是缺口）。另一条：KID 同时是 Yunooka 系统的一部分与 HIREN 里的一个成员，所以装 HIREN 前要先查 KID 在不在、在就跳过那一部分。「小心别装两遍」会忘，而「装之前查一遍」不会。"
+      "notes": "清单由用户定下：Ichiwatashi（像素层与美术资源，窗口 UI 图标都从它出来）、Nanodesu 与 Torikago（安防：找可执行文件与看着它们）、Volcano-Separator（活动隔离）、Oak-Barrels（中继站）、KID（Kohane Index Desuno，索引）。共同点是都不属于应用那一层：一台没装任何应用的新机器上也要能跑起来，所以只能住在基础库里。这一条现在只是清单，一行代码都没有；每一个都要先回答同一个问题 —— 它的哪一部分必须在还没有操作系统的机器上就存在。 【移出 open】需要的条件按五件分开写，因为这一条从来不是一件事：Ichiwatashi 的像素层 —— 已经有了（pixel-layer 那条：实模式设 VGA 0x13、长模式写读 0xA0000、以及 Bresenham 画线与坐标变换）。安防那两件（Nanodesu 与 Torikago）的第一块砖也有了（signature-match：盘上规则、多行、报名字）。Volcano-Separator 的活动隔离——需要的条件是进程：它要隔开的是「正在跑的东西」，而 Yunooka 只有一个执行流。Oak-Barrels 的中继站——需要的条件是音频：它站在宿主与音频引擎之间，而这一层不存在。KID（索引）——这一件不需要任何新前提，它是五件里唯一还能直接开工的那件：扫盘、建一个名字到扇区的索引、按名字查。它没有被做，是时间而不是条件。所以它单独记在这里，条件一到它就该是下一个。结论：这一条作为整体不成立，所以移出 open；但它的五件里有两件的砖已经铺好，一件事只差时间，另外两件各等一个不存在的前提。把它写成 blocked 是为了让「还剩什么」一眼看得出来。 第六层（按魔数分析）起了一块砖：identify 认 HMYRB 魔数为包、认头 32 字节全可打印为文本。三条判据里前两条成立（hello.txt 认成 text、prog.hmtn 认成 package），而第三条 —— 一个改名成 fake.txt 的包 —— 回的是 unknown。**它没有成立，也没有被删掉。**为什么那一条最要紧：只有前两条的测试，一颗「按扩展名猜」的实现全过。所以第三条留着，而它现在红着；原因未查（最可能是 fake.txt 那个扇区写进去的字节与程序字节不一致，或者条目里的起始扇区对不上 —— 两条都能用一次读回前五个字节定位）。一条删掉关键项的判据比一条红的判据更贵：红的那条会有人来查，绿的那条不会。 【语言归属已定（用户点下）】这五件与 KID 全部要用 Himeyuri 写，不是 Yunooka 的内置功能，而是跑在它上面的包 —— 纯净的 Yunooka 原则上只认识 HMYR 写出来的东西。所以这一条的判据不是「Yunooka 里有一个叫 Nanodesu 的函数」，而是「盘上有一个 Nanodesu 的包，identify 认它为 package，而它能跑」。分层与判据写在新的 design/LAYERS.txt：引导链必须是机器码（总得有人把第一段字节放进第 0 个扇区），内核现在也是汇编而它就是要被重写的那一层，系统软件与应用全部是 HMYR，而 SDK 不在四层里（HIREN 是 Himeyuri 的 SDK，Yunooka 只负责跑 —— 所以「Yunooka 没有自己的 SDK」不是缺口）。另一条：KID 同时是 Yunooka 系统的一部分与 HIREN 里的一个成员，所以装 HIREN 前要先查 KID 在不在、在就跳过那一部分。「小心别装两遍」会忘，而「装之前查一遍」不会。 【KID 的成员已定：KPB 进 KID】用户确认 Kohane Processing Bundle（作编混）作为 KID 的一个成员 —— 那是「已经定下来的」那一条。所以 KID 的清单现在是：索引（Kohane 那六层）、即刻文件分析、盘健康、以及 KPB。而 KPB 那一条本机也有一条独立的账（KPB: 作编混 as a sealed KID add-on），两处指的是同一件事 —— 在这一侧它是「KID 的一个成员」，在那一侧它是「那一件产品怎么封」。"
     },
     {
       "id": "browser",
@@ -853,6 +853,98 @@
         "tools/run.mjs"
       ],
       "notes": "用户点的方向：正常情况下无法更改核心运行文件；但能通过一些「繁文缛节」的方式解除保护，解除之后是类 Linux 的管理策略；运行出错或缺少文件时进入「新造界面 / 补完界面」，由系统内置的下载器从服务端取回对应文件并修补。这要求 Yunooka、Hiou Rengo、HMYR 三者的自我逻辑足够强，并且要为 LLM / API 接入做专门优化。设计在 design/GUARD.txt，四层从软到硬：只读位（已有的 bit 6）、核心清单、完整性校验、引导链那一段（第二段与种子不在文件系统里，只有校验可用）。两条设计判断值得单独记：一、保护与修复是同一件事的两面 —— 「不许改」的清单正好就是「该有什么」的清单，所以只写一份，写入时查它、启动时照它校验；两份会分家，而分家的那一天两边都说得通、结果互相矛盾。二、「繁文缛节」的力气不在保密，在留下痕迹 —— 这台机器上的密码是假的（盘可以拔下来在别处改），所以解锁的仪式应当是「读说明、答一个问题、写下理由、有期限、全程进只追加的日志」，判据不是「别人解不开」而是「解开之后查得出是谁、什么时候、为什么」。补完界面的第一版不接网络：信箱盘（主机写、客人机读）已经是一条能送文件进来的通道，先把它做成真的，再谈从远处取；内置下载器排到 browser 那一条（现在是 blocked）。LLM / API 友好具体是三件事：结构化（新写的事件行一行一事件、字段名在前、顺序固定）、可判断（每条带状态词，不让人从散文里猜）、不猜（缺的东西显式报缺，不用零代替）。自我逻辑最强的形态是自举，那与 self-host 是同一条路，顺序是：先能校验、再能修补、最后才是能重建。第一批砖四条，第一条最便宜：fs_write_file 查只读位 —— 它现在只新建、不覆盖，所以只读位挡不住任何东西，而且同名会写出第二条。"
+    },
+    {
+      "id": "onlysign",
+      "title": "OnlySign：在装载之前验签",
+      "scope": "stage",
+      "status": "open",
+      "parent": "resident",
+      "after": [
+        "filesystem"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "design/HIREN.txt",
+        "boot/stage2.asm",
+        "tools/build.mjs",
+        "tools/run.mjs"
+      ],
+      "notes": "用户点下「OnlySign 也要做到 Yunooka 的系统层里」，而 S.M.Y.T. 是签的那一侧 —— 三个仓库（Yunooka、HIREN、HMYR）未来出包时都签。分工写在 design/HIREN.txt 第四节：签名防的是**故意**（有人改了并把校验和也重算了），而 GUARD 第三层的 FNV-1a 防的是**误改**（一个字节变了就报）。两层都要，而它们回答的不是同一个问题 —— 现在只有校验和，那在有人故意改的时候是零防护。这一条现在就能做，因为它验的是「盘上那份字节」，而读盘已经有了。判据：把核心清单里某一项的 hash 保持、而盘上那份字节改掉，或者反过来，验必须红；不动则绿。还缺一个签名格式 —— 最小的形状是「一段密文 + 明文 hash」，而公钥从哪来要定（盘上、或者只在内存里）——那决定「换一块盘插过来」时验得通不通。"
+    },
+    {
+      "id": "file-formats",
+      "title": "认得 win/mac/linux/android 的程序与文件",
+      "scope": "stage",
+      "status": "open",
+      "parent": "resident",
+      "after": [
+        "filesystem"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "design/HIREN.txt",
+        "boot/stage2.asm",
+        "tools/run.mjs"
+      ],
+      "notes": "用户点下「让 win/mac/linux/android 的文件与程序在 Yunooka 里可辨认与读写」。按字面是两件（辨认、读写），而**可执行不在其中** —— 那是另一件事，贵一个数量级（要 PE 装载器与 Win32 的 API 表面）。判断写在 design/HIREN.txt 第二节。这一条比 HIREN 其余几块都便宜，因为它只把 identify 的表加长：PE（MZ 加 PE\u0000\u0000）、ELF（7F 45 4C 46）、Mach-O（FEEDFACE / FEEDFACF 一族，以及 FAT 的 CAFEBABE）、APK（PK 头加 AndroidManifest）、DEX（dex\n）。判据：给一个头，它答那个名字；而一个改名成 .txt 的 PE 仍然答 PE（「不看扩展名」那一条已经在 Kohane 第六层验过，所以这一条是它的延伸而不是重复）。它立刻能用：Nanodesu 与 Torikago 要的正是认得出、读得懂 —— 判断一个文件是什么，不需要跑它。"
+    },
+    {
+      "id": "hmyr-integration",
+      "title": "把别的语言做成 HMYR 整合包",
+      "scope": "stage",
+      "status": "blocked",
+      "parent": "resident",
+      "after": [
+        "filesystem"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "design/HIREN.txt"
+      ],
+      "notes": "C / C++ / Java / C# / Lua / Rust / Python / JavaScript / Go —— 一个语言一个包，而**包里是用 HMYR 写的那个语言的实现**（解释器或编译器）。所以 Yunooka 认识的仍然是 HMYR，那些语言是被解释的、不是被原生装载的；另一种读法（把 gcc 或 CPython 的二进制原样装进来）会破掉「纯净 Yunooka 只认识 HMYR」，而技术上也走不通 —— 那些是 ELF 或 PE，Yunooka 没有它们的装载器。用户最后那句「子语言」正指向这条路：那些语言在这里是 HMYR 的子语言，不是与它并列的东西。 【移出 open】条件：HMYR 要先能读文件、写文件（一个语言的实现要读源、要写目标），而 Yunooka 要先能跑一个「有 I/O 的包」（现在只能跑 main 返回 7）。那两件都不在本仓库里，所以这一条是 blocked。判据现在就能写：那个语言的某一个程序在这个包上跑出正确的结果 —— 写判据不需要实现。"
+    },
+    {
+      "id": "ichiwatashi-ext",
+      "title": "Ichiwatashi 的扩展件（lineweight 与画图能力）",
+      "scope": "stage",
+      "status": "blocked",
+      "parent": "resident",
+      "after": [
+        "pixel-layer"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "design/HIREN.txt",
+        "design/NAMES.txt"
+      ],
+      "notes": "三件：lineweight（线条重量，本机那一条已经做到「从能用的桥到插画级的线」）；从 SAI / PS / AI 里挑出来的能力（画笔引擎的压感与混色、图层与蒙版、矢量路径与变换）；以及把它们做成 Ichiwatashi 的扩展件。**「魔改」在这里只有一种读法成立：照着它们的能力做自己的实现**，不是改它们的二进制 —— 那在这台机器上不成立（没有它们的运行时），在别的地方也不该走。所以这一块的落法是「能力清单」而不是「产品移植」，而挑哪些能力要按「像素画工具的日常」定，不是按「那个软件有什么」定。 【移出 open】条件：HMYR 能读能写；以及 HMYR 侧的图形能力 —— 现在画线在汇编里，而它是脚手架，判据是 Kohane 第二层那四个颜色。"
+    },
+    {
+      "id": "miketsukami",
+      "title": "Miketsukami：RhinoCeros 与 Keil 的整合",
+      "scope": "stage",
+      "status": "blocked",
+      "parent": "resident",
+      "after": [
+        "filesystem"
+      ],
+      "verifiedBy": [
+        "tools/run.mjs"
+      ],
+      "touches": [
+        "design/HIREN.txt",
+        "design/NAMES.txt"
+      ],
+      "notes": "名字是用户给的。RhinoCeros 给几何（NURBS、布尔、网格），Keil 给固件工具链（编译器、链接器、调试器、烧写）。两件看起来无关，而共同点是**把一个设计变成一件实物** —— 一个给形状，一个给让它动起来的代码。所以 Miketsukami 是「造物」那一侧的软件，与 Ichiwatashi（画）和 KID（找文件）不在同一层、也不该被放进同一层。与 Ichiwatashi 那一条同理：照着能力自研，不是移植，也不是改别人的二进制。这是五条里最贵的：几何内核与编译器后端各是一个大件。 【移出 open】条件：HMYR 能读写、Yunooka 能跑有 I/O 的包，以及一个数值内核（几何那边的浮点与求交）—— 现在这一侧的浮点只有算数那一小块的加减乘除与六位小数打印。"
     }
   ]
 }
