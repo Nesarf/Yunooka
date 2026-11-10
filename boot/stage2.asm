@@ -596,7 +596,7 @@ long_entry:
     call run_fs_write
     call run_share_test
     call run_home_test
-    call run_join_test
+    call run_homeshare_test
     call run_pci_scan
     call run_shell
     call run_repl
@@ -3499,13 +3499,12 @@ fs_share:
 
 ; 列出根目录里带共享位的条目。名字与类型都打出来 —— 只有名字的话，一个被标记的目录
 ; 与一个被标记的文件在清单里长得一样。
-run_shares:
+; 在当前这块盘上列共享。调用者先设好 fs_base 与 fs_start —— 它不知道该列哪一块盘，
+; 也不该知道；「列哪一块」是调用者的事。
+list_shares_here:
     push rbx
-    mov rsi, line_shares
-    call puts64
-    ; 先读超块，再从它里面取根目录扇区 —— 1024 是超块，不是根目录。
-    ; 这一处抄错过：别处那两句连在一起时看着像「读根目录」，其实第一句读的是超块。
-    mov rdi, 1024
+    ; 不打 「shares 」前缀：列哪一块盘、要不要先说家 ID，是调用者的事。
+    mov rdi, [fs_start]
     call fs_load
     mov rbx, rsi
     mov edi, [rbx + 12]
@@ -3545,6 +3544,81 @@ run_shares:
 .done:
     call put_nl64
     pop rbx
+    ret
+
+; 主盘上列共享：先说一句、设好主盘的那两个数，再交给上面那一段。
+run_shares:
+    mov rsi, line_shares
+    call puts64
+    mov qword [fs_base], 0x40000
+    mov qword [fs_start], 1024
+    jmp list_shares_here
+
+; ======================================================================
+; 列另一块盘上的共享 —— 共享与边界第一次见面
+; ======================================================================
+;
+; 到这一步之前，「共享」是目录条目上的一个位，「边界」是超块里的一个数，两件东西各在
+; 各的位置，从没见过面。这里让它们见：先比家 ID，同一家才列，不同一家一条都不列。
+;
+; 判据因此分得开两件事：「列出来了」与「被挡住了」。而挡住的判据必须是那一行 not family，
+; 不能只是「没有条目」—— 一块盘上本来就可能一条共享都没有，那种空与这种空看起来一样。
+;
+; rdi = 盘符（UTF-16，0 码元结尾）。出 rax = 1 列了 / 0 不是一家人。
+fs_shares_at:
+    push r12
+    push rbx
+    mov rbx, rdi                   ; 盘符先存：fs_load 会改 rdi
+    mov rdi, 1024
+    call fs_load
+    mov r12d, [rsi + 28]           ; 主盘的家
+    movzx eax, word [rbx]
+    cmp ax, 0x03B1
+    je .alpha
+    mov qword [fs_base], 0x60000
+    mov qword [fs_start], 0
+    jmp .set
+.alpha:
+    mov qword [fs_base], 0x40000
+    mov qword [fs_start], 1024
+.set:
+    mov rdi, [fs_start]
+    call fs_load
+    mov r13d, [rsi + 28]           ; 那块盘的家
+    mov rsi, line_shares
+    call puts64
+    mov rax, r13
+    call put_hex64
+    mov al, ' '
+    call putc64
+    cmp r12d, r13d
+    jne .stranger
+    call list_shares_here          ; 同一家：列它
+    mov rax, 1
+    jmp .back
+.stranger:
+    mov rsi, line_not_family
+    call puts64
+    xor eax, eax
+.back:
+    mov qword [fs_base], 0x40000
+    mov qword [fs_start], 1024
+    pop rbx
+    pop r12
+    ret
+
+; 三步：先标记 β 上的一个文件、再列 β 的共享（这时还不是一家人，该被挡住）、
+; 然后加入、再列一次（这时该看得见）。
+;
+; 第三步与第四步之间只发生了一件事：家 ID 被写过去了。所以两次读数的差别只能来自那里。
+run_homeshare_test:
+    mov rdi, fs_share_beta
+    call fs_share
+    mov rdi, fs_beta_drive
+    call fs_shares_at
+    call run_join_test
+    mov rdi, fs_beta_drive
+    call fs_shares_at
     ret
 
 ; 第一条走完再走一遍，看会不会多出一条 —— 标记不是追加，这一点要能看出差别：
@@ -4241,6 +4315,10 @@ line_fs_write_fail: db "Yunooka: write failed", 13, 10, 0
 line_fs_write_lost: db "Yunooka: wrote but lost", 13, 10, 0
 ; 家庭组第一步的那几样。
 fs_share_path: dw 0x03B1, 0x003A, 0x002F, 0x0064, 0x006F, 0x0063, 0x0073, 0  ; α:/docs
+; 第二块盘上的一个文件与它的盘符 —— 共享与边界见面那一条用的。
+fs_share_beta: dw 0x03B2, 0x003A, 0x002F, 0x0068, 0x0065, 0x006C, 0x006C, 0x006F
+               dw 0x002E, 0x0074, 0x0078, 0x0074, 0                        ; β:/hello.txt
+fs_beta_drive: dw 0x03B2, 0
 line_shares: db "Yunooka: shares ", 0
 line_share_dir: db " dir", 0
 line_share_file: db " file", 0

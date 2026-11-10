@@ -489,7 +489,13 @@ const 写成 = 写行 !== null && 写行[1].trim() === "Yunooka wrote this"
 // 家庭组第一步：共享是目录条目上的一个位。走两遍，两遍都只该有一条 ——
 // 「往清单里加一条」的实现走两遍会出现两个 docs，而那样第一次也是对的。
 const 共集 = [...读到.matchAll(/Yunooka: shares ([^\r\n]*)/g)].map((m) => m[1].trim());
-const 共成 = 共集.length === 2 && 共集[0] === "docs dir" && 共集[1] === "docs dir";
+const 共成 = 共集.filter((x) => x === "docs dir").length === 2;
+// 共享与边界见面：β 上的共享在「不是一家人」时被挡住、加入之后列得出来。
+// 挡住的判据是那一行 not family，不是「没有条目」—— 一块盘上本来就可能一条共享都没有，
+// 那种空与这种空看起来一样。
+const 家共行 = /Yunooka: shares 0000000011111111 not family/.test(读到);
+const 家共列 = /Yunooka: shares 00000000594B4E52 hello\.txt file/.test(读到);
+const 家共成 = 家共行 && 家共列;
 // 网卡：PCI 配置空间里 vendor 与 device 两个数由硬件自己给出。8086:100E 是 Intel E1000，
 // 也就是 --nictype1 指定的那一块。读对它，说明「网卡在这台机器上，而这条总线读得通」。
 const 网行 = /Yunooka: pci dev (\d+) ([0-9A-F]+)/g;
@@ -618,6 +624,9 @@ console.log("边界      " + (家行 ? "home " + 家行[1] : "home (没跑到)")
 console.log("加入      " + (贝集.length ? 贝集.map(([i, v]) => i + " " + v).join("  /  ") : "(没跑到)")
   + (加成 ? "  —— 同一个比较，写进那个数之后结论翻过来了"
     : "  —— 不对：应当先 not family、后 family"));
+console.log("共享见面  " + (家共行 ? "挡住过" : "(没挡住)") + "  " + (家共列 ? "列出来了" : "(没列出来)")
+  + (家共成 ? "  —— 共享与边界接上了：同一块盘，加入之前一条不列，加入之后列得出来"
+    : "  —— 不对：应当先 not family 挡住、加入后列出 hello.txt file"));
 console.log("壳        " + (壳行 ? "shell> files" : "(没跑到)")
   + (列行 ? "  → " + 列行[0] : "  → (没列出来)")
   + (壳成 ? "  —— 那一行认得出来、回答得出（来源见上一行）"
@@ -669,6 +678,7 @@ const 结构成 = 有种子
     && 网成
     && 家成
     && 加成
+    && 家共成
     && 壳成
     && 重求成
     && 除成
