@@ -3868,9 +3868,68 @@ run_core_test:
     mov rax, [core_bad]
     call put_num64
     call put_nl64
+    ; 有缺就进补完界面。骨架只接上「知道了」与「说得出」—— 真正去修是下一块砖。
+    cmp qword [core_bad], 0
+    je .clean
+    call run_repair_screen
+.clean:
     ret
 .nomanifest:
     mov rsi, line_core_nocore
+    call puts64
+    ret
+
+; ======================================================================
+; 补完界面的骨架
+; ======================================================================
+;
+; 它只做三件事，而三件事各自有判据：
+;   一、屏幕上画出来 —— 与正常启动的画面不同，而判据读的是两个位置的颜色，
+;      不是「看起来像」。
+;   二、串口说清缺几条 —— 一行结构化的，形状固定（event= 开头、键值对、顺序固定）。
+;      这一行是 design/GUARD.txt 第六节那条「新写的事件行用固定形状」的第一个样本：
+;      旧的散文（guard core 2 1）不动，因为判据已经与它绑在一起了。
+;   三、说明从哪来 —— repair=mailbox。这一版的修补通道是信箱盘（一块裸盘，主机写、
+;      客人机读），不是网络；内置下载器排在 browser 那一条之后。
+;
+; 为什么先做骨架：补完这件事的难点不在「怎么修」，在「知道要修什么」—— 而后者正是
+; 核心清单加校验和那一块已经做掉的东西。骨架把「知道了」与「说得出」接上；
+; 真正去修（从信箱盘搬进来、重算、再校验一次）是下一块砖。
+run_repair_screen:
+    ; 屏幕清成暗青，而正常启动的桌面底色不是它 —— 一个像素就能分出两种处境。
+    xor edi, edi
+    xor esi, esi
+    mov rdx, 320
+    mov rcx, 200
+    mov r8b, 0x0B
+    call fill_rect
+    ; 居中的窗口：边框、标题栏、内容区。三个原语都是 Kohane 第二层就有的，
+    ; 而它们的判据也已经立过（读回四个位置的颜色）。
+    mov rdi, 40
+    mov rsi, 40
+    mov rdx, 240
+    mov rcx, 120
+    mov r8b, 0x2F
+    call draw_rect
+    mov rdi, 41
+    mov rsi, 41
+    mov rdx, 238
+    mov rcx, 14
+    mov r8b, 0x1C
+    call fill_rect
+    mov rdi, 41
+    mov rsi, 56
+    mov rdx, 238
+    mov rcx, 103
+    mov r8b, 0x0F
+    call fill_rect
+    ; 串口那一行。缺几条与修补通道在同一个事件里，因为它们回答的是同一个问题：
+    ; 「这台机器现在能不能自己修好，靠什么修」。
+    mov rsi, line_repair_entry
+    call puts64
+    mov rax, [core_bad]
+    call put_num64
+    mov rsi, line_repair_where
     call puts64
     ret
 
@@ -7914,6 +7973,10 @@ line_core_ok: db "Yunooka: guard core ", 0
 line_core_bad: db "Yunooka: guard core bad ", 0
 line_core_missing: db "Yunooka: guard core missing ", 0
 line_core_nocore: db "Yunooka: guard core no manifest", 13, 10, 0
+; 补完界面那一行。形状是「event= / 键值对 / 顺序固定」—— design/GUARD.txt 第六节
+; 那条「新写的事件行」的第一个样本。旧的散文不动（判据已经与它们绑在一起）。
+line_repair_entry: db "Yunooka: event=guard.entry bad=", 0
+line_repair_where: db " repair=mailbox version=1", 13, 10, 0
 ; 家庭组第一步的那几样。
 fs_share_path: dw 0x03B1, 0x003A, 0x002F, 0x0064, 0x006F, 0x0063, 0x0073, 0  ; α:/docs
 ; 第二块盘上的一个文件与它的盘符 —— 共享与边界见面那一条用的。
