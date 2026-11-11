@@ -1195,11 +1195,10 @@ scan_instrs:
     ; （line_letters 的 'Y'），而 'Y' = 89 会落到「8 tuple」那一支上跳两字节 ——
     ; 于是偏移表从某一条起全部错位，而执行时才以 unknown op 的形式露出来。
     ;
-    ; 这条诊断只写一次（坏一次就够知道了），而且它走在真正的循环前面：如果它出现，
-    ; 后面那些 unknown op 就有一个明确的来源。
+    ; 这一条只写一次，而且它走在真正的循环前面：如果它出现，后面那些 unknown op 就有
+    ; 一个明确的来源。
     cmp eax, 33
     jbe .shape_ok
-    ; puts64 用 lodsb，它会把 rax 改掉 —— 所以 opcode 先抄到 r15 里再看。
     mov r15, rax
     mov rsi, line_op_bad
     call puts64
@@ -1208,6 +1207,22 @@ scan_instrs:
     call put_nl64
     jmp .done
 .shape_ok:
+    ; 诊断撤了，而它给出的三行是这一轮的全部产出。
+    ;
+    ; win 的指令流起点是 0x41121，盘上那里的字节是 05 01（opcode 5 = 常量，种类 1 = 数），
+    ; 后面八个字节是 60.0 的 f64 —— 一条完整的常量指令，长 10 字节。
+    ;
+    ; 而扫描打出来的是：
+    ;     0x41121 #0
+    ;     0x41122 #1
+    ;     0x41124 #2
+    ;     0x41124 #3   ← 从这一条起不动了
+    ;
+    ; 第 0 条只前进 1 字节 —— 那正好是 scan_instrs 自己那句 inc rsi（跳过 opcode），
+    ; 也就是说 skip_imm 收到的是「跳 0」那一支，跳了零个字节。
+    ;
+    ; 所以下一轮要查的是：skip_imm 在那里到底收到了什么。imm_shape[5] 应当是 7（值），
+    ; 而 7 会走 .value（读种类）再走 .v_num（跳八字节）。
     movzx eax, byte [imm_shape + rax]
     call skip_imm
     inc rcx
@@ -11522,6 +11537,7 @@ line_letters: db "Yunooka: letters -> ", 0
 line_op_bad: db "Yunooka: scan op ", 0
 line_fn_dbg: db "Yunooka: fn at ", 0
 line_skip_dbg: db "Yunooka: skip at ", 0
+line_scan_dbg: db "Yunooka: scan at ", 0
 dbg_rsi: dq 0
 dbg_len: dq 0
 line_string: db "string ", 0
