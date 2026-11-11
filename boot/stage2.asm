@@ -726,6 +726,16 @@ long_entry:
     call run_pt_verify_test
     call run_ata_test
     call run_fs_test
+    ; 第二个包（docs/myon.hmtn）必须排在那些写操作之前。
+    ;
+    ; 预读区是启动时读进来的一份快照，而 fs_write_file 与修补会往它里面写。docs 那一页
+    ; 在后来的某一次写之后就不再是盘上那一份了：诊断打出来的 80 字节里，note.txt 那一条
+    ; 的起始与长度都变了（1049 与 19，而盘上是 1028 与 24）。
+    ;
+    ; 所以「查不到」不是查找的错，是它查的那一份内存已经不干净。排在写之前，它读到的
+    ; 就是盘上的原样 —— 而这也解释了为什么同一目录的 note.txt 那条判据一直是绿的：
+    ; 它查得早。
+    call run_myon2_test
     call run_fs_open
     call run_fs_open2
     call run_fs_open3
@@ -766,16 +776,6 @@ long_entry:
     call run_program
     ; Myon 的第二步：盘上那个只有三条指令的包，靠内置 write 把一段字打到串口。
     call run_myon_test
-    ; 第二个包（docs/myon.hmtn）跑起来了，而它查不到自己。
-    ;
-    ; 这一轮把它定位到 fs_lookup 那一层：诊断那一行 `myon2 dbg 0 1026 0` 是绕过
-    ; fs_open_path、直接拿 1026 号扇区去查的结果 —— 它仍然回零，r15 与 rbx 都没被写，
-    ; 也就是说一条候选都没走到命中那一步。同一目录里的 note.txt（第一条）用同一条路
-    ; 是通的，而 myon.hmtn 是第三条。差别只剩位置。
-    ;
-    ; 调用留着：它打出来的两行是下一轮的起点。而不给它判据，是因为一条永远红的判据与
-    ; 一条跑不到的测试一样，最后只会让人习惯跳过那一行。
-    call run_myon2_test
     call run_trap_test
     jmp .hang64
 .heap_bad:
@@ -2981,29 +2981,19 @@ run_myon2_test:
     call puts64
     ret
 .missing:
-    ; 诊断：绕过 fs_open_path，直接在 docs 扇区里找这个名字。
+    ; 诊断：把 fs_load(1026) 实际读到的那 80 字节打出来。
     ;
-    ; 这一条把两种可能分开：路径解析错（段切错、扇区没接上），还是 fs_lookup 找不到。
-    ; 两者在串口上都表现为「没找到」，而修法完全不同。
-    mov rsi, 1026
-    mov r8, fs_myon_name
-    mov r9, 9
-    call fs_lookup
-    mov [myon_dbg_a], rax
-    mov [myon_dbg_b], r15
-    mov [myon_dbg_c], rbx
-    mov rsi, line_myon2_dbg
+    ; 这一条与上一条诊断配成一对。上一条说「fs_lookup 一条候选都没命中」，而这一条说
+    ; 它手上有的是什么字节 —— 两者一比就能分开两种可能：读错了地方（hex 与盘上不同），
+    ; 还是遍历逻辑错（hex 与盘上相同而仍然没命中）。
+    mov rdi, 1026
+    call fs_load
+    mov [myon_dbg_a], rsi
+    mov rsi, line_myon2_hex
     call puts64
-    mov rax, [myon_dbg_a]
-    call put_num64
-    mov al, ' '
-    call putc64
-    mov rax, [myon_dbg_b]
-    call put_num64
-    mov al, ' '
-    call putc64
-    mov rax, [myon_dbg_c]
-    call put_num64
+    mov rdi, [myon_dbg_a]
+    mov rcx, 80
+    call put_hex_bytes
     call put_nl64
     mov rsi, line_myon2_missing
     call puts64
@@ -11374,6 +11364,7 @@ line_myon_nofn: db "Yunooka: myon no echo", 13, 10, 0
 line_myon2_ok: db "Yunooka: event=myon2 ok", 13, 10, 0
 line_myon2_missing: db "Yunooka: no docs/myon.hmtn", 13, 10, 0
 line_myon2_dbg: db "Yunooka: myon2 dbg ", 0
+line_myon2_hex: db "Yunooka: myon2 hex ", 0
 line_myon2_bad: db "Yunooka: myon2 bad magic", 13, 10, 0
 line_myon2_nofn: db "Yunooka: myon2 no echo", 13, 10, 0
 line_prog_bad: db "Yunooka: prog bad magic", 13, 10, 0
