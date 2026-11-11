@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 114
+stage2_sectors equ 115
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -8435,6 +8435,44 @@ run_nvme_health:
     mov [nvme_temp], rax
     call put_num64
     call put_nl64
+
+    ; 一行汇总：能读到的报出来，读不到的明说读不到。
+    ;
+    ; 这一行是这一层现在的最终形状。VBox 这三次尝试（IDE 的 IDENTIFY、AHCI、NVMe 的
+    ; SMART 页）都到不了「温度与寿命」，所以健康的五样里只有型号、序列号、容量是真的。
+    ;
+    ; 温度那一格写 n/a 而不是零，也不是那个 61056。理由在这一层最要紧：**一个准确的
+    ; 「我不知道」比一个假的零度好**，因为读这一行的人（或者下游）会把零当成一个可用的
+    ; 数。61056 更糟 —— 它是个数，看起来像读数。
+    ;
+    ; 判定用范围而不是「是不是零」：一块真报 SMART 的盘温度在 273 到 350 开尔文之间，
+    ; 而 VBox 那个由型号字节拼出来的值落在几万。范围之外一律 n/a。
+    mov rsi, line_dh
+    call puts64
+    lea rsi, [nvme_model]
+    call puts64
+    mov al, ' '
+    call putc64
+    lea rsi, [nvme_serial]
+    call puts64
+    mov al, ' '
+    call putc64
+    mov rax, [nvme_nsze]
+    call put_num64
+    mov al, ' '
+    call putc64
+    mov rax, [nvme_temp]
+    cmp rax, 200
+    jb .dh_na
+    cmp rax, 500
+    ja .dh_na
+    call put_num64
+    jmp .dh_done
+.dh_na:
+    mov rsi, line_dh_na
+    call puts64
+.dh_done:
+    call put_nl64
     ret
 
 ; ======================================================================
@@ -11907,6 +11945,8 @@ line_nvme_smart: db "Yunooka: nvme smart ", 0
 line_nvme_smtimeout: db "Yunooka: nvme smart -> no answer", 13, 10, 0
 line_nvme_temp: db "Yunooka: nvme temp ", 0
 line_nvme_smstat: db "Yunooka: nvme smstat ", 0
+line_dh: db "Yunooka: event=diskhealth ", 0
+line_dh_na: db "n/a", 0
 line_nvme_model: db "Yunooka: nvme model ", 0
 line_nvme_serial: db "Yunooka: nvme serial ", 0
 nvme_model: times 48 db 0
