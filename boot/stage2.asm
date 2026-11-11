@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 81
+stage2_sectors equ 83
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -699,6 +699,12 @@ long_entry:
     ;
     ; 摘下来的理由现在不成立了，所以它回来了，判据照旧先验红：六行摘要要与主机逐字符相同。
     call run_sha512_test
+    ; 第三环的第一块砖：域算术 mod 2^255-19。
+    ;
+    ; 它排在 SHA-512 后面是有讲究的：验签要的那次哈希是 SHA-512 算的，而域算术要的
+    ; 那条链是乘法。两条都错的时候，串口上只能看到「验签不过」一句，分不出是谁。
+    ; 所以两条各自先有判据，各自与自己主机上的对应物逐字符对，之后才允许它们合流。
+    call run_fp_test
     call run_ata_test
     call run_fs_test
     call run_fs_open
@@ -4960,6 +4966,260 @@ fs_write_lost:
     ret
 
 ; ======================================================================
+; 域算术 mod 2^255-19：第三环的地基
+; ======================================================================
+;
+; 为什么这一层要有自己的判据，先于任何曲线代码：验签的最后一句话是「这两个点是不是
+; 同一个点」，而点运算是域上的加、减、乘、平方堆出来的。乘法错一个肢体，验签就报
+; 「签名不对」—— 与「签名真的是假的」在串口上一个样，而后者正是第三环要报的那件事。
+; 一层一层都得先自己站稳，才轮到上面那层开始搭。
+;
+; 表示法：一个域元素是 8 个 32 位肢体，小端，每个肢体一个 dd。没有冗余位、没有延迟
+; 约简 —— 每回乘法之后立刻归约成唯一表示。选它不是因为快，而是因为「每个中间量都
+; 只有一个写法」：固件打出来的十六进制与主机 BigInt 打出来的可以逐字符比。带冗余
+; 表示的实现里同一个数有好几种写法，对拍就从「比一比」变成「先解释再比」。
+;
+; 约简的全部依据只有一条：p = 2^255 - 19，所以 2^256 = 2 * 2^255 = 38 (mod p)。
+; 一个 512 位的积 N 写成 L + H * 2^256，就等价于 L + 38 * H。折两次之后必然小于
+; 2^256，再做一两次条件减 p 就落进 [0, p)。
+
+; ----------------------------------------------------------------------
+; fp_mul：fp_a × fp_b → fp_prod，16 个肢体，未约简。
+;
+; 内层是教科书式的「行扫描」：外层固定 a 的一个肢体，内层走 b 的八个肢体，进位在
+; 同一条链上。每一格最多收 8 个 32x32 的积，加上进位，总和卡在 2^64 之内（最坏是
+; (2^32-1)^2 + 2*(2^32-1) = 2^64 - 1，正好不溢出），所以一个 64 位寄存器就够装。
+; ----------------------------------------------------------------------
+fp_mul:
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+
+    lea rdi, [fp_prod]
+    xor eax, eax
+    mov ecx, 16
+    cld
+    rep stosd                       ; 积的十六格先清零
+
+    xor r9d, r9d                    ; i
+.outer:
+    cmp r9d, 8
+    jae .outer_done
+    xor r11, r11                    ; 这一行的进位
+    xor r10d, r10d                  ; j
+.inner:
+    cmp r10d, 8
+    jae .inner_done
+    mov eax, [fp_a + r9 * 4]
+    mul dword [fp_b + r10 * 4]      ; edx:eax = a[i] * b[j]
+    shl rdx, 32
+    or  rax, rdx                    ; rax = 完整的 64 位积
+    lea r8, [r9 + r10]
+    mov ecx, [fp_prod + r8 * 4]
+    add rax, rcx                    ; 加这一格已有的部分和
+    add rax, r11                    ; 加上一位来的进位
+    mov [fp_prod + r8 * 4], eax
+    shr rax, 32
+    mov r11, rax
+    inc r10d
+    jmp .inner
+.inner_done:
+    lea r8, [r9 + 8]
+    mov [fp_prod + r8 * 4], r11d    ; 这一行最后一次进位落到下一格
+    inc r9d
+    jmp .outer
+.outer_done:
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    ret
+
+; ----------------------------------------------------------------------
+; fp_condsub：rdi 指的八格若大于等于 p 就减掉 p。出 rax = 1 表示减了。
+;
+; 从最高肢体往下比，找到第一个不同的肢体就定了大小 —— 与手算多位数比大小一样。
+; ----------------------------------------------------------------------
+fp_condsub:
+    push rdi
+    push rcx
+    push rdx
+    push r8
+    mov ecx, 7
+.cmp:
+    mov eax, [rdi + rcx * 4]
+    mov edx, [fp_p + rcx * 4]
+    cmp eax, edx
+    ja  .sub
+    jb  .nosub
+    dec ecx
+    jns .cmp
+.sub:
+    ; 减法链靠 CF 传借位，所以循环里一个字都不许碰 CF。
+    ;
+    ; 这里原来写的是 inc ecx / cmp ecx, 8 / jb —— 而 cmp 会覆盖 CF：ecx 小于 8 时它
+    ; 恒设 CF=1，于是除第一位以外每一位都白借一个。症状极隐蔽：(p-1)^2 约简之后是
+    ; 2^255-18，减 p 该得 1，被白借之后变成一个大于等于 p 的数，于是又被减一次，
+    ; 落到 0x14 ... 7FFFFFFF。六组向量里只有这一组需要连续借位，也只红了这一组。
+    ; 而 inc 与 dec 都不动 CF，所以计数改用倒数。
+    clc
+    xor ecx, ecx
+    mov r8d, 8
+.subloop:
+    mov eax, [rdi + rcx * 4]
+    sbb eax, [fp_p + rcx * 4]
+    mov [rdi + rcx * 4], eax
+    inc ecx
+    dec r8d
+    jnz .subloop
+    mov eax, 1
+    jmp .out
+.nosub:
+    xor eax, eax
+.out:
+    pop r8
+    pop rdx
+    pop rcx
+    pop rdi
+    ret
+
+; ----------------------------------------------------------------------
+; fp_reduce：fp_prod（16 格）→ fp_out（8 格，落进 [0, p)）
+;
+; 折两轮。第一轮把高 256 位乘 38 加进低 256 位；那一轮自己会产生一个溢出（至多几百），
+; 第二轮把它再乘 38 折回来。第二轮之后剩下的溢出小到不会让任何一格再进位，所以第三
+; 轮只是把那个小数加到最低格上，用一条短的进位传播收尾。
+; ----------------------------------------------------------------------
+fp_reduce:
+    push rdi
+    push rcx
+    push rdx
+    push r8
+    push r9
+    push r11
+    push r12
+
+    xor r11, r11
+    xor r9d, r9d
+.round1:
+    mov edx, 38
+    mov eax, [fp_prod + 32 + r9 * 4]
+    mul edx                         ; edx:eax = 38 * prod[8+i]
+    shl rdx, 32
+    or  rax, rdx
+    mov ecx, [fp_prod + r9 * 4]
+    add rax, rcx
+    add rax, r11
+    mov [fp_out + r9 * 4], eax
+    shr rax, 32
+    mov r11, rax
+    inc r9d
+    cmp r9d, 8
+    jb .round1
+
+    imul r12, r11, 38               ; 第一轮的溢出，乘 38 之后只剩一个很小的数
+    xor r11, r11
+    xor r9d, r9d
+.round2:
+    mov rax, r12
+    xor r12, r12                    ; 只有第一次带值，之后是零
+    mov ecx, [fp_out + r9 * 4]
+    add rax, rcx
+    add rax, r11
+    mov [fp_out + r9 * 4], eax
+    shr rax, 32
+    mov r11, rax
+    inc r9d
+    cmp r9d, 8
+    jb .round2
+
+    test r11, r11                   ; 第二轮的溢出
+    jz  .cond
+    imul rax, r11, 38
+    xor r9d, r9d
+.round3:
+    test rax, rax
+    jz  .cond
+    mov ecx, [fp_out + r9 * 4]
+    add rax, rcx
+    mov [fp_out + r9 * 4], eax
+    shr rax, 32
+    inc r9d
+    cmp r9d, 8
+    jb .round3
+
+.cond:
+    lea rdi, [fp_out]
+    call fp_condsub
+    test rax, rax
+    jz .done
+    call fp_condsub                 ; 最多两次：折完之后一定小于 2^256，而 2p 才越过它
+.done:
+    pop r12
+    pop r11
+    pop r9
+    pop r8
+    pop rdx
+    pop rcx
+    pop rdi
+    ret
+
+; ----------------------------------------------------------------------
+; 域算术的判据
+;
+; 输出一组一行：左边是固件算的完整 32 字节。run.mjs 拿同样的输入用 BigInt 自己算
+; 一遍，两份逐字符比。比的是完整的 32 字节而不是前八个 —— 约简出错时动的往往是高位，
+; 而前八个字节在低端，正好看不见。
+;
+; 六组向量各压一种处境：乘一（最平静的）、乘小整数（看不出约简）、p-1 的平方（输入
+; 最大而结果最小，(p-1)^2 = 1）、p-1 乘二、两个都大于 p 的数（专门压「输入不必先
+; 约简」这一条）、以及基点的 x 乘 y（真实会走到的数）。
+; ----------------------------------------------------------------------
+fp_mulmod:
+    call fp_mul
+    call fp_reduce
+    ret
+
+run_fp_test:
+    mov qword [fp_vec_i], 0
+.loop:
+    mov rax, [fp_vec_i]
+    cmp rax, 6
+    jae .report
+    shl rax, 6                      ; 每组 64 字节
+    lea rdx, [fp_vecs]
+    add rdx, rax
+
+    lea rdi, [fp_a]
+    mov rsi, rdx
+    mov ecx, 8
+    cld
+    rep movsd                       ; a
+    lea rdi, [fp_b]
+    mov ecx, 8
+    cld
+    rep movsd                       ; b，rsi 已经跟着前进了 32 字节
+
+    call fp_mulmod
+
+    mov rsi, line_fp_val
+    call puts64
+    lea rdi, [fp_out]
+    mov rcx, 32
+    call put_hex_bytes
+    call put_nl64
+
+    inc qword [fp_vec_i]
+    jmp .loop
+.report:
+    mov rsi, line_fp_ok
+    call puts64
+    ret
+
+; ======================================================================
 ; 家庭组的第一步：共享是目录条目上的一个位
 ; ======================================================================
 ;
@@ -9135,6 +9395,8 @@ line_sign_bad: db "Yunooka: event=onlysign bad name=", 0
 line_sign_bad_n: db "Yunooka: event=onlysign badcount=", 0
 line_sign_nosign: db "Yunooka: event=onlysign nosign", 13, 10, 0
 line_sign_nomagic: db "Yunooka: event=onlysign nomagic", 13, 10, 0
+line_fp_val: db "Yunooka: fp val=", 0
+line_fp_ok: db "Yunooka: event=fp ok vectors=6", 13, 10, 0
 ; SHA-256 的工作区。a..h 就放在 sha_h 里原地更新，W[0..63] 放 sha_w。
 ;
 ; 为什么全部用内存而不是寄存器：寄存器分配的错会表现为「哈希不对」，而那个症状与
@@ -9188,6 +9450,58 @@ sha512_bt: times 256 db 0
 ; 块）、239（两块之后还剩大半块）。最后那个 -1 是结束标记，不是长度 —— 写成 -1 而不
 ; 是 0xFFFFFFFF，因为 cmp 的立即数会被符号扩展，而 0xFFFFFFFF 展开之后是全 1。
 sha512_lens: dq 0, 1, 111, 112, 128, 239, -1
+
+; ---- 域算术 mod 2^255-19 的常数与工作区 --------------------------------
+;
+; p = 2^255 - 19，小端八个 32 位肢体。最低那个是 0xFFFFFFED 而不是 0xFFFFFFFF，
+; 是因为减掉了那个 19；最高那个只有 0x7FFFFFFF，是因为第 255 位是 0。
+fp_p:
+    dd 0xFFFFFFED, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF
+    dd 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x7FFFFFFF
+fp_a: times 8 dd 0
+fp_b: times 8 dd 0
+fp_prod: times 16 dd 0
+fp_out: times 8 dd 0
+fp_vec_i: dq 0
+
+; 判据向量：每组 64 字节，前 32 是 a、后 32 是 b，都是小端。
+;
+; 为什么是这六组：乘一与乘小整数最平静，能过的实现很多，看不出约简；p-1 的平方是
+; 唯一一个「输入最大而结果最小」的处境，它的积是 510 位，折两轮全用到；p-1 乘二
+; 走的是一条不进位的减法；两个 2^255-1 相乘那一组两个输入都大于 p，专门压「输入
+; 不必先约简」这条 —— 域元素的表示允许暂时越界，约简是乘法之后的事。最后一组是
+; 基点的 x 乘 y，这是曲线代码真正会走到的数，用它把向量和后面的活儿连上。
+fp_vecs:
+    ; 一乘一
+    dd 0x00000001, 0x00000000, 0x00000000, 0x00000000
+    dd 0x00000000, 0x00000000, 0x00000000, 0x00000000
+    dd 0x00000001, 0x00000000, 0x00000000, 0x00000000
+    dd 0x00000000, 0x00000000, 0x00000000, 0x00000000
+    ; 二乘三
+    dd 0x00000002, 0x00000000, 0x00000000, 0x00000000
+    dd 0x00000000, 0x00000000, 0x00000000, 0x00000000
+    dd 0x00000003, 0x00000000, 0x00000000, 0x00000000
+    dd 0x00000000, 0x00000000, 0x00000000, 0x00000000
+    ; (p-1) 的平方
+    dd 0xFFFFFFEC, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF
+    dd 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x7FFFFFFF
+    dd 0xFFFFFFEC, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF
+    dd 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x7FFFFFFF
+    ; (p-1) 乘二
+    dd 0xFFFFFFEC, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF
+    dd 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x7FFFFFFF
+    dd 0x00000002, 0x00000000, 0x00000000, 0x00000000
+    dd 0x00000000, 0x00000000, 0x00000000, 0x00000000
+    ; (2^255-1) 的平方：两个输入都越过 p
+    dd 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF
+    dd 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x7FFFFFFF
+    dd 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF
+    dd 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x7FFFFFFF
+    ; 基点的 x 乘 y
+    dd 0x8F25D51A, 0xC9562D60, 0x9525A7B2, 0x692CC760
+    dd 0xFDD6DC5C, 0xC0A4E231, 0xCD6E53FE, 0x216936D3
+    dd 0x66666658, 0x66666666, 0x66666666, 0x66666666
+    dd 0x66666666, 0x66666666, 0x66666666, 0x66666666
 
 ; SHA-512 的 80 个常量：K[i] = floor(frac(cbrt(p_i)) * 2^64)，p_i 是第 i 个质数。
 ;
