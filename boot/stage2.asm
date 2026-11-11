@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 102
+stage2_sectors equ 108
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -718,6 +718,9 @@ long_entry:
     ; 解码压在编码上，判据是往返：编码再解码必须回到同一个点。它同时压住「拒绝坏输入」
     ; 这一半 —— 一个任何输入都接受的实现在四个正确输入上全对，而在那一个上露馅。
     call run_pt_dec_test
+    ; 第三环的最后一块：把上面每一层串起来。它是唯一一条「不引入新原语」的判据 ——
+    ; 只验串得对不对，而串错了几乎总是下面某一层的意思，不是这一段的。
+    call run_pt_verify_test
     call run_ata_test
     call run_fs_test
     call run_fs_open
@@ -5515,8 +5518,10 @@ pt_show:
     ret
 
 ; fp_show：rsi 标签，rdi 一个域元素。点加算错时用来把中间量摊开。
-; 现在没有调用者 —— 但点运算那一段还会再来，而「四份坐标变成一个数」这种症状第一次
-; 花了很久才倒推回去。留着它，下一次不必再写一遍。
+;
+; 它现在又有调用者了（验签那边要看约简之后的 k），而当初留着它的理由正是「下一次
+; 不必再写一遍」—— 只是上次清理的时候连标签一起删了，函数体做了半天孤儿。
+fp_show:
     push rdi
     call puts64
     pop rdi
@@ -6205,6 +6210,435 @@ run_pt_dec_test:
     ret
 .reject:
     mov rsi, line_ptd_reject
+    call puts64
+    ret
+
+; ======================================================================
+; 验签本体
+; ======================================================================
+;
+; RFC 8032 的那一条式子：给定公钥 A、消息 M、签名 (R, S)，
+;
+;   一、S 必须小于 L（群的阶）—— 不小于就不是一个标量，直接拒；
+;   二、把 A 与 R 从压缩点解出来（两个都解不出来也直接拒）；
+;   三、k = SHA-512(R || A || M)，按小端当整数，再对 L 取模；
+;   四、[S]B 与 R + [k]A 必须是同一个点。
+;
+; 这四步下面每一层都单独有判据：解码、标量乘、点加、域算术，各自与主机对过。所以
+; 这一段代码本身只需要「串得对」—— 它不应该再是第一个发现下层有问题的地方。
+;
+; S 小于 L 那一条不是形式主义：Ed25519 的签名里 S 是模 L 的，一个不检查的实现会接受
+; 同一签名的 S+L、S+2L …… 而这些是不同字节串的「同一个签名」。放松这一条，签名的
+; 字节串就不再唯一。
+
+; k_lt_l：rdi 指的八格若严格小于 L 就出 1。
+k_lt_l:
+    mov ecx, 7
+.cmp:
+    mov eax, [rdi + rcx * 4]
+    mov edx, [k_l + rcx * 4]
+    cmp eax, edx
+    jb .yes
+    ja .no
+    dec ecx
+    jns .cmp
+.no:
+    xor eax, eax
+    ret
+.yes:
+    mov eax, 1
+    ret
+
+; ----------------------------------------------------------------------
+; modl_reduce：k_n（16 格，512 位小端）→ k_rem（前八格，落在 [0, L)）
+;
+; 用的是二进制长除法：从最高位往下走，每一步把 rem 左移一位、把当前位塞进最低位，
+; 然后看 rem 是否已经够减 L。五百一十二轮，每轮三十来条指令。
+;
+; 为什么不用 Barrett 之类：那个要预先算一个 512 位的倒数常量，而它的正确性又依赖一次
+; 多精度乘法 —— 也就是说，为了省这五百轮，要多出两处会错的地方。这一段只在验签时
+; 跑一次，慢一倍不要紧。
+;
+; 左移链靠 CF 串位，所以与减法链同一个规矩：中间不许碰 CF。cmp 碰，dec 不碰。
+; ----------------------------------------------------------------------
+modl_reduce:
+    push rdi
+    push rcx
+    push rdx
+    push r8
+    push r9
+    lea rdi, [k_rem]
+    xor eax, eax
+    mov ecx, 9
+    cld
+    rep stosd
+    mov qword [k_bit], 511
+.loop:
+    ; 取 N 的第 i 位
+    mov rax, [k_bit]
+    mov rcx, rax
+    shr rax, 5
+    and ecx, 31
+    mov edx, [k_n + rax * 4]
+    shr edx, cl
+    and edx, 1
+    mov r8d, edx
+
+    ; rem <<= 1（九格，从低到高）
+    clc
+    xor ecx, ecx
+    mov r9d, 9
+.shift:
+    mov eax, [k_rem + rcx * 4]
+    rcl eax, 1
+    mov [k_rem + rcx * 4], eax
+    inc ecx
+    dec r9d
+    jnz .shift
+    or [k_rem], r8d                 ; 把这一位放进最低位
+
+    ; rem >= L ？
+    mov ecx, 8
+.cmp:
+    mov eax, [k_rem + rcx * 4]
+    mov edx, [k_l + rcx * 4]
+    cmp eax, edx
+    ja .sub
+    jb .nosub
+    dec ecx
+    jns .cmp
+.sub:
+    clc
+    xor ecx, ecx
+    mov r9d, 9
+.dosub:
+    mov eax, [k_rem + rcx * 4]
+    sbb eax, [k_l + rcx * 4]
+    mov [k_rem + rcx * 4], eax
+    inc ecx
+    dec r9d
+    jnz .dosub
+.nosub:
+    dec qword [k_bit]
+    cmp qword [k_bit], 0
+    jge .loop
+
+    pop r9
+    pop r8
+    pop rdx
+    pop rcx
+    pop rdi
+    ret
+
+; ----------------------------------------------------------------------
+; pt_verify：用 sig_pk（三十二字节）、sig_sig（六十四字节）、sig_msg 与 sig_msglen。
+; 出 rax = 1 通过 / 0 不通过。
+; ----------------------------------------------------------------------
+pt_verify:
+    mov qword [sig_where], 0
+    ; 一、S < L
+    lea rdi, [sig_sig + 32]
+    call k_lt_l
+    test rax, rax
+    jz .no
+    mov qword [sig_where], 1
+
+    ; 二、解码 A 与 R
+    lea rdi, [pt_A]
+    lea rsi, [sig_pk]
+    call pt_decode
+    test rax, rax
+    jz .no
+    mov qword [sig_where], 2
+    lea rdi, [pt_R]
+    lea rsi, [sig_sig]
+    call pt_decode
+    test rax, rax
+    jz .no
+    mov qword [sig_where], 3
+
+    ; 三、k = SHA-512(R || A || M) mod L
+    ;
+    ; 拼接用的是 sig_cat，不是 sig_buf —— 后者是第二环规则扫描的缓冲区，名字先到先得。
+    ; 撞名字的时候 nasm 报的是「重复定义」，而不是「你引用错了那个」，这一点算是运气。
+    lea rdi, [sig_cat]
+    lea rsi, [sig_sig]
+    mov ecx, 8
+    cld
+    rep movsd
+    lea rdi, [sig_cat + 32]
+    lea rsi, [sig_pk]
+    mov ecx, 8
+    cld
+    rep movsd
+    lea rdi, [sig_cat + 64]
+    lea rsi, [sig_msg]
+    mov rcx, [sig_msglen]
+    cld
+    rep movsb
+
+    lea rdi, [sig_cat]
+    mov rcx, [sig_msglen]
+    add rcx, 64
+    call sha512
+
+    ; sha512_out 的六十四字节直接就是「按小端解释」要的顺序。
+    ;
+    ; 标准的哈希输出把最高有效字节放在最前面，而 RFC 8032 说的是把这个摘要「当作小端
+    ; 整数」—— 第一个字节就是最低位。所以原样拷过去即可。这里原先多反序了一次，等于
+    ; 解释成大端；而那个错法极难找：摘要本身对（hs 那一行与主机逐字节相同）、约简本身
+    ; 也对（四个小用例全过），错的只是喂给约简的那份字节的方向。串口上看到的是「k 不对」
+    ; 而两边都自证清白。
+    lea rdi, [k_n]
+    lea rsi, [sha512_out]
+    mov ecx, 16
+    cld
+    rep movsd
+    call modl_reduce
+    mov qword [sig_where], 4
+
+    ; 四、[S]B 与 R + [k]A
+    lea rdi, [pt_scalar]
+    lea rsi, [sig_sig + 32]
+    call fp_copy
+    lea rdi, [pt_a]
+    lea rsi, [pt_base]
+    call pt_copy
+    call pt_mul
+    lea rdi, [pt_SB]
+    lea rsi, [pt_o]
+    call pt_copy
+
+    lea rdi, [pt_scalar]
+    lea rsi, [k_rem]
+    call fp_copy
+    lea rdi, [pt_a]
+    lea rsi, [pt_A]
+    call pt_copy
+    call pt_mul
+
+    lea rdi, [pt_a]
+    lea rsi, [pt_R]
+    call pt_copy
+    lea rdi, [pt_b]
+    lea rsi, [pt_o]
+    call pt_copy
+    call pt_add
+
+    ; 交叉积比较：X1*Z2 与 X2*Z1
+    lea rdi, [fp_a]
+    lea rsi, [pt_SB]
+    call fp_copy
+    lea rdi, [fp_b]
+    lea rsi, [pt_o + 64]
+    call fp_copy
+    call fp_mulmod
+    lea rdi, [pt_c1]
+    lea rsi, [fp_out]
+    call fp_copy
+
+    lea rdi, [fp_a]
+    lea rsi, [pt_o]
+    call fp_copy
+    lea rdi, [fp_b]
+    lea rsi, [pt_SB + 64]
+    call fp_copy
+    call fp_mulmod
+    lea rdi, [pt_c2]
+    lea rsi, [fp_out]
+    call fp_copy
+
+    lea rdi, [pt_c1]
+    lea rsi, [pt_c2]
+    call fp_eq
+    test rax, rax
+    jz .no
+    mov qword [sig_where], 5
+
+    ; Y 那一对
+    lea rdi, [fp_a]
+    lea rsi, [pt_SB + 32]
+    call fp_copy
+    lea rdi, [fp_b]
+    lea rsi, [pt_o + 64]
+    call fp_copy
+    call fp_mulmod
+    lea rdi, [pt_c1]
+    lea rsi, [fp_out]
+    call fp_copy
+
+    lea rdi, [fp_a]
+    lea rsi, [pt_o + 32]
+    call fp_copy
+    lea rdi, [fp_b]
+    lea rsi, [pt_SB + 64]
+    call fp_copy
+    call fp_mulmod
+    lea rdi, [pt_c2]
+    lea rsi, [fp_out]
+    call fp_copy
+
+    lea rdi, [pt_c1]
+    lea rsi, [pt_c2]
+    call fp_eq
+    test rax, rax
+    jz .no
+    mov qword [sig_where], 6
+
+    mov eax, 1
+    ret
+.no:
+    xor eax, eax
+    ret
+
+; ----------------------------------------------------------------------
+; 验签的判据：RFC 8032 的三组向量，每组验两次
+;
+;   ok   原样的签名必须通过
+;   bad  把签名的第一个字节翻一位，必须不通过
+;
+; 两条缺一不可。只验 ok 的话，一个永远返回 1 的实现全绿；只验 bad 的话，一个永远返回
+; 0 的实现全绿。而这两组向量是 RFC 里给的，不是自己造的 —— 自造向量只能证明「它与
+; 自己一致」，证明不了「它与标准一致」。
+;
+; 三组的消息长度是 0、1、2，覆盖了 SHA-512 那条链的最短几种输入。长消息的多块路径
+; 已经由 SHA-512 自己的六行判据压过了（其中四个在两块以上），所以这里不重复。
+; ----------------------------------------------------------------------
+run_pt_verify_test:
+    ; 先单独问一次约简：它是验签里唯一还没有自己的判据的一步，而它的输入输出都短，
+    ; 四个用例就够定位。零与一压的是「不动」；L 与 L+1 压的是「恰好减一次」与
+    ; 「刚越过就该减」。
+    lea rdi, [k_n]
+    xor eax, eax
+    mov ecx, 16
+    cld
+    rep stosd
+    call modl_reduce
+    mov rsi, line_modl
+    call puts64
+    xor eax, eax
+    call put_num64
+    mov rsi, line_colon
+    call puts64
+    lea rdi, [k_rem]
+    mov rcx, 32
+    call put_hex_bytes
+    call put_nl64
+
+    mov dword [k_n], 1
+    call modl_reduce
+    mov rsi, line_modl
+    call puts64
+    mov eax, 1
+    call put_num64
+    mov rsi, line_colon
+    call puts64
+    lea rdi, [k_rem]
+    mov rcx, 32
+    call put_hex_bytes
+    call put_nl64
+
+    lea rdi, [k_n]
+    xor eax, eax
+    mov ecx, 16
+    cld
+    rep stosd
+    lea rdi, [k_n]
+    lea rsi, [k_l]
+    mov ecx, 8
+    cld
+    rep movsd
+    call modl_reduce
+    mov rsi, line_modl
+    call puts64
+    mov eax, 2
+    call put_num64
+    mov rsi, line_colon
+    call puts64
+    lea rdi, [k_rem]
+    mov rcx, 32
+    call put_hex_bytes
+    call put_nl64
+
+    mov dword [k_n], 1
+    call modl_reduce
+    mov rsi, line_modl
+    call puts64
+    mov eax, 3
+    call put_num64
+    mov rsi, line_colon
+    call puts64
+    lea rdi, [k_rem]
+    mov rcx, 32
+    call put_hex_bytes
+    call put_nl64
+
+    mov qword [vt_i], 0
+.loop:
+    mov rax, [vt_i]
+    cmp rax, 3
+    jae .done
+
+    lea rdx, [vt_pks]
+    mov rsi, [rdx + rax * 8]
+    lea rdi, [sig_pk]
+    mov ecx, 8
+    cld
+    rep movsd
+
+    mov rax, [vt_i]
+    lea rdx, [vt_sigs]
+    mov rsi, [rdx + rax * 8]
+    lea rdi, [sig_sig]
+    mov ecx, 16
+    cld
+    rep movsd
+
+    mov rax, [vt_i]
+    lea rdx, [vt_msgs]
+    mov rsi, [rdx + rax * 8]
+    lea rdi, [sig_msg]
+    lea rdx, [vt_lens]
+    mov rcx, [rdx + rax * 8]
+    mov [sig_msglen], rcx
+    cld
+    rep movsb
+
+    call pt_verify
+    mov [sig_res], rax
+    mov rax, [sig_where]
+    mov [sig_w1], rax
+
+    xor byte [sig_sig], 0x01
+    call pt_verify
+    mov [sig_res2], rax
+    mov rax, [sig_where]
+    mov [sig_w2], rax
+    xor byte [sig_sig], 0x01
+
+    mov rsi, line_sig_res
+    call puts64
+    mov rax, [vt_i]
+    inc rax
+    call put_num64
+    mov rsi, line_sig_ok
+    call puts64
+    mov rax, [sig_res]
+    call put_num64
+    mov rsi, line_sig_bad
+    call puts64
+    mov rax, [sig_res2]
+    call put_num64
+    mov rsi, line_sig_where
+    call puts64
+    mov rax, [sig_w1]
+    call put_num64
+    call put_nl64
+
+    inc qword [vt_i]
+    jmp .loop
+.done:
+    mov rsi, line_sig_done
     call puts64
     ret
 
@@ -10497,6 +10931,13 @@ line_ptd_after: db "Yunooka: ptd after ", 0
 line_ptd_bad: db "Yunooka: ptd bad ", 0
 line_ptd_ok: db "Yunooka: event=ptdec ok vectors=4", 13, 10, 0
 line_ptd_reject: db "Yunooka: event=ptdec reject", 13, 10, 0
+line_sig_res: db "Yunooka: sig ", 0
+line_sig_ok: db " ok=", 0
+line_sig_bad: db " bad=", 0
+line_sig_where: db " where=", 0
+line_modl: db "Yunooka: modl ", 0
+line_colon: db ":", 0
+line_sig_done: db "Yunooka: event=sig ok vectors=3", 13, 10, 0
 line_pt_in_a: db "Yunooka: pti in-a ", 0
 line_pt_in_b: db "Yunooka: pti in-b ", 0
 ; SHA-256 的工作区。a..h 就放在 sha_h 里原地更新，W[0..63] 放 sha_w。
@@ -10766,6 +11207,88 @@ pt_dec_ks:
 ; 它在四个正确的输入上全对。
 pt_bad: db 0x02
         times 31 db 0
+
+; ---- 验签的常数、工作区与 RFC 8032 的三组向量 --------------------------
+;
+; L 是基点的阶：2^252 + 27742317777372353535851937790883648493，253 位。第九格是
+; 零，留着让减法链有统一的格数 —— 少一格，那条链就得为「够不够借」多一个分支。
+k_l:
+    dd 0x5CF5D3ED, 0x5812631A, 0xA2F79CD6, 0x14DEF9DE
+    dd 0x00000000, 0x00000000, 0x00000000, 0x10000000
+    dd 0x00000000
+k_n: times 16 dd 0
+k_rem: times 9 dd 0
+k_bit: dq 0
+sig_cat: times 512 db 0
+sig_pk: times 32 db 0
+sig_sig: times 64 db 0
+sig_msg: times 64 db 0
+sig_msglen: dq 0
+sig_res: dq 0
+sig_res2: dq 0
+; 走到第几步。失败时它就是最后一个成功的那一步 —— 比一串「不对」有用得多。
+sig_where: dq 0
+sig_w1: dq 0
+sig_w2: dq 0
+vt_i: dq 0
+pt_A: times 32 dd 0
+pt_R: times 32 dd 0
+pt_SB: times 32 dd 0
+pt_c1: times 8 dd 0
+pt_c2: times 8 dd 0
+
+; RFC 8032 第 7.1 节的三组向量。消息长度是 0、1、2 —— 覆盖 SHA-512 那条链的短输入，
+; 而长消息的多块路径已经由 SHA-512 自己的六行判据压过（四个在两块以上）。
+vec1_pk:
+    db 0xD7, 0x5A, 0x98, 0x01, 0x82, 0xB1, 0x0A, 0xB7
+    db 0xD5, 0x4B, 0xFE, 0xD3, 0xC9, 0x64, 0x07, 0x3A
+    db 0x0E, 0xE1, 0x72, 0xF3, 0xDA, 0xA6, 0x23, 0x25
+    db 0xAF, 0x02, 0x1A, 0x68, 0xF7, 0x07, 0x51, 0x1A
+vec1_msg: db 0
+vec1_sig:
+    db 0xE5, 0x56, 0x43, 0x00, 0xC3, 0x60, 0xAC, 0x72
+    db 0x90, 0x86, 0xE2, 0xCC, 0x80, 0x6E, 0x82, 0x8A
+    db 0x84, 0x87, 0x7F, 0x1E, 0xB8, 0xE5, 0xD9, 0x74
+    db 0xD8, 0x73, 0xE0, 0x65, 0x22, 0x49, 0x01, 0x55
+    db 0x5F, 0xB8, 0x82, 0x15, 0x90, 0xA3, 0x3B, 0xAC
+    db 0xC6, 0x1E, 0x39, 0x70, 0x1C, 0xF9, 0xB4, 0x6B
+    db 0xD2, 0x5B, 0xF5, 0xF0, 0x59, 0x5B, 0xBE, 0x24
+    db 0x65, 0x51, 0x41, 0x43, 0x8E, 0x7A, 0x10, 0x0B
+vec2_pk:
+    db 0x3D, 0x40, 0x17, 0xC3, 0xE8, 0x43, 0x89, 0x5A
+    db 0x92, 0xB7, 0x0A, 0xA7, 0x4D, 0x1B, 0x7E, 0xBC
+    db 0x9C, 0x98, 0x2C, 0xCF, 0x2E, 0xC4, 0x96, 0x8C
+    db 0xC0, 0xCD, 0x55, 0xF1, 0x2A, 0xF4, 0x66, 0x0C
+vec2_msg: db 0x72
+vec2_sig:
+    db 0x92, 0xA0, 0x09, 0xA9, 0xF0, 0xD4, 0xCA, 0xB8
+    db 0x72, 0x0E, 0x82, 0x0B, 0x5F, 0x64, 0x25, 0x40
+    db 0xA2, 0xB2, 0x7B, 0x54, 0x16, 0x50, 0x3F, 0x8F
+    db 0xB3, 0x76, 0x22, 0x23, 0xEB, 0xDB, 0x69, 0xDA
+    db 0x08, 0x5A, 0xC1, 0xE4, 0x3E, 0x15, 0x99, 0x6E
+    db 0x45, 0x8F, 0x36, 0x13, 0xD0, 0xF1, 0x1D, 0x8C
+    db 0x38, 0x7B, 0x2E, 0xAE, 0xB4, 0x30, 0x2A, 0xEE
+    db 0xB0, 0x0D, 0x29, 0x16, 0x12, 0xBB, 0x0C, 0x00
+vec3_pk:
+    db 0xFC, 0x51, 0xCD, 0x8E, 0x62, 0x18, 0xA1, 0xA3
+    db 0x8D, 0xA4, 0x7E, 0xD0, 0x02, 0x30, 0xF0, 0x58
+    db 0x08, 0x16, 0xED, 0x13, 0xBA, 0x33, 0x03, 0xAC
+    db 0x5D, 0xEB, 0x91, 0x15, 0x48, 0x90, 0x80, 0x25
+vec3_msg: db 0xAF, 0x82
+vec3_sig:
+    db 0x62, 0x91, 0xD6, 0x57, 0xDE, 0xEC, 0x24, 0x02
+    db 0x48, 0x27, 0xE6, 0x9C, 0x3A, 0xBE, 0x01, 0xA3
+    db 0x0C, 0xE5, 0x48, 0xA2, 0x84, 0x74, 0x3A, 0x44
+    db 0x5E, 0x36, 0x80, 0xD7, 0xDB, 0x5A, 0xC3, 0xAC
+    db 0x18, 0xFF, 0x9B, 0x53, 0x8D, 0x16, 0xF2, 0x90
+    db 0xAE, 0x67, 0xF7, 0x60, 0x98, 0x4D, 0xC6, 0x59
+    db 0x4A, 0x7C, 0x15, 0xE9, 0x71, 0x6E, 0xD2, 0x8D
+    db 0xC0, 0x27, 0xBE, 0xCE, 0xEA, 0x1E, 0xC4, 0x0A
+
+vt_pks: dq vec1_pk, vec2_pk, vec3_pk
+vt_msgs: dq vec1_msg, vec2_msg, vec3_msg
+vt_sigs: dq vec1_sig, vec2_sig, vec3_sig
+vt_lens: dq 0, 1, 2
 
 ; SHA-512 的 80 个常量：K[i] = floor(frac(cbrt(p_i)) * 2^64)，p_i 是第 i 个质数。
 ;
