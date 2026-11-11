@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 112
+stage2_sectors equ 114
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -1412,7 +1412,7 @@ exec:
 
 .try_write:
     cmp r8, 5
-    jne .builtin_unknown
+    jne .try_readline               ; 长度不是 5 不是错，只是不是 write
     cmp word [rdi], 0x0077          ; 'w'
     jne .builtin_unknown
     cmp word [rdi + 2], 0x0072      ; 'r'
@@ -1448,6 +1448,67 @@ exec:
 .wr_done:
     call put_nl64
     xor eax, eax                    ; 空
+    xor edx, edx
+    call push_val
+    inc rbx
+    jmp .loop
+
+.try_readline:
+    cmp r8, 8
+    jne .builtin_unknown
+    cmp word [rdi], 0x0072          ; 'r'
+    jne .builtin_unknown
+    cmp word [rdi + 2], 0x0065      ; 'e'
+    jne .builtin_unknown
+    cmp word [rdi + 4], 0x0061      ; 'a'
+    jne .builtin_unknown
+    cmp word [rdi + 6], 0x0064      ; 'd'
+    jne .builtin_unknown
+    cmp word [rdi + 8], 0x006C      ; 'l'
+    jne .builtin_unknown
+    cmp word [rdi + 10], 0x0069     ; 'i'
+    jne .builtin_unknown
+    cmp word [rdi + 12], 0x006E     ; 'n'
+    jne .builtin_unknown
+    cmp word [rdi + 14], 0x0065     ; 'e'
+    jne .builtin_unknown
+    cmp r14, 0
+    jne .builtin_unknown
+
+    ; readline：把宿主攒的那一行交给包，形状是包里认的「u16 长度 + 码元」。
+    ;
+    ; 这一条与 write 合起来就是 LAYERS 第六节第二条判据：一个包通过 Myon 读一行、
+    ; 写一行。而它比 write 多证明一件事 —— 包拿到的字不是自己写死的，是这一趟运行时
+    ; 从外面进来的。一个「打印固定字符串」的实现过不了它。
+    ;
+    ; 长度截到 255 个码元。超出的部分不交给包，而不是静默截断：这一版没有「包读到一半
+    ; 还想再要」的机制，所以给它的必须是一整行，或者一个明说的短行。
+    mov rsi, [sh_line_ptr]
+    test rsi, rsi
+    jz .rl_empty
+    lea rdi, [myon_line]
+    xor ecx, ecx
+.rl_copy:
+    mov al, [rsi + rcx]
+    test al, al
+    jz .rl_done
+    cmp al, 10
+    je .rl_done
+    cmp ecx, 255
+    jae .rl_done
+    movzx eax, al
+    mov [rdi + 2 + rcx * 2], ax
+    inc ecx
+    jmp .rl_copy
+.rl_done:
+    mov [rdi], cx                   ; u16 长度
+    mov rax, 2                      ; 串
+    mov rdx, rdi
+    call push_val
+    inc rbx
+    jmp .loop
+.rl_empty:
+    xor eax, eax
     xor edx, edx
     call push_val
     inc rbx
@@ -2341,6 +2402,13 @@ run_shell:
     call fs_load
     mov r14, rsi                  ; 命令内容 —— r14 从此换了身份，目录扇区已经用完
 .have_line:
+    ; 记住这一行在哪：内置 readline 要从这里取。
+    ;
+    ; 存指针而不是抄内容，是因为 shell 这一侧的行本来就在原地不动 —— 而 readline
+    ; 那一步才把 ASCII 字节转成包里认的「u16 长度 + 码元」。转换放在被调用的那一刻，
+    ; 而不是存下来的那一刻，理由很简单：一个包不一定读它，而转换是有代价的。
+    mov [sh_line_ptr], r14
+
     mov rsi, line_shell_prompt
     call puts64
     mov rsi, r14
@@ -11907,6 +11975,10 @@ fs_cmd_name: dw 0x0063, 0x006D, 0x0064, 0x002E, 0x0074, 0x0078, 0x0074, 0
 fs_cmd_files: db "files"
 fs_cmd_echo: db "echo"
 sh_wordlen: dq 0
+; shell 认下的那一行在哪。内置 readline 从这里取 —— 而它存的是指针，内容留在原地。
+sh_line_ptr: dq 0
+; readline 交出去的串：u16 长度 + 最多 255 个码元。
+myon_line: times 520 db 0
 line_shell_prompt: db "Yunooka: shell> ", 0
 ; 输入从哪来。这两行不是装饰：只打 files 的答案，看不出那句话是信箱里的还是盘上的，
 ; 而这两件事的成败完全不同。

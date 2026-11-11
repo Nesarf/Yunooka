@@ -1162,7 +1162,13 @@ const 回声成 = 回声行 !== null;
 // 为什么这一条要紧：在这之前，一个包能算、能返回，而它没有办法往外说一句话。write
 // 是第一个这样的口子。LAYERS 第六节第二条判据要的是「一个包通过 Myon 读一行、写一行」，
 // 而这是其中的写那一半；读那一半要先把「宿主攒的那一行怎么交到包手里」定下来。
-const myon写行 = /myon here/.test(读到) && /^Yunooka: event=myon write ok$/m.test(读到);
+// 两条正则，卡的是顺序而不只是存在。
+//
+// `echo hello world` 在串口上出现两次：一次是 shell 的回显（`shell> echo hello world`），
+// 一次是包打出来的。只查「有没有这个串」会被前一次满足，而那一次与包无关。所以这里要
+// 的是「`myon here` 之后紧接 `echo hello world`」—— 那个顺序只有包里的两条指令能给出。
+const myon写行 = /myon here\r?\necho hello world\r?\n/.test(读到)
+  && /^Yunooka: event=myon write ok$/m.test(读到);
 const myon写成 = myon写行;
 
 // SHA-512 的六行：与主机逐字符相同。
