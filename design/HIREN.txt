@@ -94,12 +94,21 @@ SAI、PS、AI、RhinoCeros、Keil 都是别人的产品，而这个是一台自�
 
 六、还差的
 
-  HMYR 的读文件与写文件（第 108 行的 FS.txt 已经提到过，还没做）。
-  Yunooka 能跑一个有 I/O 的包（现在只能跑 main 返回 7）。
-  OnlySign 的验：第二环已落地（SHA-256 清单；格式、公钥位置、判据都在 running 状态）。
-    还缺第三环 —— Ed25519 的验签本体，要 SHA-512 与模 2^255-19 的曲线运算；而算错的症状是
-    「验不过」，与「验不过是因为被篡改」在串口上一模一样，所以它必须先有 RFC 8032 的测试向量。
-  identify 的表：PE、ELF、Mach-O、APK、DEX 五个头。
+  这一节写下的时候，下面四条一条都没做。它们后来一件一件落了地，而账没有跟着改，
+  所以这里换成当前的事实，逐条指到判据那一侧去：
+
+  HMYR 的读文件与写文件：有了。内置是 slurp 与 save，判据是「读回一份文件的长度」
+  与「写进去之后关掉再开机，那 512 个字节还在盘上」（save survived）。
+  Yunooka 能跑一个有 I/O 的包：有了。盘上那个包现在六个函数，Myon 八条判据把切词、
+  读写、画框、任意矩形、整窗、桥接、读文件、写文件各走一遍。
+  OnlySign 的验：三环闭合。域算术、点运算、标量乘、编解码、验签、接进 OnlySign、
+  缺件进补完界面、密钥可外置，每一层都有判据。剩下的只有一件「放一颗真私钥种子进
+  keys/onlysign.seed」—— 那要用户给，代码这边没有可做的。
+  identify 的表：十六格。PE、ELF、Mach-O、APK、DEX 之后又加了 gzip、7z、rar、PDF、
+  PNG、JPEG、SQLite，最后是本机自己的 hmgk。
+
+  这四条之外仍然开着的东西写在 PLAN 里：整合包、Ichiwatashi 扩展、Miketsukami 三块
+  blocked，而 hmgk 与 myon 还各有下一格。
 
 
 七、纯净度：装了 HIREN 就不算纯净
