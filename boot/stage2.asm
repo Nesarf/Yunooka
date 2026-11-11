@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 98
+stage2_sectors equ 102
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -715,6 +715,9 @@ long_entry:
     ; 编码是验签链上唯一输出到外面的地方：验签比的是两个点的编码。它压住模逆、乘法、
     ; 字节序与符号位四件事，所以它单独有一组判据，而不是躲在验签里。
     call run_pt_enc_test
+    ; 解码压在编码上，判据是往返：编码再解码必须回到同一个点。它同时压住「拒绝坏输入」
+    ; 这一半 —— 一个任何输入都接受的实现在四个正确输入上全对，而在那一个上露馅。
+    call run_pt_dec_test
     call run_ata_test
     call run_fs_test
     call run_fs_open
@@ -5772,19 +5775,33 @@ run_pt_mul_test:
 ; 不会相互踩到 —— 但如果将来有人在中间插一段用 fp_* 的代码，这里会静默地算错。
 
 ; 第 i 位（i 存在 fp_inv_i）是不是一。出 rax = 0 或 1。
+;
+; 位的来源是 fp_exp_ptr 指的那八格 —— 所以逆与开方共用同一套循环，只差一个指针。
 fp_inv_bit:
     mov rax, [fp_inv_i]
     mov rcx, rax
     shr rax, 5                      ; 落在第几格
     and ecx, 31                     ; 格内第几位
-    mov edx, [fp_im1 + rax * 4]
+    mov rdx, [fp_exp_ptr]
+    mov edx, [rdx + rax * 4]
     shr edx, cl
     and edx, 1
     mov eax, edx
     ret
 
-; fp_inv：rdi = 目标，rsi = 源
+; fp_inv：rdi = 目标，rsi = 源。源^(p-2)，也就是逆。
+; fp_pow：rdi = 目标，rsi = 底，rdx = 指数（八格的地址）。底^exp。
+;
+; 两者共用一个核心。开方要的指数是 (p+3)/8，与逆只差一个指针 —— 而这段循环有 255 轮，
+; 是最不该写两遍的东西。从第 254 位往下走：高位的零只会多做几次平方，不改变结果，
+; 所以两个指数都不必各自记着自己的位长。
 fp_inv:
+    lea rax, [fp_im1]
+    mov [fp_exp_ptr], rax
+    jmp fp_pow_core
+fp_pow:
+    mov [fp_exp_ptr], rdx
+fp_pow_core:
     push rdi
     push rsi
     lea rdi, [fp_inv_a]
@@ -5869,6 +5886,326 @@ pt_encode:
     shl eax, 7
     mov rdi, [pt_dst]
     or byte [rdi + 31], al
+    ret
+
+; fp_lt_p：rdi 指的八格若严格小于 p 就出 1。
+fp_lt_p:
+    mov ecx, 7
+.cmp:
+    mov eax, [rdi + rcx * 4]
+    mov edx, [fp_p + rcx * 4]
+    cmp eax, edx
+    jb .yes
+    ja .no
+    dec ecx
+    jns .cmp
+.no:
+    xor eax, eax
+    ret
+.yes:
+    mov eax, 1
+    ret
+
+; fp_eq：rdi 与 rsi 两个八格若逐格相同就出 1。
+fp_eq:
+    xor ecx, ecx
+.chk:
+    mov eax, [rdi + rcx * 4]
+    cmp eax, [rsi + rcx * 4]
+    jne .no
+    inc ecx
+    cmp ecx, 8
+    jb .chk
+    mov eax, 1
+    ret
+.no:
+    xor eax, eax
+    ret
+
+; fp_is_zero：rdi 指的八格若全零就出 1。
+fp_is_zero:
+    xor ecx, ecx
+.chk:
+    mov eax, [rdi + rcx * 4]
+    test eax, eax
+    jnz .no
+    inc ecx
+    cmp ecx, 8
+    jb .chk
+    mov eax, 1
+    ret
+.no:
+    xor eax, eax
+    ret
+
+; ----------------------------------------------------------------------
+; pt_decode：rdi = 点（输出），rsi = 三十二字节。出 rax = 1 成功 / 0 拒绝。
+;
+; 从 y 把 x 解出来，靠的是曲线方程：-x² + y² = 1 + d x² y²，整理一下
+;
+;     x² = (y² - 1) / (d y² + 1)
+;
+; 也就是一次除法（一次逆）。剩下的是一次开方 —— p ≡ 5 (mod 8)，所以平方根可以用
+; 幂 a^((p+3)/8) 求，而它给出的是「平方根乘以 ±1 或者 ±sqrt(-1)」里的某一个。所以
+; 算完之后必须验：把那一次方再平方回去，若不等于 x²，就乘 sqrt(-1) 再验一次；两次
+; 都不等于，说明这个 y 落不到曲线上，拒绝。
+;
+; 这里的「验」不是防御性编程，是算法的一半：那个指数给的不是唯一的根，而是某族的
+; 一个代表。少了这一步，任何 y 都会被解出一个看起来像点的东西。
+;
+; 拒绝的三种情形：y 不小于 p（不是一个域元素）、y 不在曲线上、x 为零而符号位是一
+; （RFC 8032 明确把这一种算作不合法，否则单位元有两种写法）。
+; ----------------------------------------------------------------------
+pt_decode:
+    mov [pt_dst], rdi
+    mov [pt_src], rsi
+
+    lea rdi, [pt_bytes]
+    mov rsi, [pt_src]
+    mov ecx, 8
+    cld
+    rep movsd
+    movzx eax, byte [pt_bytes + 31]
+    shr eax, 7
+    mov [pt_sign], rax
+    and byte [pt_bytes + 31], 0x7F
+
+    lea rdi, [pt_y]
+    lea rsi, [pt_bytes]
+    mov ecx, 8
+    cld
+    rep movsd
+
+    lea rdi, [pt_y]
+    call fp_lt_p
+    test rax, rax
+    jz .fail
+
+    ; y2 = y*y
+    lea rdi, [fp_a]
+    lea rsi, [pt_y]
+    call fp_copy
+    lea rdi, [fp_b]
+    lea rsi, [pt_y]
+    call fp_copy
+    call fp_mulmod
+    lea rdi, [pt_y2]
+    lea rsi, [fp_out]
+    call fp_copy
+
+    ; u = y2 - 1
+    lea rdi, [fp_a]
+    lea rsi, [pt_y2]
+    call fp_copy
+    lea rdi, [fp_b]
+    lea rsi, [fp_one]
+    call fp_copy
+    call fp_sub
+    lea rdi, [pt_u]
+    lea rsi, [fp_out]
+    call fp_copy
+
+    ; v = d*y2 + 1
+    lea rdi, [fp_a]
+    lea rsi, [fp_d]
+    call fp_copy
+    lea rdi, [fp_b]
+    lea rsi, [pt_y2]
+    call fp_copy
+    call fp_mulmod
+    lea rdi, [fp_a]
+    lea rsi, [fp_out]
+    call fp_copy
+    lea rdi, [fp_b]
+    lea rsi, [fp_one]
+    call fp_copy
+    call fp_add
+    lea rdi, [pt_v]
+    lea rsi, [fp_out]
+    call fp_copy
+
+    ; x2 = u * inv(v)
+    lea rdi, [fp_inv_t]
+    lea rsi, [pt_v]
+    call fp_inv
+    lea rdi, [fp_a]
+    lea rsi, [pt_u]
+    call fp_copy
+    lea rdi, [fp_b]
+    lea rsi, [fp_inv_t]
+    call fp_copy
+    call fp_mulmod
+    lea rdi, [pt_x2]
+    lea rsi, [fp_out]
+    call fp_copy
+
+    ; x = x2^((p+3)/8)
+    lea rdi, [pt_x]
+    lea rsi, [pt_x2]
+    lea rdx, [fp_sqexp]
+    call fp_pow
+
+    lea rdi, [pt_x]
+    lea rsi, [pt_x2]
+    call pt_decode_checksq
+    test rax, rax
+    jnz .x_ok
+
+    ; 乘 sqrt(-1) 再验一次
+    lea rdi, [fp_a]
+    lea rsi, [pt_x]
+    call fp_copy
+    lea rdi, [fp_b]
+    lea rsi, [fp_sqrtm1]
+    call fp_copy
+    call fp_mulmod
+    lea rdi, [pt_x]
+    lea rsi, [fp_out]
+    call fp_copy
+    lea rdi, [pt_x]
+    lea rsi, [pt_x2]
+    call pt_decode_checksq
+    test rax, rax
+    jz .fail
+
+.x_ok:
+    movzx eax, byte [pt_x]
+    and eax, 1
+    cmp rax, [pt_sign]
+    je .sign_ok
+    lea rdi, [fp_a]
+    lea rsi, [fp_zero]
+    call fp_copy
+    lea rdi, [fp_b]
+    lea rsi, [pt_x]
+    call fp_copy
+    call fp_sub
+    lea rdi, [pt_x]
+    lea rsi, [fp_out]
+    call fp_copy
+.sign_ok:
+    lea rdi, [pt_x]
+    call fp_is_zero
+    test rax, rax
+    jz .ok
+    cmp qword [pt_sign], 0
+    jne .fail
+
+.ok:
+    mov rdi, [pt_dst]
+    lea rsi, [pt_x]
+    call fp_copy
+    mov rdi, [pt_dst]
+    add rdi, 32
+    lea rsi, [pt_y]
+    call fp_copy
+    mov rdi, [pt_dst]
+    add rdi, 64
+    lea rsi, [fp_one]
+    call fp_copy
+    lea rdi, [fp_a]
+    lea rsi, [pt_x]
+    call fp_copy
+    lea rdi, [fp_b]
+    lea rsi, [pt_y]
+    call fp_copy
+    call fp_mulmod
+    mov rdi, [pt_dst]
+    add rdi, 96
+    lea rsi, [fp_out]
+    call fp_copy
+    mov eax, 1
+    ret
+.fail:
+    xor eax, eax
+    ret
+
+; pt_decode 的中间一步：rdi 那一格平方之后等不等于 rsi。出 1 表示相等。
+;
+; 两个参数都从栈上读（不 pop 再 push），因为中间那几次调用会把寄存器用光。
+pt_decode_checksq:
+    push rdi
+    push rsi
+    lea rdi, [fp_a]
+    mov rsi, [rsp + 8]              ; 第一个参数
+    call fp_copy
+    lea rdi, [fp_b]
+    mov rsi, [rsp + 8]
+    call fp_copy
+    call fp_mulmod
+    lea rdi, [fp_out]
+    mov rsi, [rsp]                  ; 第二个参数
+    call fp_eq
+    pop rsi
+    pop rdi
+    ret
+
+; ----------------------------------------------------------------------
+; 解码的判据：往返
+;
+; 对 1、2、3、5 四个倍数各做一次「算出来 → 编码 → 解码」，然后把编码前与解码后的
+; 四份坐标都打出来。主机那边成对比较：同一个 k 的两组必须是同一个点。
+;
+; 为什么往返是这一层唯一说得清的判据：编码与解码互为逆，而它们各自都不需要知道
+; 「正确的坐标是什么」—— 只要两个方向一致，往返就闭合。这比拿一个写死的期望值去比
+; 结实得多，因为写死的期望值只覆盖那一个点。
+;
+; 1、2、3 覆盖的是符号位为零那一半（它们的 x 都是偶数），5 覆盖另一半。上一轮的教训：
+; 少了 5，符号位那一位改坏了也不红。
+;
+; 另外一组是坏输入：y = 2 落不到曲线上，解码必须拒绝。没有这一组，一个「任何输入都
+; 接受」的实现会与正确的实现看起来一模一样 —— 因为它在四个正确的输入上全对。
+; ----------------------------------------------------------------------
+run_pt_dec_test:
+    mov qword [ptd_i], 0
+.loop:
+    mov rax, [ptd_i]
+    cmp rax, 4
+    jae .bad
+    shl rax, 5
+    lea rdx, [pt_dec_ks]
+    add rdx, rax
+    lea rdi, [pt_scalar]
+    mov rsi, rdx
+    call fp_copy
+
+    lea rdi, [pt_a]
+    lea rsi, [pt_base]
+    call pt_copy
+    call pt_mul
+    mov rsi, line_ptd_before
+    lea rdi, [pt_o]
+    call pt_show
+
+    lea rdi, [pt_enc]
+    lea rsi, [pt_o]
+    call pt_encode
+    lea rdi, [pt_o]
+    lea rsi, [pt_enc]
+    call pt_decode
+    test rax, rax
+    jz .reject
+    mov rsi, line_ptd_after
+    lea rdi, [pt_o]
+    call pt_show
+
+    inc qword [ptd_i]
+    jmp .loop
+
+.bad:
+    lea rdi, [pt_o]
+    lea rsi, [pt_bad]
+    call pt_decode
+    mov rsi, line_ptd_bad
+    call puts64
+    call put_num64
+    call put_nl64
+    mov rsi, line_ptd_ok
+    call puts64
+    ret
+.reject:
+    mov rsi, line_ptd_reject
+    call puts64
     ret
 
 ; ----------------------------------------------------------------------
@@ -10155,6 +10492,11 @@ line_pte_4b: db "Yunooka: pte 4b ", 0
 line_pte_5b: db "Yunooka: pte 5b ", 0
 line_ptm_mul5: db "Yunooka: ptm mul-5 ", 0
 line_pte_ok: db "Yunooka: event=ptenc ok vectors=5", 13, 10, 0
+line_ptd_before: db "Yunooka: ptd before ", 0
+line_ptd_after: db "Yunooka: ptd after ", 0
+line_ptd_bad: db "Yunooka: ptd bad ", 0
+line_ptd_ok: db "Yunooka: event=ptdec ok vectors=4", 13, 10, 0
+line_ptd_reject: db "Yunooka: event=ptdec reject", 13, 10, 0
 line_pt_in_a: db "Yunooka: pti in-a ", 0
 line_pt_in_b: db "Yunooka: pti in-b ", 0
 ; SHA-256 的工作区。a..h 就放在 sha_h 里原地更新，W[0..63] 放 sha_w。
@@ -10382,6 +10724,48 @@ fp_inv_i: dq 0
 pt_src: dq 0
 pt_dst: dq 0
 pt_enc: times 32 db 0
+
+; ---- 解码的常数与工作区 ------------------------------------------------
+;
+; d 是曲线常数 -121665/121666；sqrt(-1) 是 2^((p-1)/4)，它的自检在 tools 那边跑过
+; （平方加一在模 p 下是零）；(p+3)/8 是开方用的指数 —— p ≡ 5 (mod 8)，所以 a^((p+3)/8)
+; 给出 a 的一个平方根，而它是哪一个要看运气，所以解码那一步必须平方回去验。
+fp_exp_ptr: dq 0
+fp_d:
+    dd 0x135978A3, 0x75EB4DCA, 0x4141D8AB, 0x00700A4D
+    dd 0x7779E898, 0x8CC74079, 0x2B6FFE73, 0x52036CEE
+fp_sqrtm1:
+    dd 0x4A0EA0B0, 0xC4EE1B27, 0xAD2FE478, 0x2F431806
+    dd 0x3DFBD7A7, 0x2B4D0099, 0x4FC1DF0B, 0x2B832480
+fp_sqexp:
+    dd 0xFFFFFFFE, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF
+    dd 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x0FFFFFFF
+
+pt_bytes: times 32 db 0
+pt_y: times 8 dd 0
+pt_y2: times 8 dd 0
+pt_u: times 8 dd 0
+pt_v: times 8 dd 0
+pt_x: times 8 dd 0
+pt_x2: times 8 dd 0
+pt_sign: dq 0
+ptd_i: dq 0
+; 往返判据用的四个倍数。3 与 5 进来的理由不同：3 是位模式 11（加倍与加号交替），
+; 5 是第一个 x 为奇数的倍数 —— 符号位那一半只有它能走到。
+pt_dec_ks:
+    dd 0x00000001, 0x00000000, 0x00000000, 0x00000000
+    dd 0x00000000, 0x00000000, 0x00000000, 0x00000000
+    dd 0x00000002, 0x00000000, 0x00000000, 0x00000000
+    dd 0x00000000, 0x00000000, 0x00000000, 0x00000000
+    dd 0x00000003, 0x00000000, 0x00000000, 0x00000000
+    dd 0x00000000, 0x00000000, 0x00000000, 0x00000000
+    dd 0x00000005, 0x00000000, 0x00000000, 0x00000000
+    dd 0x00000000, 0x00000000, 0x00000000, 0x00000000
+; 坏输入：y = 2。它落不到曲线上（tools 那边用欧拉判据查过：2 不是那条曲线上的 y），
+; 所以解码必须拒绝。少了这一组，一个「任何输入都接受」的实现会看起来一模一样 ——
+; 它在四个正确的输入上全对。
+pt_bad: db 0x02
+        times 31 db 0
 
 ; SHA-512 的 80 个常量：K[i] = floor(frac(cbrt(p_i)) * 2^64)，p_i 是第 i 个质数。
 ;
