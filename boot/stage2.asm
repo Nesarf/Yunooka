@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 85
+stage2_sectors equ 93
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -706,6 +706,9 @@ long_entry:
     ; 所以两条各自先有判据，各自与自己主机上的对应物逐字符对，之后才允许它们合流。
     call run_fp_test
     call run_fp2_test
+    ; 点运算压在域算术之上。它的判据是三条交叉积相等，由主机那边判 —— 固件只把四份
+    ; 坐标打出来，因为「两个投影表示是不是同一个点」需要乘，而那一侧已经有 BigInt。
+    call run_pt_test
     call run_ata_test
     call run_fs_test
     call run_fs_open
@@ -5362,6 +5365,250 @@ run_fp2_test:
     ret
 
 ; ======================================================================
+; 点运算：扩展坐标上的加与双
+; ======================================================================
+;
+; 坐标是 (X, Y, Z, T)，代表仿射点 (X/Z, Y/Z)，而 T = X*Y/Z。用扩展坐标而不是仿射，
+; 是因为仿射的加法和倍点都要一次模逆，而模逆是 p-2 次方，比一次乘法贵三个数量级；
+; 扩展坐标把除法推迟到最后一刻 —— 验签全程只在编码那一步做一次逆。
+;
+; 点加用统一公式（add-2008-hwcd-3 那一族），点倍用 dbl-2008-hwcd。两个公式给出的
+; 投影表示不同：同一个点可以是 (X,Y,Z,T) 也可以是 (kX,kY,kZ,kT)，而这两套公式选的
+; k 不一样。所以「两个点是不是同一个点」不能比坐标，要比交叉积（X1*Z2 == X2*Z1 且
+; Y1*Z2 == Y2*Z1）—— 这一件事由主机那边做，因为四份坐标是它拿到的。
+
+; FPOP 目的, 左, 右, 函数 —— 「左 操作 右，存进 目的」写成一行。
+;
+; 第四个参数是乘法时必须写 fp_mulmod，不能写 fp_mul。fp_mul 只把 512 位的积写进
+; fp_prod，而 FPOP 拷出去的是 fp_out：用 fp_mul 的话拷到的是上一次运算留在 fp_out
+; 里的那个值，于是乘法那一步静默地什么都没做，链上每一步都在拿上一步的结果当自己
+; 算出来的。
+;
+; 这个错法的形状很难看。域乘法自己的六组判据用的是 fp_mulmod（乘完再约简），所以
+; 它一直是绿的；加减那两步用的是 fp_add / fp_sub，它们直接写 fp_out，所以也是绿的；
+; 只有点运算错，而它错成的样子是四份坐标全部相同 —— 因为它们拿到的是同一个旧值。
+; 从「四格一样」倒推回「乘法没写 fp_out」花了很久，而从这个宏的定义到第一次跑，
+; 中间没有任何一步会抱怨。
+;
+; 点加十二步、点倍十五步，每一步都是同一件事：两个操作数拷进 fp_a / fp_b、调一个域
+; 函数、把 fp_out 拷出来。显式写出来是每步六条指令、二十来段几乎一样的代码，而复制
+; 粘贴出来的错不会报错 —— 它只会算出一个别的点，然后在验签那一步报「签名不对」。
+%macro FPOP 4
+    lea rdi, [fp_a]
+    lea rsi, [%2]
+    call fp_copy
+    lea rdi, [fp_b]
+    lea rsi, [%3]
+    call fp_copy
+    call %4
+    lea rdi, [%1]
+    lea rsi, [fp_out]
+    call fp_copy
+%endmacro
+
+; pt_copy：rdi 目的，rsi 源，一个点三十格。
+pt_copy:
+    push rcx
+    push rsi
+    push rdi
+    mov ecx, 32
+    cld
+    rep movsd
+    pop rdi
+    pop rsi
+    pop rcx
+    ret
+
+; ----------------------------------------------------------------------
+; pt_add：pt_a + pt_b → pt_o
+;
+;   A = (Y1-X1)*(Y2-X2)      E = B-A      X3 = E*F
+;   B = (Y1+X1)*(Y2+X2)      F = D-C      Y3 = G*H
+;   C = T1*2d*T2             G = D+C      T3 = E*H
+;   D = 2*Z1*Z2              H = B+A      Z3 = F*G
+;
+; T 那一格不是从 x*y 算出来的，是 E*H —— 正是这一点让整条链不必做除法。
+; ----------------------------------------------------------------------
+pt_add:
+    FPOP pt_t0, pt_a+32, pt_a, fp_sub
+    FPOP pt_t1, pt_b+32, pt_b, fp_sub
+    FPOP pt_t2, pt_t0, pt_t1, fp_mulmod      ; A
+
+    FPOP pt_t0, pt_a+32, pt_a, fp_add
+    FPOP pt_t1, pt_b+32, pt_b, fp_add
+    FPOP pt_t3, pt_t0, pt_t1, fp_mulmod      ; B
+
+    FPOP pt_t0, pt_a+96, fp_d2, fp_mulmod
+    FPOP pt_t4, pt_t0, pt_b+96, fp_mulmod    ; C
+
+    FPOP pt_t0, pt_a+64, pt_b+64, fp_mulmod
+    FPOP pt_t5, pt_t0, pt_t0, fp_add      ; D
+
+    FPOP pt_t6, pt_t3, pt_t2, fp_sub      ; E
+    FPOP pt_t7, pt_t5, pt_t4, fp_sub      ; F
+    FPOP pt_t8, pt_t5, pt_t4, fp_add      ; G
+    FPOP pt_t9, pt_t3, pt_t2, fp_add      ; H
+
+    FPOP pt_o, pt_t6, pt_t7, fp_mulmod
+    FPOP pt_o+32, pt_t8, pt_t9, fp_mulmod
+    FPOP pt_o+96, pt_t6, pt_t9, fp_mulmod
+    FPOP pt_o+64, pt_t7, pt_t8, fp_mulmod
+    ret
+
+; ----------------------------------------------------------------------
+; pt_double：2 * pt_a → pt_o
+;
+;   A = X1^2                 G = D+B      X3 = E*F
+;   B = Y1^2                 F = G-C      Y3 = G*H
+;   C = 2*Z1^2               H = D-B      T3 = E*H
+;   D = -A                   E = (X1+Y1)^2 - A - B    Z3 = F*G
+;
+; E 那一条不写成 2*X1*Y1，而是 (X1+Y1)^2 - A - B：省一次乘法，而且这个写法只用平方
+; 与加减。它也是这一层最容易写错的一步 —— 展开少减掉一项，结果会是一个不在曲线上的
+; 点，而曲线不会当场抱怨。
+; ----------------------------------------------------------------------
+pt_double:
+    FPOP pt_t0, pt_a, pt_a, fp_mulmod        ; A
+    FPOP pt_t1, pt_a+32, pt_a+32, fp_mulmod  ; B
+    FPOP pt_t2, pt_a+64, pt_a+64, fp_mulmod
+    FPOP pt_t2, pt_t2, pt_t2, fp_add      ; C
+
+    FPOP pt_t3, fp_zero, pt_t0, fp_sub    ; D = -A
+
+    FPOP pt_t4, pt_a, pt_a+32, fp_add
+    FPOP pt_t4, pt_t4, pt_t4, fp_mulmod
+    FPOP pt_t4, pt_t4, pt_t0, fp_sub
+    FPOP pt_t4, pt_t4, pt_t1, fp_sub      ; E
+
+    FPOP pt_t5, pt_t3, pt_t1, fp_add      ; G
+    FPOP pt_t6, pt_t5, pt_t2, fp_sub      ; F
+    FPOP pt_t7, pt_t3, pt_t1, fp_sub      ; H
+
+    FPOP pt_o, pt_t4, pt_t6, fp_mulmod
+    FPOP pt_o+32, pt_t5, pt_t7, fp_mulmod
+    FPOP pt_o+96, pt_t4, pt_t7, fp_mulmod
+    FPOP pt_o+64, pt_t6, pt_t5, fp_mulmod
+    ret
+
+; ----------------------------------------------------------------------
+; pt_show：rsi 标签，rdi 点。打一行四个坐标，各三十二字节连写。
+;
+; 一次打满一百二十八字节而不是一个一个打：主机那边按每六十四个十六进制字符切一格，
+; 切法与打印格式是同一件事。这里原来写的是三十二 —— 那正好是一格，于是四份坐标只露
+; 了一份，而主机那条判据要的是四份，两边一条也没对上。
+pt_show:
+    push rdi
+    call puts64
+    pop rdi
+    mov rcx, 128
+    call put_hex_bytes
+    call put_nl64
+    ret
+
+; fp_show：rsi 标签，rdi 一个域元素。点加算错时用来把中间量摊开。
+; 现在没有调用者 —— 但点运算那一段还会再来，而「四份坐标变成一个数」这种症状第一次
+; 花了很久才倒推回去。留着它，下一次不必再写一遍。
+    push rdi
+    call puts64
+    pop rdi
+    mov rcx, 32
+    call put_hex_bytes
+    call put_nl64
+    ret
+
+; ----------------------------------------------------------------------
+; 点运算的判据
+;
+; 五组读数，三条判据，全部由主机那边判 —— 它拿到四份坐标，自己做交叉积比较。
+;
+;   add-bb       B + B
+;   dbl-b        2B                      与 add-bb 必须是同一个点
+;   dbl2-b       2*(2B)                  与 add-4b 必须是同一个点
+;   add-4b       (2B) + (2B)
+;   add-ident    B + O                   O 是单位元 (0,1,1,0)，必须还是 B
+;
+; 为什么是交叉积而不是坐标相减：点加与点倍选的投影比例 k 不同，同一个点在这两条路
+; 上会得到不同的 (X,Y,Z,T)。比坐标会把一个正确的实现判成错的。
+;
+; 为什么这三条不是重复：add-bb 与 dbl-b 比的是「两个公式是不是同一个群运算」；dbl2-b
+; 与 add-4b 比的是「群运算能不能叠」；add-ident 比的是「单位元真的是单位元」。三条
+; 各自能单独红 —— 而三条一起绿，才说明这不是一组凑出来的数。
+; ----------------------------------------------------------------------
+run_pt_test:
+    ; add-bb：B + B
+    lea rdi, [pt_a]
+    lea rsi, [pt_base]
+    call pt_copy
+    lea rdi, [pt_b]
+    lea rsi, [pt_base]
+    call pt_copy
+    ; 先把喂进去的两个点打出来。点加算错的时候，第一件要分的事是「输入错了」还是
+    ; 「公式错了」—— 而这两件事在只看得见输出的时候长得一样。pti 前缀是刻意的：
+    ; 主机那条判据只认 pt 开头的五行，这两行不参与判分。
+    mov rsi, line_pt_in_a
+    lea rdi, [pt_a]
+    call pt_show
+    mov rsi, line_pt_in_b
+    lea rdi, [pt_b]
+    call pt_show
+    call pt_add
+    mov rsi, line_pt_addbb
+    lea rdi, [pt_o]
+    call pt_show
+    lea rdi, [pt_o2]
+    lea rsi, [pt_o]
+    call pt_copy                       ; 2B 收起来，后面还要用
+
+    ; dbl-b：2B
+    lea rdi, [pt_a]
+    lea rsi, [pt_base]
+    call pt_copy
+    call pt_double
+    mov rsi, line_pt_dblb
+    lea rdi, [pt_o]
+    call pt_show
+
+    ; dbl2-b：2*(2B)
+    lea rdi, [pt_a]
+    lea rsi, [pt_o2]
+    call pt_copy
+    call pt_double
+    mov rsi, line_pt_dbl2
+    lea rdi, [pt_o]
+    call pt_show
+    lea rdi, [pt_o3]
+    lea rsi, [pt_o]
+    call pt_copy
+
+    ; add-4b：(2B) + (2B)
+    lea rdi, [pt_a]
+    lea rsi, [pt_o2]
+    call pt_copy
+    lea rdi, [pt_b]
+    lea rsi, [pt_o2]
+    call pt_copy
+    call pt_add
+    mov rsi, line_pt_add4
+    lea rdi, [pt_o]
+    call pt_show
+
+    ; add-ident：B + O
+    lea rdi, [pt_a]
+    lea rsi, [pt_base]
+    call pt_copy
+    lea rdi, [pt_b]
+    lea rsi, [pt_ident]
+    call pt_copy
+    call pt_add
+    mov rsi, line_pt_addid
+    lea rdi, [pt_o]
+    call pt_show
+
+    mov rsi, line_pt_ok
+    call puts64
+    ret
+
+; ======================================================================
 ; 家庭组的第一步：共享是目录条目上的一个位
 ; ======================================================================
 ;
@@ -9542,6 +9789,14 @@ line_fp_ok: db "Yunooka: event=fp ok vectors=6", 13, 10, 0
 line_fp2_add: db "Yunooka: fp2 op=add val=", 0
 line_fp2_sub: db "Yunooka: fp2 op=sub val=", 0
 line_fp2_ok: db "Yunooka: event=fp2 ok vectors=6", 13, 10, 0
+line_pt_addbb: db "Yunooka: pt add-bb ", 0
+line_pt_dblb: db "Yunooka: pt dbl-b ", 0
+line_pt_dbl2: db "Yunooka: pt dbl2-b ", 0
+line_pt_add4: db "Yunooka: pt add-4b ", 0
+line_pt_addid: db "Yunooka: pt add-ident ", 0
+line_pt_ok: db "Yunooka: event=pt ok vectors=5", 13, 10, 0
+line_pt_in_a: db "Yunooka: pti in-a ", 0
+line_pt_in_b: db "Yunooka: pti in-b ", 0
 ; SHA-256 的工作区。a..h 就放在 sha_h 里原地更新，W[0..63] 放 sha_w。
 ;
 ; 为什么全部用内存而不是寄存器：寄存器分配的错会表现为「哈希不对」，而那个症状与
@@ -9682,6 +9937,57 @@ fp2_vecs:
     dd 0x00000000, 0x00000000, 0x00000000, 0x00000000
     dd 0x00000001, 0x00000000, 0x00000000, 0x00000000
     dd 0x00000000, 0x00000000, 0x00000000, 0x00000000
+
+; ---- 点运算的常数与工作区 ----------------------------------------------
+;
+; 一个点是四格域元素（X, Y, Z, T），每格八格肢体，所以一个点占三十二格 = 128 字节。
+; pt_a+32 这样的偏移因此是「下一格坐标」，不是「下一个字节」。
+;
+; 2d 是点加公式里那个常数。它不是抄来的：d = -121665/121666 mod p，乘二之后落在
+; 下面这八个肢体上。抄错了的症状是「点加算出一个不在曲线上的点」，而那要到很久以后
+; 才看得出来。
+fp_d2:
+    dd 0x26B2F159, 0xEBD69B94, 0x8283B156, 0x00E0149A
+    dd 0xEEF3D130, 0x198E80F2, 0x56DFFCE7, 0x2406D9DC
+fp_zero: times 8 dd 0
+
+; 基点 B：x 与 y 是 RFC 8032 给的那一对，Z 取一，T = x*y。
+pt_base:
+    dd 0x8F25D51A, 0xC9562D60, 0x9525A7B2, 0x692CC760
+    dd 0xFDD6DC5C, 0xC0A4E231, 0xCD6E53FE, 0x216936D3
+    dd 0x66666658, 0x66666666, 0x66666666, 0x66666666
+    dd 0x66666666, 0x66666666, 0x66666666, 0x66666666
+    dd 0x00000001, 0x00000000, 0x00000000, 0x00000000
+    dd 0x00000000, 0x00000000, 0x00000000, 0x00000000
+    dd 0xA5B7DDA3, 0x6DDE8AB3, 0x775152F5, 0x20F09F80
+    dd 0x64ABE37D, 0x66EA4E8E, 0xD78B7665, 0x67875F0F
+; 单位元 O = (0, 1, 1, 0)。
+pt_ident:
+    dd 0x00000000, 0x00000000, 0x00000000, 0x00000000
+    dd 0x00000000, 0x00000000, 0x00000000, 0x00000000
+    dd 0x00000001, 0x00000000, 0x00000000, 0x00000000
+    dd 0x00000000, 0x00000000, 0x00000000, 0x00000000
+    dd 0x00000001, 0x00000000, 0x00000000, 0x00000000
+    dd 0x00000000, 0x00000000, 0x00000000, 0x00000000
+    dd 0x00000000, 0x00000000, 0x00000000, 0x00000000
+    dd 0x00000000, 0x00000000, 0x00000000, 0x00000000
+
+pt_a: times 32 dd 0
+pt_b: times 32 dd 0
+pt_o: times 32 dd 0
+pt_o2: times 32 dd 0
+pt_o3: times 32 dd 0
+; 点加与点倍各自的临时格。两条链不共用，因为它们各自可以被单独测。
+pt_t0: times 8 dd 0
+pt_t1: times 8 dd 0
+pt_t2: times 8 dd 0
+pt_t3: times 8 dd 0
+pt_t4: times 8 dd 0
+pt_t5: times 8 dd 0
+pt_t6: times 8 dd 0
+pt_t7: times 8 dd 0
+pt_t8: times 8 dd 0
+pt_t9: times 8 dd 0
 
 ; SHA-512 的 80 个常量：K[i] = floor(frac(cbrt(p_i)) * 2^64)，p_i 是第 i 个质数。
 ;
