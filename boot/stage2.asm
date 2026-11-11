@@ -131,7 +131,16 @@ stage2:
 
     mov si, line3ok
     call serial_print
+    ; 这一句原先在 ds = 0x1000 下读 [seed_bytes]，而那条指令是 66 A1 28 03 ——
+    ; 16 位地址只取低 16 位（0x328），于是它读的是 0x10328，而不是 0x20328。
+    ; 它一直是错的，只是那个地址上以前恰好躺着 40，所以数字看着对 ——
+    ; 直到第二段涨到 130 扇区，0x328 处换成了别的东西，4218691752 才露出来。
+    ; 修法不是改表达式：低 16 位在 ds = 0x2000 下正好指到 0x20328。
+    push ds
+    mov ax, 0x2000
+    mov ds, ax
     mov eax, [seed_bytes]
+    pop ds
     call put_num
     mov si, line_nl
     call serial_print
