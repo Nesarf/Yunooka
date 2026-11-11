@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 83
+stage2_sectors equ 85
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -705,6 +705,7 @@ long_entry:
     ; 那条链是乘法。两条都错的时候，串口上只能看到「验签不过」一句，分不出是谁。
     ; 所以两条各自先有判据，各自与自己主机上的对应物逐字符对，之后才允许它们合流。
     call run_fp_test
+    call run_fp2_test
     call run_ata_test
     call run_fs_test
     call run_fs_open
@@ -5039,6 +5040,90 @@ fp_mul:
     ret
 
 ; ----------------------------------------------------------------------
+; fp_copy：rdi 目的，rsi 源，八格。
+fp_copy:
+    push rcx
+    push rsi
+    push rdi
+    mov ecx, 8
+    cld
+    rep movsd
+    pop rdi
+    pop rsi
+    pop rcx
+    ret
+
+; ----------------------------------------------------------------------
+; fp_add：fp_out = fp_a + fp_b mod p
+;
+; 进位靠 CF 传，所以循环里不许碰 CF：mov、adc、inc、dec、jnz 都不碰它。这条不是
+; 装饰 —— fp_condsub 那条链上原本有一个 cmp，它把 CF 盖掉，五个向量照旧对、一个错。
+;
+; 两个都小于 p 的数相加小于 2p，而 2p = 2^256 - 38 还没越过 2^256，所以八格的加法
+; 不会产生第九格的进位。这一点决定了这里不必处理溢出的高位，只须条件减一次。
+fp_add:
+    push rcx
+    push rdx
+    push r8
+    clc
+    xor ecx, ecx
+    mov r8d, 8
+.loop:
+    mov eax, [fp_a + rcx * 4]
+    adc eax, [fp_b + rcx * 4]
+    mov [fp_out + rcx * 4], eax
+    inc ecx
+    dec r8d
+    jnz .loop
+    lea rdi, [fp_out]
+    call fp_condsub
+    test rax, rax
+    jz .out
+    call fp_condsub                 ; 和小于 2p，所以第二次一定不减；留着是为了不依赖那句推理
+.out:
+    pop r8
+    pop rdx
+    pop rcx
+    ret
+
+; ----------------------------------------------------------------------
+; fp_sub：fp_out = fp_a - fp_b mod p
+;
+; a 大于等于 b 就直接减。a 小于 b 时第一次减法留下借位，八格里装的是 a - b + 2^256；
+; 再加 p 就把它折回 a - b + p，而加 p 自己在第九格产生的那一份溢出正好抵掉借位 ——
+; 所以结果落在 [0, p)，不必再条件减。
+fp_sub:
+    push rcx
+    push rdx
+    push r8
+    clc
+    xor ecx, ecx
+    mov r8d, 8
+.loop:
+    mov eax, [fp_a + rcx * 4]
+    sbb eax, [fp_b + rcx * 4]
+    mov [fp_out + rcx * 4], eax
+    inc ecx
+    dec r8d
+    jnz .loop
+    jnc .out                        ; 没有借位，a 本来就不小于 b
+    clc
+    xor ecx, ecx
+    mov r8d, 8
+.addp:
+    mov eax, [fp_out + rcx * 4]
+    adc eax, [fp_p + rcx * 4]
+    mov [fp_out + rcx * 4], eax
+    inc ecx
+    dec r8d
+    jnz .addp
+.out:
+    pop r8
+    pop rdx
+    pop rcx
+    ret
+
+; ----------------------------------------------------------------------
 ; fp_condsub：rdi 指的八格若大于等于 p 就减掉 p。出 rax = 1 表示减了。
 ;
 ; 从最高肢体往下比，找到第一个不同的肢体就定了大小 —— 与手算多位数比大小一样。
@@ -5216,6 +5301,63 @@ run_fp_test:
     jmp .loop
 .report:
     mov rsi, line_fp_ok
+    call puts64
+    ret
+
+; ----------------------------------------------------------------------
+; 域加减的判据
+;
+; 六组，前三组加法、后三组减法。每一组都压一条边：
+;
+;   二加三          最平静的那一组，能过的实现很多
+;   (p-1) 加二      和越过 p 一个 2，条件减必须减掉一次
+;   (p-1) 加自己    和是 2p-2，离 2p 只差 38，也就是离「八格装不下」只差一步
+;   二减三          借位路径：结果是 p-1，而中间量一度是 2^256-1
+;   (p-1) 减自己    借位与条件减都不该发生，结果是零
+;   零减一          最纯粹的借位：被减数整个是零，每一位都要往下借
+;
+; 中间那两条各管一件事：加法那一侧管「和越过 p」，减法那一侧管「不够减要加 p」。
+; 少一条，另一条就有一半的路从来没人走过 —— 与 SHA-2 那个多块缺陷是同一个形状。
+; ----------------------------------------------------------------------
+run_fp2_test:
+    mov qword [fp2_i], 0
+.loop:
+    mov rax, [fp2_i]
+    cmp rax, 6
+    jae .report
+    shl rax, 6
+    lea rdx, [fp2_vecs]
+    add rdx, rax
+
+    lea rdi, [fp_a]
+    mov rsi, rdx
+    mov ecx, 8
+    cld
+    rep movsd                       ; a
+    lea rdi, [fp_b]
+    mov ecx, 8
+    cld
+    rep movsd                       ; b
+
+    cmp qword [fp2_i], 3
+    jb .do_add
+    call fp_sub
+    mov rsi, line_fp2_sub
+    jmp .show
+.do_add:
+    call fp_add
+    mov rsi, line_fp2_add
+.show:
+    call puts64
+    lea rdi, [fp_out]
+    mov rcx, 32
+    call put_hex_bytes
+    call put_nl64
+
+    inc qword [fp2_i]
+    jmp .loop
+.report:
+    mov rsi, line_fp2_ok
     call puts64
     ret
 
@@ -9397,6 +9539,9 @@ line_sign_nosign: db "Yunooka: event=onlysign nosign", 13, 10, 0
 line_sign_nomagic: db "Yunooka: event=onlysign nomagic", 13, 10, 0
 line_fp_val: db "Yunooka: fp val=", 0
 line_fp_ok: db "Yunooka: event=fp ok vectors=6", 13, 10, 0
+line_fp2_add: db "Yunooka: fp2 op=add val=", 0
+line_fp2_sub: db "Yunooka: fp2 op=sub val=", 0
+line_fp2_ok: db "Yunooka: event=fp2 ok vectors=6", 13, 10, 0
 ; SHA-256 的工作区。a..h 就放在 sha_h 里原地更新，W[0..63] 放 sha_w。
 ;
 ; 为什么全部用内存而不是寄存器：寄存器分配的错会表现为「哈希不对」，而那个症状与
@@ -9502,6 +9647,41 @@ fp_vecs:
     dd 0xFDD6DC5C, 0xC0A4E231, 0xCD6E53FE, 0x216936D3
     dd 0x66666658, 0x66666666, 0x66666666, 0x66666666
     dd 0x66666666, 0x66666666, 0x66666666, 0x66666666
+
+; 域加减的判据向量：每组 64 字节，前 32 是 a、后 32 是 b，都是小端。前三组走加法，
+; 后三组走减法 —— 顺序本身就是信息，所以 run.mjs 那边按同一个顺序重算。
+fp2_i: dq 0
+fp2_vecs:
+    ; 二加三
+    dd 0x00000002, 0x00000000, 0x00000000, 0x00000000
+    dd 0x00000000, 0x00000000, 0x00000000, 0x00000000
+    dd 0x00000003, 0x00000000, 0x00000000, 0x00000000
+    dd 0x00000000, 0x00000000, 0x00000000, 0x00000000
+    ; (p-1) 加二：越过 p，条件是必须减一次
+    dd 0xFFFFFFEC, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF
+    dd 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x7FFFFFFF
+    dd 0x00000002, 0x00000000, 0x00000000, 0x00000000
+    dd 0x00000000, 0x00000000, 0x00000000, 0x00000000
+    ; (p-1) 加自己：离八格装不下只差 38
+    dd 0xFFFFFFEC, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF
+    dd 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x7FFFFFFF
+    dd 0xFFFFFFEC, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF
+    dd 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x7FFFFFFF
+    ; 二减三：借位路径
+    dd 0x00000002, 0x00000000, 0x00000000, 0x00000000
+    dd 0x00000000, 0x00000000, 0x00000000, 0x00000000
+    dd 0x00000003, 0x00000000, 0x00000000, 0x00000000
+    dd 0x00000000, 0x00000000, 0x00000000, 0x00000000
+    ; (p-1) 减自己：结果是零
+    dd 0xFFFFFFEC, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF
+    dd 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x7FFFFFFF
+    dd 0xFFFFFFEC, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF
+    dd 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x7FFFFFFF
+    ; 零减一：被减数整个是零，每一位都要往下借
+    dd 0x00000000, 0x00000000, 0x00000000, 0x00000000
+    dd 0x00000000, 0x00000000, 0x00000000, 0x00000000
+    dd 0x00000001, 0x00000000, 0x00000000, 0x00000000
+    dd 0x00000000, 0x00000000, 0x00000000, 0x00000000
 
 ; SHA-512 的 80 个常量：K[i] = floor(frac(cbrt(p_i)) * 2^64)，p_i 是第 i 个质数。
 ;
