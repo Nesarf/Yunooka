@@ -4729,17 +4729,26 @@ run_sign_test:
     test rax, rax
     jz .missing
     mov rdi, [last_addr]
+    mov [sign_filelen], rbx        ; 长度先存下来：下面几个打印都会把 rbx 用掉
     mov rcx, rbx
     call sha256
-    ; 第一项的摘要打一次。判据要与主机上 node 算的同一个值比，而串口是唯一能把它拿出来
-    ; 的地方 —— 一个算错的哈希只会说「不对」，说不出「错成什么样」，而后者才定位得了。
-    cmp qword [sign_dbg], 0
-    jne .nodb
-    mov qword [sign_dbg], 1
-    mov rsi, line_sign_sha
+    ; 每一项都打一行：名字、长度、摘要的前八个字节。
+    ;
+    ; 为什么不是只打第一项（原来就是这样）：清单里前三项都短于 64 字节，于是那段打印
+    ; 一直在给「一块」的路径作证，而「两块」从来没有被打出来过。一个只在短输入上被看过
+    ; 的哈希，看着是绿的。八字节足够与主机对，又比整份摘要短一半。
+    mov rsi, line_sign_item
+    call puts64
+    lea rdi, [sign_path + 6]
+    call put_utf16_ascii
+    mov rsi, line_sign_len
+    call puts64
+    mov rax, [sign_filelen]
+    call put_num64
+    mov rsi, line_sign_sha8
     call puts64
     lea rdi, [sha_out]
-    mov rcx, 32
+    mov rcx, 8
     call put_hex_bytes
     call put_nl64
 .nodb:
@@ -9103,8 +9112,12 @@ sign_hash_ptr: dq 0
 sign_n: dq 0
 sign_bad: dq 0
 sign_dbg: dq 0
+sign_filelen: dq 0
 line_sign_ok: db "Yunooka: event=onlysign ok items=", 0
 line_sign_sha: db "Yunooka: event=onlysign sha256=", 0
+line_sign_item: db "Yunooka: item=", 0
+line_sign_len: db " len=", 0
+line_sign_sha8: db " sha=", 0
 line_sign_bad: db "Yunooka: event=onlysign bad name=", 0
 line_sign_bad_n: db "Yunooka: event=onlysign badcount=", 0
 line_sign_nosign: db "Yunooka: event=onlysign nosign", 13, 10, 0
