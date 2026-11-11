@@ -829,3 +829,44 @@ long mode ok、heap ok。而 build 的输出里那句「最后一份在第 9 号
 同一个改动，两次失败在两个不同的地方。而第二次的那个位置比第一次更早 —— 早到「文件系统
 这一层根本没轮到」。这提示一件事：布局改动会先影响启动，再影响文件系统，而这两层之间
 隔着加载器与第二段 —— 一个只有一行串口的地方。
+
+
+第二趟的串口终于留下来了，而它先抓到的是我自己
+----------------------------------------------
+
+「落盘」那条判据一直红：第二次启动没有报 persist survived a reboot。而第二趟的串口只存在
+内存里，关机之后就没了 —— 所以「第二趟没到」这句话一直没有证据。
+
+这一轮让它落一份文件（build/serial2.log），而第一次读到的第二趟是：
+
+    Yunooka: boot ok
+    Yunooka: stage2 ok
+    Yunooka: seed unreadable
+    Yunooka: fs preread failed
+    Yunooka: mailbox ok
+
+两行新东西：seed unreadable 与 fs preread failed。
+
+而这两行来自我这一轮加的那个诊断字符。加载器里为了在 boot ok 之后说一句话，写的是
+
+    mov al, [dbg]
+    mov dx, 0x3F8
+    out dx, al
+
+而 dx 里的 dl 存着盘号（mov dl, [drive]）。改掉它之后，后面那次 int 0x13 读种子就失败了
+—— 症状是 seed unreadable 与 fs preread failed 两行，而它们与「盘号」毫无关系。
+
+回退之后，同一个 serial2.log 上是：
+
+    Yunooka: boot ok
+    Yunooka: stage2 ok
+    Yunooka: seed ok 74594
+    Yunooka: mailbox ok
+
+也就是说「第二趟没到」从来不是布局的问题，而是我这次诊断把盘号弄丢了。
+
+这是第三次「诊断改坏了寄存器」：第一次是 rax（puts64 用 lodsb），第二次是 rbx（fs_open_path
+用它交回字节数），这一次是 dl（盘号）。三次的症状都不说「寄存器坏了」：第一次是打印出错的
+数，第二次是包跳到别处，这一次是种子读不到。
+
+留下的东西是 serial2.log 那一行 dump：它把「第二趟没到」从一句判断变成了两行证据。

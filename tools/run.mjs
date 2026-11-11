@@ -1883,6 +1883,9 @@ const 存活成 = (() => {
     }
   }
   vbox(["controlvm", 机名, "poweroff"]);
+  // 第二趟的串口留一份 —— 一次 running 里它只存在内存里，而「第二趟没到」有两种可能：
+  // 它根本没起来，或者它起来了而没到 persist 那一段。两者的串口完全不同。
+  try { fs.writeFileSync(path.join(建, "serial2.log"), 又读到, "utf8"); } catch { }
   return /Yunooka: persist survived a reboot/.test(又读到);
 })();
 console.log("落盘      " + (存活成 ? "第二趟读到 survived" : "(第二趟没有 survived)")
