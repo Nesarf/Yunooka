@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 93
+stage2_sectors equ 95
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -709,6 +709,9 @@ long_entry:
     ; 点运算压在域算术之上。它的判据是三条交叉积相等，由主机那边判 —— 固件只把四份
     ; 坐标打出来，因为「两个投影表示是不是同一个点」需要乘，而那一侧已经有 BigInt。
     call run_pt_test
+    ; 标量乘压在点加与点倍上。它的三条判据全部与前面已经站住的东西比 —— 一个能过
+    ; 前两层的实现，不该在这里才第一次被问到「3P 是不是 2P 加 P」。
+    call run_pt_mul_test
     call run_ata_test
     call run_fs_test
     call run_fs_open
@@ -5609,6 +5612,148 @@ run_pt_test:
     ret
 
 ; ======================================================================
+; 标量乘：双倍-加
+; ======================================================================
+;
+; 从最低位往上走：acc 置单位元、base 置 P，每一位若是一就把 base 加进 acc，然后 base
+; 翻倍、标量右移一位，直到标量变成零。这是最笨的一种，每轮一次加倍加半次加法。
+;
+; 选它不是因为快 —— 定窗口能快一倍多 —— 而是因为它只有两个动作，而这两个动作各自
+; 已经单独站住过。第三环走到这里，能复用的东西比能省的时间值钱。
+;
+; 标量是就地右移的，进来的那一份会被改掉。判据每组重新设一次，所以不要紧；而验签
+; 那边 S 与 k 各用一次，本来也各算各的。
+
+; 标量是不是零。置零的时候循环一次也不跑，acc 停在单位元上 —— 这是零在群里的定义，
+; 也是唯一一组「循环没跑」的判据。
+pt_scalar_zero:
+    xor eax, eax
+    mov ecx, 7
+.chk:
+    or eax, [pt_scalar + rcx * 4]
+    dec ecx
+    jns .chk
+    ret
+
+; pt_mul：pt_scalar × pt_a → pt_o
+pt_mul:
+    lea rdi, [pt_acc]
+    lea rsi, [pt_ident]
+    call pt_copy
+    lea rdi, [pt_bse]
+    lea rsi, [pt_a]
+    call pt_copy
+.loop:
+    call pt_scalar_zero
+    test rax, rax
+    jz .done                        ; 标量已经是零，循环走完
+    test byte [pt_scalar], 1
+    jz .no_add
+    lea rdi, [pt_a]
+    lea rsi, [pt_acc]
+    call pt_copy
+    lea rdi, [pt_b]
+    lea rsi, [pt_bse]
+    call pt_copy
+    call pt_add
+    lea rdi, [pt_acc]
+    lea rsi, [pt_o]
+    call pt_copy
+.no_add:
+    lea rdi, [pt_a]
+    lea rsi, [pt_bse]
+    call pt_copy
+    call pt_double
+    lea rdi, [pt_bse]
+    lea rsi, [pt_o]
+    call pt_copy
+    ; 标量右移一位。rcr 靠 CF 把上一格的末位移下来，所以这条链与减法链一样，中间
+    ; 不许有任何碰 CF 的指令 —— mov 与 dec 都不碰，这是它们在这里的用处。
+    clc
+    mov ecx, 7
+.shr:
+    mov eax, [pt_scalar + rcx * 4]
+    rcr eax, 1
+    mov [pt_scalar + rcx * 4], eax
+    dec ecx
+    jns .shr
+    jmp .loop
+.done:
+    lea rdi, [pt_o]
+    lea rsi, [pt_acc]
+    call pt_copy
+    ret
+
+; ----------------------------------------------------------------------
+; 标量乘的判据
+;
+; 四组读数，三条交叉积，全部与前面已经站住的东西比：
+;
+;   mul-1    1P          与基点同点 —— 循环跑了一次，加号没进，加倍也没改到值
+;   mul-2    2P          与 dbl-b 同点 —— 标量乘里的加倍与点倍子程序是一回事
+;   mul-3    3P          与 add-3b 同点 —— 标量乘里的加法与点加子程序是一回事
+;   add-3b   (2B) + B    用 pt_add 直接算出来的 3P
+;
+; 为什么这四条不是重复：mul-1 压的是「标量右移与循环终止」；mul-2 压的是加倍那一条；
+; mul-3 同时压加倍与加法，而且是两者交替发生的那一组（位模式 11）。只测 mul-2 的话，
+; 一个「加号永远不进」的实现照样绿。
+;
+; 标量为零的那一组不在这里 —— 它需要与单位元比，而单位元的 (0,1,1,0) 在交叉积下会
+; 与一个全零的点也被判成同点（X 那一项两边都是零）。主机那边给「同点」加了 Z 不为零
+; 这一条，所以零不会被误判成绿；但一组只能证明「循环没跑」的读数不值得占一个向量位，
+; 它已经在 pt_mul 的注释里写清楚了。
+; ----------------------------------------------------------------------
+run_pt_mul_test:
+    lea rdi, [pt_scalar]
+    lea rsi, [pt_k1]
+    call fp_copy
+    lea rdi, [pt_a]
+    lea rsi, [pt_base]
+    call pt_copy
+    call pt_mul
+    mov rsi, line_pt_mul1
+    lea rdi, [pt_o]
+    call pt_show
+
+    lea rdi, [pt_scalar]
+    lea rsi, [pt_k2]
+    call fp_copy
+    lea rdi, [pt_a]
+    lea rsi, [pt_base]
+    call pt_copy
+    call pt_mul
+    mov rsi, line_pt_mul2
+    lea rdi, [pt_o]
+    call pt_show
+
+    lea rdi, [pt_scalar]
+    lea rsi, [pt_k3]
+    call fp_copy
+    lea rdi, [pt_a]
+    lea rsi, [pt_base]
+    call pt_copy
+    call pt_mul
+    mov rsi, line_pt_mul3
+    lea rdi, [pt_o]
+    call pt_show
+
+    ; add-3b：用点加直接算 (2B) + B。pt_o2 是 run_pt_test 存下的 2B。
+    lea rdi, [pt_a]
+    lea rsi, [pt_o2]
+    call pt_copy
+    lea rdi, [pt_b]
+    lea rsi, [pt_base]
+    call pt_copy
+    call pt_add
+    mov rsi, line_pt_add3b
+    lea rdi, [pt_o]
+    call pt_show
+
+    mov rsi, line_pt_mul_ok
+    call puts64
+    ret
+
+; ======================================================================
 ; 家庭组的第一步：共享是目录条目上的一个位
 ; ======================================================================
 ;
@@ -9795,6 +9940,11 @@ line_pt_dbl2: db "Yunooka: pt dbl2-b ", 0
 line_pt_add4: db "Yunooka: pt add-4b ", 0
 line_pt_addid: db "Yunooka: pt add-ident ", 0
 line_pt_ok: db "Yunooka: event=pt ok vectors=5", 13, 10, 0
+line_pt_mul1: db "Yunooka: ptm mul-1 ", 0
+line_pt_mul2: db "Yunooka: ptm mul-2 ", 0
+line_pt_mul3: db "Yunooka: ptm mul-3 ", 0
+line_pt_add3b: db "Yunooka: ptm add-3b ", 0
+line_pt_mul_ok: db "Yunooka: event=ptmul ok vectors=4", 13, 10, 0
 line_pt_in_a: db "Yunooka: pti in-a ", 0
 line_pt_in_b: db "Yunooka: pti in-b ", 0
 ; SHA-256 的工作区。a..h 就放在 sha_h 里原地更新，W[0..63] 放 sha_w。
@@ -9988,6 +10138,19 @@ pt_t6: times 8 dd 0
 pt_t7: times 8 dd 0
 pt_t8: times 8 dd 0
 pt_t9: times 8 dd 0
+
+; 标量乘的工作区。acc 与 bse 各是一个点，scalar 是一个 256 位的标量（八格）。
+; 三个常量是判据用的 1、2、3 —— 二进制的 1、10、11 正好把「加号进不进」与「加倍
+; 跑不跑」两种情形都走到。
+pt_acc: times 32 dd 0
+pt_bse: times 32 dd 0
+pt_scalar: times 8 dd 0
+pt_k1: dd 0x00000001, 0x00000000, 0x00000000, 0x00000000
+      dd 0x00000000, 0x00000000, 0x00000000, 0x00000000
+pt_k2: dd 0x00000002, 0x00000000, 0x00000000, 0x00000000
+      dd 0x00000000, 0x00000000, 0x00000000, 0x00000000
+pt_k3: dd 0x00000003, 0x00000000, 0x00000000, 0x00000000
+      dd 0x00000000, 0x00000000, 0x00000000, 0x00000000
 
 ; SHA-512 的 80 个常量：K[i] = floor(frac(cbrt(p_i)) * 2^64)，p_i 是第 i 个质数。
 ;
