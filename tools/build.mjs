@@ -652,8 +652,8 @@ for (const 字 of "savetest") { 程序包.writeUInt16LE(字.charCodeAt(0), 位);
 程序包.writeUInt32LE(8, 位); 位 += 4;                      // 八条指令
 程序包[位++] = 5;                                           // 常量：名字
 程序包[位++] = 2;
-程序包.writeUInt16LE(7, 位); 位 += 2;
-for (const 字 of "out.txt") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包.writeUInt16LE(14, 位); 位 += 2;
+for (const 字 of "docs/inner.txt") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
 程序包[位++] = 5;                                           // 常量：内容
 程序包[位++] = 2;
 程序包.writeUInt16LE(28, 位); 位 += 2;
@@ -665,8 +665,8 @@ for (const 字 of "save") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位
 程序包[位++] = 26;                                          // 丢掉返回值
 程序包[位++] = 5;                                           // 常量：名字，再来一次
 程序包[位++] = 2;
-程序包.writeUInt16LE(7, 位); 位 += 2;
-for (const 字 of "out.txt") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包.writeUInt16LE(14, 位); 位 += 2;
+for (const 字 of "docs/inner.txt") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
 程序包[位++] = 3;                                           // 调内置 slurp（一参）
 程序包.writeUInt16LE(5, 位); 位 += 2;
 for (const 字 of "slurp") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }

@@ -1724,23 +1724,75 @@ exec:
     call pop_val                    ; 名字
     mov rsi, rdx
     movzx ecx, word [rsi]
-    cmp rcx, 64
+    cmp rcx, 200
     ja .save_fail
+    ; 名字里可以带一层路径（docs/inner.txt）。先找最后一个斜杠 —— 它前面是目录、
+    ; 后面是名字。没有斜杠就是写根目录，与上一版一样。
+    xor r8, r8
+    xor r9, r9                      ; 斜杠之后的位置，0 表示没有斜杠
+.save_findslash:
+    cmp r8, rcx
+    jae .save_slashdone
+    mov ax, [rsi + 2 + r8 * 2]
+    cmp ax, 0x002F
+    jne .save_nextch
+    lea r9, [r8 + 1]
+.save_nextch:
+    inc r8
+    jmp .save_findslash
+.save_slashdone:
+    ; 名字那一段先拷出来：斜杠之后的所有码元。
     lea rdi, [save_name]
     xor r8, r8
 .save_nbody:
-    cmp r8, rcx
+    mov rax, r9
+    add rax, r8
+    cmp rax, rcx
     jae .save_ndone
-    mov ax, [rsi + 2 + r8 * 2]
+    mov ax, [rsi + 2 + rax * 2]
     mov [rdi + r8 * 2], ax
     inc r8
     jmp .save_nbody
 .save_ndone:
-    mov word [rdi + rcx * 2], 0     ; fs_write_file 要的是以零码元收尾的名字
+    mov word [rdi + r8 * 2], 0      ; fs_write_file 要的是以零码元收尾的名字
+    mov qword [write_dir], 0
+    test r9, r9
+    jz .save_write                  ; 没有斜杠：根目录
+    ; 有斜杠：拼出 α:/ 加斜杠之前那一段，查出那个目录的扇区。
+    ;
+    ; 拼法照 slurp 的样子 —— 内置自己补盘符与冒号，包不必知道盘符。两个内置共用
+    ; slurp_path 是安全的：它们不会同时在跑。
+    lea rdi, [slurp_path]
+    mov word [rdi], 0x03B1
+    mov word [rdi + 2], 0x003A
+    mov word [rdi + 4], 0x002F
+    mov r10, r9
+    dec r10                         ; 斜杠之前那一段的长度
+    xor r8, r8
+.save_pbody:
+    cmp r8, r10
+    jae .save_pdone
+    mov ax, [rsi + 2 + r8 * 2]
+    mov [rdi + 6 + r8 * 2], ax
+    inc r8
+    jmp .save_pbody
+.save_pdone:
+    mov word [rdi + 6 + r8 * 2], 0
+    mov rdi, slurp_path
+    ; fs_open_path 把字节数交在 rbx 里，而 rbx 是 exec 的 pc —— slurp 那一处早就 push/pop 过，
+    ; 这里漏了。症状是 #GP：inc rbx 把 pc 推到一个垃圾地址，而报出来的位置在别处。
+    push rbx
+    call fs_open_path
+    pop rbx
+    test rax, rax
+    jz .save_fail                   ; 那个目录不存在：写不进去
+    mov [write_dir], r15
+.save_write:
     mov rdi, save_name
     lea rsi, [save_buf]
     mov rcx, [save_len]
     call fs_write_file              ; 它自己 push/pop 了 rbx，所以 exec 的 pc 不用外面保
+    mov qword [write_dir], 0        ; 用过就清：写根目录是常态，而留着的状态会害下一处
     test rax, rax
     jz .save_zero
     ; 落盘：目录那一页与数据那一页，各写回盘一次。
@@ -4731,7 +4783,15 @@ fs_write_file:
     mov r15d, eax
     mov [last_write_sec], r15       ; 数据那一页：save 要把它写回盘
     ; 找根目录里的第一个空条目（名字长度为 0）
+    ; 写到哪一层由 write_dir 说：0 是根目录，非零是某一个目录的扇区。
+    ;
+    ; 用全局而不是第三个参数，是因为现有每一个调用者都只写根目录 —— 让它们在调用点
+    ; 各补一句 rdx = 0，是四次同样的改动，而漏掉一次就会写进一个垃圾地址。
+    mov edi, [write_dir]
+    test edi, edi
+    jnz .dir_ok
     mov edi, [rbx + 12]
+.dir_ok:
     mov [last_dir_sec], rdi         ; 目录那一页：同上
     mov eax, [rbx + 16]             ; 根目录占几个扇区 —— 落盘要把它们都写回
     mov [last_dir_pages], rax
@@ -11989,12 +12049,14 @@ save_len: dq 0
 last_write_sec: dq 0
 last_dir_sec: dq 0
 last_dir_pages: dq 0
+; fs_write_file 写到哪一层：0 是根目录，非零是某一个目录的扇区。
+write_dir: dq 0
 ; 包写出来的那一份，用完整路径再查一次。
-fs_save_path: dw 0x03B1, 0x003A, 0x002F, 0x006F, 0x0075, 0x0074, 0x002E, 0x0074, 0x0078, 0x0074, 0
+fs_save_path: dw 0x03B1, 0x003A, 0x002F, 0x0064, 0x006F, 0x0063, 0x0073, 0x002F, 0x0069, 0x006E, 0x006E, 0x0065, 0x0072, 0x002E, 0x0074, 0x0078, 0x0074, 0
 name_savetest: dw 0x0073, 0x0061, 0x0076, 0x0065, 0x0074, 0x0065, 0x0073, 0x0074
-line_save_survived: db "Yunooka: save survived ", 0
-line_save_ok: db "Yunooka: save out.txt ", 0
-line_save_lost: db "Yunooka: save out.txt lost", 13, 10, 0
+line_save_survived: db "Yunooka: save survived docs/inner.txt ", 0
+line_save_ok: db "Yunooka: save docs/inner.txt ", 0
+line_save_lost: db "Yunooka: save docs/inner.txt lost", 13, 10, 0
 line_save_missing: db "Yunooka: save missing", 13, 10, 0
 dirfull_ok: dq 0
 dirfull_no: dq 0

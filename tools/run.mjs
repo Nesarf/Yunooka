@@ -642,7 +642,7 @@ const 尺成 = 尺行 !== null && 尺行[1] === "24";
 // 判据两半，缺一不可：包读回来的那一行字出现在串口上（写进去的字节被读回来了），
 // 以及宿主独立查到的目录条目带着一个非零扇区（目录里真的有那一条）。
 // 只验第一半的话，一个「写进自己的缓冲、再从缓冲读回来」的实现照样过。
-const 存行 = /Yunooka: save out\.txt ([0-9A-F]+) (\d+)/.exec(读到);
+const 存行 = /Yunooka: save docs\/inner\.txt ([0-9A-F]+) (\d+)/.exec(读到);
 const 存成 = 存行 !== null && !/^0+$/.test(存行[1]) && Number(存行[2]) > 0
   && 读到.includes("Yunooka wrote from a package");
 const 满行 = /Yunooka: dirfull wrote (\d+) refused (\d+)/.exec(读到);
@@ -1835,7 +1835,7 @@ const 其余成 = 有种子
 // 这一行放在这里，不放在上面那串输出里：它要读种子族成，而那条 && 链与它用到的
 // 九个判据都在下面。上一版把它跟别的输出排在一起，报的是
 // Cannot access '种子族成' before initialization。
-console.log("包写文件  " + (存行 ? "save out.txt -> " + 存行[1].slice(-3) + " " + 存行[2] + " 字节" : "(没跑出来)")
+console.log("包写文件  " + (存行 ? "save docs/inner.txt -> " + 存行[1].slice(-3) + " " + 存行[2] + " 字节" : "(没跑出来)")
   + (存成 ? "  —— 包写进去、自己读回来，而宿主独立查到了那一条"
     : "  —— 不对：要么包没读回那行字，要么目录里查不到 out.txt"));
 console.log("目录满    " + (满行
@@ -1963,7 +1963,7 @@ const 存活成 = (() => {
 const 二趟 = (() => {
   try { return fs.readFileSync(path.join(建, "serial2.log"), "utf8"); } catch { return ""; }
 })();
-const 存存活 = /Yunooka: save survived ([0-9A-F]+) (\d+)/.exec(二趟);
+const 存存活 = /Yunooka: save survived docs\/inner\.txt ([0-9A-F]+) (\d+)/.exec(二趟);
 const 存存活成 = 留机 || (存存活 !== null && !/^0+$/.test(存存活[1]) && Number(存存活[2]) > 0);
 console.log("落盘      " + (存活成 ? "第二趟读到 survived" : "(第二趟没有 survived)")
   + (存活成 ? "  —— 关掉再开机，那 512 个字节还在盘上：写真的落下去了"
@@ -1971,7 +1971,7 @@ console.log("落盘      " + (存活成 ? "第二趟读到 survived" : "(第二�
 if (!留机) console.log("机器已关（--keep 可以留着它，用 GUI 打开看）。");
 console.log("包写的东西 " + (留机 ? "(留机模式，第二趟没跑)"
   : 存存活 ? "save survived " + 存存活[1].slice(-3) + " " + 存存活[2] + " 字节" : "(第二趟没见到那一份)")
-  + (存存活成 ? "  —— 上一次启动时包写的 out.txt，这一次开机还在"
+  + (存存活成 ? "  —— 上一次启动时包写的 docs/inner.txt，这一次开机还在"
     : "  —— 不对：第二趟应当报 save survived，也就是那一份真的落在盘上了"));
 const 全成 = 成了 && 存活成 && 存存活成;
 process.exit(全成 ? 0 : 1);
