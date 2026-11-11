@@ -804,7 +804,7 @@ long_entry:
     ; 这一轮没有余量再往下分（第二段只剩两百来字节），所以先摘下来，把问题留在
     ; design/LAYERS.txt 里，而不是让它占着串口 —— 一条已经问对了方向的失败，与
     ; run_health_test 那几条同一个处理。
-    ; call run_docs_after_full
+    call run_docs_after_full
     call run_trap_test
     jmp .hang64
 .heap_bad:
@@ -3151,6 +3151,16 @@ run_docs_after_full:
     mov qword [write_dir], 0        ; 用过就清
     test rax, rax
     jz .blocked
+    ; 写完立刻直接查那一页，不走 fs_open_path。这样两件事就分得开了：
+    ; 「条目不在 docs 那一页里」与「fs_open_path 的第二段没走到那一页」。
+    ; 上一趟的三个数是 0 1027 1085：write_dir 那个零是清过之后的值，而 last_dir_sec
+    ; 是 1027 —— 所以写确实进了 docs，剩下的疑问全在查的那一侧。
+    mov r8, fs_late_name
+    mov r9, 8
+    mov rsi, 1027
+    call fs_lookup
+    mov [late_probe], rax
+    mov [late_probe_sec], r15
     mov rdi, fs_late_path
     call fs_open_path
     test rax, rax
@@ -3170,11 +3180,40 @@ run_docs_after_full:
     call puts64
     ret
 .lost:
-    ; 两个出口都可能走到这里：根目录里没有 docs，或者写完却查不到。
-    ; 把 r15 打出来就分得开 —— 前者是垃圾，后者是 docs 的扇区号。
+    ; 三个数，一次把「写到哪」问清：
+    ;   write_dir     —— 传给 fs_write_file 的目录扇区。0 就是「它没听」。
+    ;   last_dir_sec  —— fs_write_file 实际算出来的目录页。
+    ;   last_write_sec—— 它把数据放进了哪个新扇区。
+    ; 三者里任何一个与 docs 对不上，问题就在那一处。
     mov rsi, line_late_lost
     call puts64
-    mov rax, r15
+    mov rax, [write_dir]
+    call put_num64
+    mov al, ' '
+    call putc64
+    mov rax, [last_dir_sec]
+    call put_num64
+    mov al, ' '
+    call putc64
+    mov rax, [last_write_sec]
+    call put_num64
+    mov al, ' '
+    call putc64
+    mov rax, [late_probe]           ; 直接查那一页成不成
+    call put_num64
+    mov al, ' '
+    call putc64
+    mov rax, [late_probe_sec]       ; 成了的话，它给的扇区
+    call put_num64
+    mov al, 0x20
+    call putc64
+    ; 第 6 个数：docs 页里「四条之后」那一格的名字长度。写入成功的话它该是 8。
+    ; 若是 0，说明条目没落在那儿；若是 8 而 lookup 仍找不到，那就是匹配那一侧。
+    push rsi
+    mov rdi, 1027
+    call fs_load
+    movzx eax, word [rsi + 102]
+    pop rsi
     call put_num64
     call put_nl64
     ret
@@ -12272,8 +12311,10 @@ fs_save_path: dw 0x03B1, 0x003A, 0x002F, 0x0064, 0x006F, 0x0063, 0x0073, 0x002F,
 name_savetest: dw 0x0073, 0x0061, 0x0076, 0x0065, 0x0074, 0x0065, 0x0073, 0x0074
 name_listtest: dw 0x006C, 0x0069, 0x0073, 0x0074, 0x0074, 0x0065, 0x0073, 0x0074
 fs_docs_name: dw 0x0064, 0x006F, 0x0063, 0x0073
-fs_late_name: dw 0x006C, 0x0061, 0x0074, 0x0065, 0x002E, 0x0074, 0x0078, 0x0074
+fs_late_name: dw 0x006C, 0x0061, 0x0074, 0x0065, 0x002E, 0x0074, 0x0078, 0x0074, 0
 fs_late_data: db 'x', 'y'
+late_probe: dq 0
+late_probe_sec: dq 0
 fs_late_path: dw 0x03B1, 0x003A, 0x002F, 0x0064, 0x006F, 0x0063, 0x0073, 0x002F, 0x006C, 0x0061, 0x0074, 0x0065, 0x002E, 0x0074, 0x0078, 0x0074, 0
 line_late_ok: db "Yunooka: dirfull docs ok ", 0
 line_late_blocked: db "Yunooka: dirfull docs blocked", 13, 10, 0
