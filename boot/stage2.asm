@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 122
+stage2_sectors equ 123
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -786,6 +786,8 @@ long_entry:
     call run_filesize_test
     ; Myon 的第二步：盘上那个只有三条指令的包，靠内置 write 把一段字打到串口。
     call run_myon_test
+    ; 目录写满：该拒绝，而且不许吃掉邻居。排在最后，因为它会把根目录占满。
+    call run_dirfull_test
     call run_trap_test
     jmp .hang64
 .heap_bad:
@@ -2663,6 +2665,78 @@ idt_common:
 ;
 ; 选 ud2 而不是除零：除零的结果依赖浮点环境（x87 与 SSE 的处理不同），而未定义指令
 ; 在任何 CPU 上都只有一个答案。判据要的是一个不会漂的数。
+; ======================================================================
+; 目录写满：该拒绝，而且不许吃掉邻居
+; ======================================================================
+;
+; 这一条验的是 fs_write_file 里那个上界。没有它的时候，条目写满就沿着预读区往后写，
+; 而紧跟着的是下一个目录的条目区 —— 症状是「另一个目录里的文件凭空消失」，而不是
+; 「写失败」。docs 的 sub 就是这么消失的，而它花了几轮才查出来。
+;
+; 判据三条，第三条才是这一条的意义：
+;   一、一直写到被拒，而拒绝真的会来（不是四十次全成 —— 那说明上界没生效）。
+;   二、成功数加拒绝数等于四十。少一条就是「既没成也没拒」，那是另一件事。
+;   三、写满之后 docs/myon.hmtn 仍然读得到。少了这条，前两条只是「它说它拒绝了」，
+;       而「拒绝」与「写坏了」在这里看起来一样。
+;
+; 名字用 f00..f39：每条三码元，二十五字节左右，而根目录只剩五百来字节 —— 四十次
+; 一定撞到边界。名字各不相同，所以拒绝只可能来自上界，不可能来自重名。
+run_dirfull_test:
+    xor r15, r15                    ; 成功
+    xor r14, r14                    ; 拒绝
+    xor r12, r12                    ; 第几次
+.walk:
+    cmp r12, 40
+    jae .done
+    lea rdi, [fs_full_name]
+    mov word [rdi], 0x0066          ; f
+    mov rax, r12
+    xor rdx, rdx
+    mov rbx, 10
+    div rbx                         ; rax = 十位，rdx = 个位
+    add al, '0'
+    add dl, '0'
+    mov [rdi + 2], al
+    mov [rdi + 4], dl
+    mov word [rdi + 6], 0           ; 结尾零码元
+    mov rsi, fs_full_data
+    mov rcx, 1                      ; 一字节
+    call fs_write_file
+    test rax, rax
+    jz .refused
+    inc r15
+    jmp .next
+.refused:
+    inc r14
+.next:
+    inc r12
+    jmp .walk
+.done:
+    ; 两个计数先存起来：fs_open_path 会改 r15 与 r14（它用 r15 交扇区、r14 不当自己的）
+    mov [dirfull_ok], r15
+    mov [dirfull_no], r14
+    mov rdi, fs_myon_path
+    call fs_open_path
+    test rax, rax
+    jz .eaten
+    mov rsi, line_full_ok
+    call puts64
+    mov rax, [dirfull_ok]
+    call put_num64
+    ; 两个数之间要有那个词：判据那边写的是 "wrote N refused M"，而在这一版之前
+    ; 串口打的是 "wrote 29 11" —— 两个裸数字，读的人不知道第二个是什么，
+    ; 而判据直接匹配不到。判据先写下形状，这里补上能对上的形状。
+    mov rsi, line_full_mid
+    call puts64
+    mov rax, [dirfull_no]
+    call put_num64
+    call put_nl64
+    ret
+.eaten:
+    mov rsi, line_full_eaten
+    call puts64
+    ret
+
 run_trap_test:
     mov rsi, line_trap_before
     call puts64
@@ -11729,6 +11803,13 @@ slurp_path: times 520 dw 0
 slurp_dbg: dq 0
 line_slurp_miss: db "Yunooka: slurp miss at ", 0
 slurp_buf: times 520 db 0
+dirfull_ok: dq 0
+dirfull_no: dq 0
+fs_full_name: times 8 dw 0
+fs_full_data: db 'x'
+line_full_ok: db "Yunooka: dirfull wrote ", 0
+line_full_mid: db " refused ", 0
+line_full_eaten: db "Yunooka: dirfull ate docs", 13, 10, 0
 fs_myon_path: dw 0x03B1, 0x003A, 0x002F, 0x0064, 0x006F, 0x0063, 0x0073, 0x002F, 0x006D, 0x0079, 0x006F, 0x006E, 0x002E, 0x0068, 0x006D, 0x0074, 0x006E, 0
 name_echo: dw 0x0065, 0x0063, 0x0068, 0x006F
 
