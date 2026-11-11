@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 111
+stage2_sectors equ 112
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -189,7 +189,7 @@ stage2:
     mov dword [dap_lba], 1024
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x4000
-    mov word [dap_count], 24       ; preread-sectors: 预读几个扇区，这个数由 build 核对
+    mov word [dap_count], 25       ; preread-sectors: 预读几个扇区，这个数由 build 核对
     call read_batch
     jnc .fs_ready
     mov si, line_fs_preread
@@ -764,6 +764,8 @@ long_entry:
     call run_shell_live
     call run_repl_live
     call run_program
+    ; Myon 的第二步：盘上那个只有三条指令的包，靠内置 write 把一段字打到串口。
+    call run_myon_test
     call run_trap_test
     jmp .hang64
 .heap_bad:
@@ -1380,13 +1382,17 @@ exec:
     ret
 
 .op_builtin:
-    ; 立即数与「调函数」同一个形状：名字在前，参数个数在后。这一版只认 len。
+    ; 立即数与「调函数」同一个形状：名字在前，参数个数在后。
+    ;
+    ; 现在有两个：len 与 write。它们的形状一样，区别只在「做什么」—— 而这件事本身
+    ; 就是 Myon 那条判据的一半：一个包要能把一段字交给宿主去打，而它不必知道串口在
+    ; 哪个端口、也不必知道帧缓冲在哪。「出去的那一段字节」由宿主给，这就是宿主口。
     movzx r8d, word [rsi]
     lea rdi, [rsi + 2]
     lea rsi, [rsi + 2 + r8 * 2]
     movzx r14d, word [rsi]          ; 参数个数
     cmp r8, 3
-    jne .builtin_unknown
+    jne .try_write
     cmp word [rdi], 0x006C          ; 'l'
     jne .builtin_unknown
     cmp word [rdi + 2], 0x0065      ; 'e'
@@ -1400,6 +1406,49 @@ exec:
     cvtsi2sd xmm0, rax
     movq rdx, xmm0
     mov rax, 1                      ; 数
+    call push_val
+    inc rbx
+    jmp .loop
+
+.try_write:
+    cmp r8, 5
+    jne .builtin_unknown
+    cmp word [rdi], 0x0077          ; 'w'
+    jne .builtin_unknown
+    cmp word [rdi + 2], 0x0072      ; 'r'
+    jne .builtin_unknown
+    cmp word [rdi + 4], 0x0069      ; 'i'
+    jne .builtin_unknown
+    cmp word [rdi + 6], 0x0074      ; 't'
+    jne .builtin_unknown
+    cmp word [rdi + 8], 0x0065      ; 'e'
+    jne .builtin_unknown
+    cmp r14, 1
+    jne .builtin_unknown
+    ; write：把那一串码元打出去，再换行。
+    ;
+    ; 串在包里是 UTF-16 码元，而串口只送 8 位，所以取低字节。这一版不处理非 ASCII：
+    ; 一个码元超过 0xFF 时打出来的是一个问号，而不是一个错位的字节 —— 那比默默送出
+    ; 半个字符好，因为它至少看得出来「这里有个字没能打出来」。
+    call pop_val
+    mov rsi, rdx
+    movzx ecx, word [rsi]
+    add rsi, 2
+.wr_loop:
+    test ecx, ecx
+    jz .wr_done
+    lodsw
+    cmp ax, 0xFF
+    jbe .wr_out
+    mov al, '?'
+.wr_out:
+    call putc64
+    dec ecx
+    jmp .wr_loop
+.wr_done:
+    call put_nl64
+    xor eax, eax                    ; 空
+    xor edx, edx
     call push_val
     inc rbx
     jmp .loop
@@ -2684,6 +2733,67 @@ run_program:
     ret
 prog_missing:
     mov rsi, line_prog_missing
+    call puts64
+    ret
+
+; ======================================================================
+; Myon 的第二步：一个包把一段字交给宿主去打
+; ======================================================================
+;
+; LAYERS 第六节第二条判据的第一步。这个包只有三条指令 —— 压一个串常量、调内置
+; write、返回 —— 而它要证明的是：包里的字能出去，而包不必知道串口在哪个端口。
+;
+; 为什么先做「写」不做「读」：写这一侧只有一条路（到串口），而读那一侧要先定「宿主
+; 攒到哪一行、包怎么拿到它」。两件事各自都值得先单独站住，而写完读是自然顺序 ——
+; 写对之后，「那一行确实到了包手里」才有地方显示。
+run_myon_test:
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]
+    mov r8, fs_prog_name
+    mov r9, 9                       ; "prog.hmtn"
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz .missing
+    mov rdi, r15
+    call fs_load
+    mov r14, rsi
+    mov rdi, r14
+    mov rsi, seed_magic
+    mov rcx, 5
+    call bytes_eq
+    jc .bad
+    mov [pkg_base], r14
+    mov rdi, name_echo
+    mov r8, 4
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .nofn
+    mov r12, rsi
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+    mov qword [pkg_base], 0x20000
+    mov rsi, line_myon_done
+    call puts64
+    ret
+.missing:
+    mov rsi, line_myon_missing
+    call puts64
+    ret
+.bad:
+    mov qword [pkg_base], 0x20000
+    mov rsi, line_myon_bad
+    call puts64
+    ret
+.nofn:
+    mov qword [pkg_base], 0x20000
+    mov rsi, line_myon_nofn
     call puts64
     ret
 prog_bad:
@@ -10888,6 +10998,9 @@ line_byname_missing: db "Yunooka: byname missing after ", 0
 ; 而不是拿一个编译期算出来的偏移 —— 偏移只在种子不变时才对，名字才属于语言。
 name_kuaichang: dw 0x5757, 0x957F
 name_is_digit: dw 0x0069, 0x0073, 0x005F, 0x0064, 0x0069, 0x0067, 0x0069, 0x0074
+fs_myon_name: dw 0x006D
+fs_myon_path: dw 0x03B1, 0x003A, 0x002F, 0x0064, 0x006F, 0x0063, 0x0073, 0x002F, 0x006D, 0x0079, 0x006F, 0x006E, 0x002E, 0x0068, 0x006D, 0x0074, 0x006E, 0
+name_echo: dw 0x0065, 0x0063, 0x0068, 0x006F
 
 ; 两个单字符串，形状与种子里的一样：u16 长度在前，码元在后。「索引」交出来的
 ; 也是这个形状 —— 所以这两份既是参数，也是「索引」的对照物。
@@ -10949,6 +11062,10 @@ fs_prog_name: dw 0x0070, 0x0072, 0x006F, 0x0067, 0x002E, 0x0068, 0x006D, 0x0074,
 name_main: dw 0x006D, 0x0061, 0x0069, 0x006E
 line_prog: db "Yunooka: prog main -> ", 0
 line_prog_missing: db "Yunooka: no prog.hmtn", 13, 10, 0
+line_myon_done: db "Yunooka: event=myon write ok", 13, 10, 0
+line_myon_missing: db "Yunooka: no myon.hmtn", 13, 10, 0
+line_myon_bad: db "Yunooka: myon bad magic", 13, 10, 0
+line_myon_nofn: db "Yunooka: myon no echo", 13, 10, 0
 line_prog_bad: db "Yunooka: prog bad magic", 13, 10, 0
 line_prog_nomain: db "Yunooka: prog has no main", 13, 10, 0
 
