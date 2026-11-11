@@ -11,6 +11,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { sign as edSign, hex as edHex } from "./ed25519.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const 建 = path.join(ROOT, "build");
@@ -430,6 +431,36 @@ for (const [名, 内容] of 核心项) {
 }
 const 签名起 = 核心清单起 + 1;
 
+// ---- 三·三·三、第三环：对 SHA-256 清单本身签一次 ----
+//
+// 前两环都在「盘上有一份清单」这个层面：core.bin 说文件与清单是否一致，sign.bin 说
+// 清单自己有没有被动过。而 sign.bin 本身也会被一起重算 —— 下决心的人可以把两份一起
+// 改对。第三环挡的是这一手：对 sign.bin 的内容签一次名，公钥内嵌在第二段里。
+//
+// 用的是 RFC 8032 第 7.1 节第一条向量给的种子。它是公开的，所以这里的签名只能证明
+// 「这条链接得通」，不能证明「谁签的」—— 生产上要换成一对没人贴过网的密钥，而那只是
+// 换两个常量，不是改设计。
+//
+// 签名覆盖的是 签位 个字节，不是整个 512 字节的缓冲区：盘上那条目的长度就是 签位，
+// 而固件读到的也正是那么多。多签四十九个零是小事，但它会让「文件内容」与「被签的
+// 内容」从此有两个定义，而这两个定义总有一天会分家。
+const 第三环种子 = Buffer.from(
+  "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60", "hex");
+const 第三环期望公钥 = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+const 第三环签 = edSign(new Uint8Array(第三环种子), 签名清单.subarray(0, 签位));
+if (edHex(第三环签.publicKey) !== 第三环期望公钥) {
+  失败("第三环的公钥与第二段里那个常量对不上：" + edHex(第三环签.publicKey)
+    + " —— 换种子就要同时换 stage2.asm 里那三十二个字节");
+}
+const 第三环签名 = Buffer.from(第三环签.signature);
+
+// --authbreak：把签名的第一个字节翻一位。
+//
+// 它是第三环唯一的验红手段，而这一环需要两条判据：正常那一趟必须绿（否则这一环只是
+// 把一切判死），破签那一趟必须红（否则一个「永远通过」的实现也是绿的，而它与真正的
+// 验签在正常那一趟上完全一样）。
+if (process.argv.includes("--authbreak")) 第三环签名[0] ^= 0x01;
+
 // ---- 三·四、别的系统的五个样本 ----
 //
 // 每一个只有几十个字节，而判据只看头 —— 所以造的是「头对、身体短」的假件，
@@ -489,7 +520,10 @@ const 外五件 = [
   ["dex.bin", 造DEX()],
 ];
 // 最后一个占用的扇区号 —— 预读那条检查要拿它当上界，而那一条不该自己再算一遍。
-const 最后一份扇区 = 外五起 + 外五件.length - 1;
+// auth.bin 排在五个样本之后，所以它不必把前面任何一份文件往后挪 —— 插入在中间的代价
+// 是那一段布局的每一个偏移都要重新对一遍，而它们各自都有一条判据指着。
+const auth起 = 外五起 + 外五件.length;
+const 最后一份扇区 = auth起;
 
 const 示例扇区数 = Math.ceil(示例文件.length / 512) + Math.ceil(子文件.length / 512)
   + Math.ceil(命令文件.length / 512) + Math.ceil(求值输入.length / 512)
@@ -501,6 +535,7 @@ const 示例扇区数 = Math.ceil(示例文件.length / 512) + Math.ceil(子文�
   + Math.ceil(假样本.length / 512)
   + 1                                     // 核心清单自己占一个扇区
   + 1                                     // SHA-256 清单（sign.bin）也占一个
+  + 1                                     // 第三环的签名（auth.bin）
   + 外五件.length;                        // 五个头部样本，每个一个扇区
 
 const 码元 = (s) => {
@@ -606,6 +641,7 @@ let 根位 = 条目(根目录, 0, "hello.txt", 0, 数据起, 示例文件.length
 根位 = 条目(根目录, 根位, "fake.txt", 0, 假样本起, 假样本.length);
 根位 = 条目(根目录, 根位, "core.bin", 0, 核心清单起, 清位);
 根位 = 条目(根目录, 根位, "sign.bin", 0, 签名起, 签位);
+根位 = 条目(根目录, 根位, "auth.bin", 0, auth起, 第三环签名.length);
 for (let i = 0; i < 外五件.length; i++) {
   根位 = 条目(根目录, 根位, 外五件[i][0], 0, 外五起 + i, 外五件[i][1].length);
 }
@@ -652,6 +688,7 @@ try {
   fs.writeSync(fd, 假样本, 0, 假样本.length, 假样本起 * 512);
   fs.writeSync(fd, 核心清单, 0, 512, 核心清单起 * 512);
   fs.writeSync(fd, 签名清单, 0, 512, 签名起 * 512);
+  fs.writeSync(fd, 第三环签名, 0, 第三环签名.length, auth起 * 512);
   for (let i = 0; i < 外五件.length; i++) {
     fs.writeSync(fd, 外五件[i][1], 0, 外五件[i][1].length, (外五起 + i) * 512);
   }

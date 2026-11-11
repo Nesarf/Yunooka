@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 108
+stage2_sectors equ 110
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -189,7 +189,7 @@ stage2:
     mov dword [dap_lba], 1024
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x4000
-    mov word [dap_count], 23       ; preread-sectors: 预读几个扇区，这个数由 build 核对
+    mov word [dap_count], 24       ; preread-sectors: 预读几个扇区，这个数由 build 核对
     call read_batch
     jnc .fs_ready
     mov si, line_fs_preread
@@ -690,6 +690,9 @@ long_entry:
     ; 保护这一块无关，只是被时序牵连。一条因为别的原因变红的判据比没有判据更费人。
     call run_core_test
     call run_sign_test
+    ; 第三环紧跟在第二环后面：它要读的 sign.bin 正是上一行刚刚逐项核对过的那一份。
+    ; 顺序反过来的话，第三环会给一份还没被第二环看过的清单作证 —— 而那不是它该答的问题。
+    call run_onlysign3_test
     ; SHA-512 回到主链上了。
     ;
     ; 它曾经被摘下来一整轮，原因是「单块全对、两块全错」，而错因最后落在 feed-forward
@@ -4833,6 +4836,80 @@ run_sign_test:
     ret
 .nosign:
     mov rsi, line_sign_nosign
+    call puts64
+    ret
+
+; ======================================================================
+; 第三环：sign.bin 自己也被签过
+; ======================================================================
+;
+; 前两环都在「盘上有一份清单」这个层面：core.bin 说文件与清单是否一致，sign.bin 说
+; 清单自己有没有被动过。而 sign.bin 本身也会被一起重算 —— 下决心的人可以把两份一起
+; 改对。第三环挡的是这一手：auth.bin 里是对 sign.bin 内容的 Ed25519 签名。
+;
+; 公钥为什么不放盘上：放上去的话，改盘的人可以把公钥与签名一起换掉，而这一环就退化
+; 成第二环。公钥内嵌在第二段里，要伪造就必须改第二段 —— 而第二段是从引导扇区读进来
+; 的，那一路上没有清单可改。
+;
+; 两条判据缺一不可：
+;   一、正常那一趟必须通过 —— 否则这一环只是把一切判死；
+;   二、签名被改一位的那一趟必须红（build 的 --authbreak）—— 否则一个「永远通过」
+;      的实现也是绿的，而它与真正的验签在正常那一趟上完全一样。
+run_onlysign3_test:
+    lea rdi, [sig_pk]
+    lea rsi, [onlysign_pubkey]
+    mov ecx, 8
+    cld
+    rep movsd
+
+    mov rdi, fs_auth_path
+    call fs_open_path
+    test rax, rax
+    jz .noauth
+    mov rcx, rbx
+    cmp rcx, 64
+    jne .badsig
+    mov rsi, [last_addr]
+    lea rdi, [sig_sig]
+    cld
+    rep movsb
+
+    mov rdi, fs_sign_path
+    call fs_open_path
+    test rax, rax
+    jz .nolist
+    mov [sig_msglen], rbx
+    mov rsi, [last_addr]
+    lea rdi, [sig_msg]
+    mov rcx, rbx
+    cld
+    rep movsb
+
+    call pt_verify
+    test rax, rax
+    jz .bad
+    mov rsi, line_onlysign3_ok
+    call puts64
+    ret
+.bad:
+    ; where 是验签自己报的「走到第几步」。它在正常那一趟没有意义，而在红的那一趟
+    ; 是唯一的线索 —— 没有它，一个「签名不对」可以是链上任何一层的意思。
+    mov rsi, line_onlysign3_bad
+    call puts64
+    mov rax, [sig_where]
+    call put_num64
+    call put_nl64
+    ret
+.noauth:
+    mov rsi, line_onlysign3_noauth
+    call puts64
+    ret
+.badsig:
+    mov rsi, line_onlysign3_badsig
+    call puts64
+    ret
+.nolist:
+    mov rsi, line_onlysign3_nolist
     call puts64
     ret
 
@@ -10885,6 +10962,17 @@ rep_refused: dq 0
 ; 第三条不是「验过了」，是「没东西可验」—— 那两件事在串口上必须不一样。
 sign_magic: db "YUNOSIG", 0
 fs_sign_path: dw 0x03B1, 0x003A, 0x002F, 0x0073, 0x0069, 0x0067, 0x006E, 0x002E, 0x0062, 0x0069, 0x006E, 0
+fs_auth_path: dw 0x03B1, 0x003A, 0x002F, 0x0061, 0x0075, 0x0074, 0x0068, 0x002E, 0x0062, 0x0069, 0x006E, 0
+
+; 第三环的公钥。它内嵌在这里而不是放盘上 —— 放上去的话，改盘的人可以把公钥与签名
+; 一起换掉，这一环就退化成第二环。这一把是 RFC 8032 第一条向量给的种子算出来的，
+; 所以它与 vec1_pk 是同一串字节：测试密钥，不是生产密钥。换成真密钥只动这八行与
+; build.mjs 里那个对照常量。
+onlysign_pubkey:
+    db 0xD7, 0x5A, 0x98, 0x01, 0x82, 0xB1, 0x0A, 0xB7
+    db 0xD5, 0x4B, 0xFE, 0xD3, 0xC9, 0x64, 0x07, 0x3A
+    db 0x0E, 0xE1, 0x72, 0xF3, 0xDA, 0xA6, 0x23, 0x25
+    db 0xAF, 0x02, 0x1A, 0x68, 0xF7, 0x07, 0x51, 0x1A
 sign_path: times 128 dw 0
 sign_ptr: dq 0
 sign_left: dq 0
@@ -10903,6 +10991,11 @@ line_sign_bad: db "Yunooka: event=onlysign bad name=", 0
 line_sign_bad_n: db "Yunooka: event=onlysign badcount=", 0
 line_sign_nosign: db "Yunooka: event=onlysign nosign", 13, 10, 0
 line_sign_nomagic: db "Yunooka: event=onlysign nomagic", 13, 10, 0
+line_onlysign3_ok: db "Yunooka: event=onlysign3 ok", 13, 10, 0
+line_onlysign3_bad: db "Yunooka: event=onlysign3 bad where=", 0
+line_onlysign3_noauth: db "Yunooka: event=onlysign3 noauth", 13, 10, 0
+line_onlysign3_badsig: db "Yunooka: event=onlysign3 badsig", 13, 10, 0
+line_onlysign3_nolist: db "Yunooka: event=onlysign3 nolist", 13, 10, 0
 line_fp_val: db "Yunooka: fp val=", 0
 line_fp_ok: db "Yunooka: event=fp ok vectors=6", 13, 10, 0
 line_fp2_add: db "Yunooka: fp2 op=add val=", 0
@@ -11222,7 +11315,7 @@ k_bit: dq 0
 sig_cat: times 512 db 0
 sig_pk: times 32 db 0
 sig_sig: times 64 db 0
-sig_msg: times 64 db 0
+sig_msg: times 512 db 0
 sig_msglen: dq 0
 sig_res: dq 0
 sig_res2: dq 0
