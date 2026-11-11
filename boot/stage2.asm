@@ -5200,6 +5200,17 @@ run_onlysign3_test:
     call put_nl64
     ret
 .noauth:
+    ; 缺件也进补完界面。
+    ;
+    ; 在那之前，这一环在缺 auth.bin 时只打一行 noauth 就过去了 —— 而补完界面回答的正是
+    ; 「现在修不了，缺什么」，auth.bin 缺了是那个问题的一种。让它进同一个界面，缺件的
+    ; 清单就只剩一处（core_bad），而不是「核心三条一处、签名一条另一处」。
+    ;
+    ; 这里直接写 core_bad 而不是去问 core.bin：补完界面只用那个数报「缺几条」，而
+    ; core.bin 那一趟已经在前面跑过、已经打过它自己的读数了。改这个数不会让串口上
+    ; 「几条」变成假话 —— 它是这一环自己的计数，而这一环缺的是一条。
+    mov qword [core_bad], 1
+    call run_repair_screen
     mov rsi, line_onlysign3_noauth
     call puts64
     ret
