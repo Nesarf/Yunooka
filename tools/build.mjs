@@ -30,6 +30,35 @@ const 失败 = (为什么) => {
   process.exit(1);
 };
 
+// ---- 第三环的公钥：由种子派生，写成 boot/pubkey.inc ----
+//
+// 这一块必须跑在 nasm 之前（stage2 会 %include 它），所以它在文件最前面。而它需要的
+// 东西只有种子 —— 公钥只由种子决定，与消息无关。这里对空消息签一次只是为了拿 publicKey；
+// 真正签清单的那一次在后面。
+//
+// pubkey.inc 是构建产物，不入库。它由种子派生，而写在这里而不是让 stage2 手抄一份 ——
+// 手抄那一版里「换密钥」要改两处，改一处漏一处的时候症状是验签不过（公钥是空的，A 解
+// 不出来，而第一处碰到 A 之前的检查恰好是 S）。现在只有一条链：种子 → 这里的派生 →
+// boot/pubkey.inc。
+const 种子路径 = path.join(ROOT, "keys", "onlysign.seed");
+const 用测试种子 = !fs.existsSync(种子路径);
+const 第三环种子 = 用测试种子
+  ? Buffer.from("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60", "hex")
+  : fs.readFileSync(种子路径);
+if (第三环种子.length !== 32) 失败("keys/onlysign.seed 应当是 32 字节，实际 " + 第三环种子.length);
+const 派生公钥 = Buffer.from(edSign(new Uint8Array(第三环种子), new Uint8Array(0)).publicKey);
+const 公钥行 = [];
+for (let i = 0; i < 32; i += 8) {
+  公钥行.push("db " + [...派生公钥.subarray(i, i + 8)]
+    .map((b) => "0x" + b.toString(16).toUpperCase().padStart(2, "0")).join(", "));
+}
+const 公钥头 = [
+  "; 这个文件由 tools/build.mjs 生成，不要手改。",
+  "; 它由 keys/onlysign.seed 派生；没有那个文件时用 RFC 8032 第一条向量给的测试种子。",
+  "; 它不入库：公钥是构建产物，而种子是私钥。",
+].join("\n");
+fs.writeFileSync(path.join(ROOT, "boot", "pubkey.inc"), 公钥头 + "\n" + 公钥行.join("\n") + "\n");
+
 // 从 nasm 的清单里按符号名找它的地址。清单的每一行形如：
 //   123 00007E1F 0000         seed_bytes: dw 0
 // 第二列是**段内偏移**，不含 org —— 验过：org 是 0x7e00 的时候，清单第一行 cli 的
@@ -513,32 +542,8 @@ const 签名起 = 核心清单起 + 1;
 // 清单自己有没有被动过。而 sign.bin 本身也会被一起重算 —— 下决心的人可以把两份一起
 // 改对。第三环挡的是这一手：对 sign.bin 的内容签一次名，公钥内嵌在第二段里。
 //
-// 种子在 keys/onlysign.seed（三十二字节）。它不存在的时候用 RFC 8032 第 7.1 节第一条
-// 向量给的那一颗 —— 那一颗是公开的，所以那种情况下的签名只能证明「这条链接得通」，
-// 不能证明「谁签的」。
-//
-// 公钥不是秘密：它写进 boot/pubkey.inc，跟着源码走。而 build 每次都核对一遍 —— 种子换过
-// 而 inc 没跟着换的时候，这里的检查会让构建停下来，而不是让盘上出现一个「签名对不上」
-// 的谜。那正是这一轮要解决的东西：在这之前，公钥是三十二个写死在 stage2 里的字节，
-// 而「换密钥」意味着去源码里改它们 —— 一处改错，症状是验签不过。
-const 种子路径 = path.join(ROOT, "keys", "onlysign.seed");
-const 用测试种子 = !fs.existsSync(种子路径);
-const 第三环种子 = 用测试种子
-  ? Buffer.from("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60", "hex")
-  : fs.readFileSync(种子路径);
-if (第三环种子.length !== 32) 失败("keys/onlysign.seed 应当是 32 字节，实际 " + 第三环种子.length);
+// 种子与公钥那一段在文件开头（它必须跑在 nasm 之前），这里只用它们签清单。
 const 第三环签 = edSign(new Uint8Array(第三环种子), 签名清单.subarray(0, 签位));
-const 派生公钥 = Buffer.from(第三环签.publicKey);
-const 记录公钥 = Buffer.from(
-  fs.readFileSync(path.join(ROOT, "boot", "pubkey.inc"), "utf8")
-    .split("\n")
-    .filter((l) => l.trim().startsWith("db "))
-    .flatMap((l) => l.replace("db ", "").split(",").map((x) => parseInt(x.trim(), 16))),
-);
-if (!记录公钥.equals(派生公钥)) {
-  失败("boot/pubkey.inc 与种子派生出来的公钥不一致 —— 种子换过就要让它跟着换。新公钥是：\n  "
-    + [...派生公钥].map((b) => "0x" + b.toString(16).toUpperCase().padStart(2, "0")).join(", "));
-}
 const 第三环签名 = Buffer.from(第三环签.signature);
 
 // --authbreak：把签名的第一个字节翻一位。
