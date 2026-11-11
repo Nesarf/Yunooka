@@ -690,17 +690,15 @@ long_entry:
     ; 保护这一块无关，只是被时序牵连。一条因为别的原因变红的判据比没有判据更费人。
     call run_core_test
     call run_sign_test
-    ; SHA-512 这一条**不在主链上**，这是有意的，不是漏了。
+    ; SHA-512 回到主链上了。
     ;
-    ; 它的单块路径（0 到 111 字节的消息）与主机上 node 算的逐字节相同，而一旦消息长到
-    ; 需要第二块（112 字节起）就与标准不符。四份互不相同的实现（BigInt、双字 32 位、
-    ; 逐位、Python 无界整数）在这条分界上完全一致地错，而把主机反推出来的中间状态喂给
-    ; 压缩函数又对不上标准 —— 所以错在压缩函数的某处，而它恰好在初值等于 IV 时才与标准
-    ; 相同。定位没完成之前，它不该留在主链上：一条红的判据会让整套自检停在红上，而它
-    ; 红的原因与别的判据无关。
+    ; 它曾经被摘下来一整轮，原因是「单块全对、两块全错」，而错因最后落在 feed-forward
+    ; 的位置上：加回初值是**每个块**各做一次（H(i+1) = H(i) + rounds(H(i), block)），
+    ; 而那时写成了「所有块跑完之后加一次初值」—— 对单块的消息恰好等价，两块起就全错。
+    ; 那个错法在串口上和「压缩函数写错」分不开，所以它花了很久才被找到。
     ;
-    ; run_sha512_test 本身留着：它打的那六行长度与摘要，就是下一次定位的入口。
-    ; call run_sha512_test
+    ; 摘下来的理由现在不成立了，所以它回来了，判据照旧先验红：六行摘要要与主机逐字符相同。
+    call run_sha512_test
     call run_ata_test
     call run_fs_test
     call run_fs_open
@@ -3884,33 +3882,14 @@ sha256:
     lea rdi, [sha_pad]
     call sha256_block
 .out:
-    ; 加回初值。SHA-256 的最后一步是 h0..h7 与初始值逐个相加 —— 漏掉它，六十四轮全对
-    ; 而摘要全错，那个症状与「压缩函数算错」完全分不开。这一处就是这样错了一次：
-    ; 前两轮的中间值与主机一模一样，而最后的 32 字节一个字也不对。
-    mov eax, [sha_h + 0]
-    add eax, 0x6a09e667
-    mov [sha_h + 0], eax
-    mov eax, [sha_h + 4]
-    add eax, 0xbb67ae85
-    mov [sha_h + 4], eax
-    mov eax, [sha_h + 8]
-    add eax, 0x3c6ef372
-    mov [sha_h + 8], eax
-    mov eax, [sha_h + 12]
-    add eax, 0xa54ff53a
-    mov [sha_h + 12], eax
-    mov eax, [sha_h + 16]
-    add eax, 0x510e527f
-    mov [sha_h + 16], eax
-    mov eax, [sha_h + 20]
-    add eax, 0x9b05688c
-    mov [sha_h + 20], eax
-    mov eax, [sha_h + 24]
-    add eax, 0x1f83d9ab
-    mov [sha_h + 24], eax
-    mov eax, [sha_h + 28]
-    add eax, 0x5be0cd19
-    mov [sha_h + 28], eax
+    ; 加回初值这一步**不在这里**，这一点值得写清楚。
+    ;
+    ; SHA-256 的链是 H(i+1) = H(i) + rounds(H(i), block) —— 加的是**上一步的状态**，
+    ; 而它每个块各做一次。只在最后加一次「初值」，对一个块的消息恰好等价（那一步的
+    ; H(i) 就是初值），从两块起就不同了。这一处曾经就是这样错的：单块全对、两块全错，
+    ; 而第二环的清单里三个文件都短于一块，所以那条判据从来没有走到过会错的地方。
+    ;
+    ; 现在那一次加法在 sha256_block 自己的尾部（对着 sha_h0），这里只剩输出。
     lea rsi, [sha_h]
     lea rdi, [sha_out]
     mov ecx, 8
@@ -3976,6 +3955,12 @@ sha256_block:
     inc ecx
     cmp ecx, 64
     jb .expand
+    ; 这一块的初值先存下来，交给尾部那一次 feed-forward。放在这里而不是开头，是因为
+    ; rep movsd 要吃 rdi，而 rdi 在整个 .load 里都是块地址 —— 到了这里它已经用完了。
+    lea rsi, [sha_h]
+    lea rdi, [sha_h0]
+    mov ecx, 8
+    rep movsd
     ; 六十四轮
     xor ecx, ecx
 .round:
@@ -4043,6 +4028,25 @@ sha256_block:
     inc ecx
     cmp ecx, 64
     jb .round
+    ; feed-forward：H(i+1) = H(i) + rounds(H(i), block)，而 H(i) 就是刚才存下的 sha_h0。
+    ; 每个块各做一次 —— 只在最后做一次的话，单块的消息恰好等价，两块起就全错，
+    ; 而那种错法与「压缩函数写错」在串口上分不开。
+    mov eax, [sha_h0 + 0]
+    add [sha_h + 0], eax
+    mov eax, [sha_h0 + 4]
+    add [sha_h + 4], eax
+    mov eax, [sha_h0 + 8]
+    add [sha_h + 8], eax
+    mov eax, [sha_h0 + 12]
+    add [sha_h + 12], eax
+    mov eax, [sha_h0 + 16]
+    add [sha_h + 16], eax
+    mov eax, [sha_h0 + 20]
+    add [sha_h + 20], eax
+    mov eax, [sha_h0 + 24]
+    add [sha_h + 24], eax
+    mov eax, [sha_h0 + 28]
+    add [sha_h + 28], eax
     pop r9
     pop r8
     pop rdi
@@ -4140,24 +4144,9 @@ sha512:
     lea rdi, [sha512_pad]
     call sha512_block
 .out:
-    ; 加回初值。SHA-256 那一份在这一步错过一次：六十四轮全对而摘要一个字也不对，
-    ; 而那个症状与「压缩函数写错」完全分不开。一条一条写，八条都不省。
-    mov rax, 0x6a09e667f3bcc908
-    add [sha512_h + 0], rax
-    mov rax, 0xbb67ae8584caa73b
-    add [sha512_h + 8], rax
-    mov rax, 0x3c6ef372fe94f82b
-    add [sha512_h + 16], rax
-    mov rax, 0xa54ff53a5f1d36f1
-    add [sha512_h + 24], rax
-    mov rax, 0x510e527fade682d1
-    add [sha512_h + 32], rax
-    mov rax, 0x9b05688c2b3e6c1f
-    add [sha512_h + 40], rax
-    mov rax, 0x1f83d9abfb41bd6b
-    add [sha512_h + 48], rax
-    mov rax, 0x5be0cd19137e2179
-    add [sha512_h + 56], rax
+    ; 加回初值那一次加法**在 sha512_block 的尾部**，每个块各做一次，加的是那个块开始
+    ; 时的状态。这里只剩输出 —— 写成「只在最后加一次初值」的话，单块的消息恰好等价，
+    ; 两块起就全错，而 SHA-256 那一份正是这样错了一整轮。
     lea rsi, [sha512_h]
     lea rdi, [sha512_out]
     mov ecx, 8
@@ -4223,6 +4212,12 @@ sha512_block:
     inc ecx
     cmp ecx, 80
     jb .expand
+    ; 这一块的初值先存下来，交给尾部那一次 feed-forward。放在这里是因为 rep movsq
+    ; 要吃 rdi，而 rdi 在整个 .load 里都是块地址 —— 到这里它已经用完了。
+    lea rsi, [sha512_h]
+    lea rdi, [sha512_h0]
+    mov ecx, 8
+    rep movsq
     ; 八十轮
     xor ecx, ecx
 .round:
@@ -4288,6 +4283,24 @@ sha512_block:
     inc ecx
     cmp ecx, 80
     jb .round
+    ; feed-forward：H(i+1) = H(i) + rounds(H(i), block)，H(i) 就是刚才存下的 sha512_h0。
+    ; 每个块各做一次 —— 「只在最后加一次」对单块的消息恰好等价，两块起就全错。
+    mov rax, [sha512_h0 + 0]
+    add [sha512_h + 0], rax
+    mov rax, [sha512_h0 + 8]
+    add [sha512_h + 8], rax
+    mov rax, [sha512_h0 + 16]
+    add [sha512_h + 16], rax
+    mov rax, [sha512_h0 + 24]
+    add [sha512_h + 24], rax
+    mov rax, [sha512_h0 + 32]
+    add [sha512_h + 32], rax
+    mov rax, [sha512_h0 + 40]
+    add [sha512_h + 40], rax
+    mov rax, [sha512_h0 + 48]
+    add [sha512_h + 48], rax
+    mov rax, [sha512_h0 + 56]
+    add [sha512_h + 56], rax
     pop r9
     pop r8
     pop rdi
@@ -9129,6 +9142,9 @@ line_sign_nomagic: db "Yunooka: event=onlysign nomagic", 13, 10, 0
 sha_ptr: dq 0
 sha_len: dq 0
 sha_h: times 8 dd 0
+; 一个块开始时的 sha_h。feed-forward 加回的是「上一步的状态」，而轮函数会把 sha_h
+; 覆盖成这一块的输出 —— 所以每个块开头各存一次，加的是它，不是固定的初值。
+sha_h0: times 8 dd 0
 sha_w: times 64 dd 0
 sha_pad: times 128 db 0
 sha_out: times 32 db 0
@@ -9158,6 +9174,9 @@ sha_k:
 sha512_ptr: dq 0
 sha512_len: dq 0
 sha512_h: times 8 dq 0
+; 一个块开始时的状态。feed-forward 加回的是它，而轮函数会把 sha512_h 覆盖成这一块的
+; 输出 —— 所以每个块开头各存一次。
+sha512_h0: times 8 dq 0
 sha512_w: times 80 dq 0
 sha512_pad: times 256 db 0
 sha512_out: times 64 db 0
