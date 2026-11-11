@@ -193,7 +193,7 @@ stage2:
     mov dword [dap_lba], 1024
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x4000
-    mov word [dap_count], 27       ; preread-sectors: 预读几个扇区，这个数由 build 核对
+    mov word [dap_count], 28       ; preread-sectors: 预读几个扇区，这个数由 build 核对
     call read_batch
     jnc .fs_ready
     mov si, line_fs_preread
@@ -4462,6 +4462,7 @@ run_fs_open4:
 ;
 ; rdi = 文件名（UTF-16，0 码元结尾）、rsi = 数据、rcx = 字节数。出 rax = 1 成功 / 0 失败。
 fs_write_file:
+    push r11
     push r12
     push r13
     push r14
@@ -4483,6 +4484,16 @@ fs_write_file:
     mov edi, [rbx + 12]
     call fs_load
     mov r9, rsi
+    ; 条目区的上界 = 目录自己那几页的末尾。
+    ;
+    ; 没有这一条的时候，根目录写满就沿着预读区往后写，而紧跟其后的是下一个目录的条目区。
+    ; 症状不是「写不进去」，而是另一个目录里的文件凭空消失 —— docs 的 sub 被 new.txt 的
+    ; 条目压掉，而 fs_lookup 只在连续内存里走，看不出那是一条谁都不该越过的边界。
+    ;
+    ; 上界从超块偏移 16 读，不写死：那个字段本来就是「根目录占几个扇区」。
+    mov eax, [rbx + 16]
+    shl eax, 9
+    lea r11, [rsi + rax]
 .find_free:
     movzx eax, word [r9]
     test eax, eax
@@ -4517,6 +4528,8 @@ fs_write_file:
 .not_same:
     movzx eax, word [r9]
     lea r9, [r9 + 11 + rax * 2]
+    cmp r9, r11
+    jae .fail                     ; 写到目录自己的页之外了：不再往后挤
     jmp .find_free
 .have_slot:
     mov r10, r9
@@ -4563,6 +4576,7 @@ fs_write_file:
     pop r14
     pop r13
     pop r12
+    pop r11
     ret
 
 ; ======================================================================

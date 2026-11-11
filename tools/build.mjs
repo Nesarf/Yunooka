@@ -293,8 +293,12 @@ if (种子内容.length) {
 // 否则一层与两层在代码上看起来是一样的。
 const 文件系统起 = 1024;
 const 根目录号 = 文件系统起 + 1;
-const 子目录号 = 文件系统起 + 2;
-const 数据起 = 文件系统起 + 3;
+// 根目录占两格。它原先占一格，而十九个静态条目已经把 512 字节用到第 505 个 ——
+// 运行期第一次写文件就要跨过扇区边界，跨过去的几个字节落在 docs 的条目区上。
+// 症状不是「写失败」，而是 docs 里的 sub 后来查不到：slurp 在很后面，run_fs_open3 在前面。
+const 根目录扇区数 = 2;
+const 子目录号 = 文件系统起 + 1 + 根目录扇区数;
+const 数据起 = 子目录号 + 1;
 // 三层那一层：docs 里再嵌一个 sub，sub 里放 deep.txt。
 // 两个扇区按顺序排在数据区之后 —— 数据区现在是 1027 到 1032 六个文件，所以 sub 在 1033、
 // deep.txt 在 1034。stage2 的预读要盖到 1034，所以那一边的扇区数也跟着加了。
@@ -579,7 +583,7 @@ for (const 字 of "win") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 
 // 退回一条扇区，是因为「让 prog.hmtn 长到两个扇区」要先有一次能一次算完所有偏移的重排。
 // 三条：常量路径、调 slurp、把内容写出去。布局现在跟着清单走，所以 prog.hmtn 涨到两个
 // 扇区时后面每一个偏移都会自己往后挪 —— 这一版要证明的正是那件事。
-const 试路径 = "hello.txt";
+const 试路径 = "docs/sub/deep.txt";
 程序包[位++] = 5;
 程序包[位++] = 2;
 程序包.writeUInt16LE(试路径.length, 位); 位 += 2;
@@ -960,7 +964,7 @@ const 超级块 = Buffer.alloc(512);
 超级块.writeUInt16LE(1, 6);                        // 版本
 超级块.writeUInt32LE(盘字节数 / 512, 8);             // 盘上扇区总数
 超级块.writeUInt32LE(根目录号, 12);
-超级块.writeUInt32LE(1, 16);                       // 根目录占一个扇区
+超级块.writeUInt32LE(根目录扇区数, 16);              // 根目录占几个扇区
 超级块.writeUInt32LE(数据起, 20);
 超级块.writeUInt32LE(盘字节数 / 512 - 数据起 - 示例扇区数, 24);
 // 偏移 28：家庭组的「家」。同一个数的两块盘是一家，不同就不是。
@@ -968,7 +972,7 @@ const 超级块 = Buffer.alloc(512);
 // 而两块盘的家一样时，「比较过」与「没比较」看起来一样。
 超级块.writeUInt32LE(0x594B4E52, 28);
 
-const 根目录 = Buffer.alloc(512);
+const 根目录 = Buffer.alloc(根目录扇区数 * 512);
 let 根位 = 条目(根目录, 0, "hello.txt", 0, 数据起, 示例文件.length);
 根位 = 条目(根目录, 根位, "docs", 1, 子目录号, 0);       // 目录的字节长度没有意义，写 0
 根位 = 条目(根目录, 根位, "cmd.txt", 0, 数据起 + 2, 命令文件.length);
@@ -1023,7 +1027,7 @@ try {
   fs.writeSync(fd, 二段, 0, 二段.length, (1 + 加载器扇区) * 512);
   fs.writeSync(fd, 种子内容, 0, 种子内容.length, 种子偏移);
   fs.writeSync(fd, 超级块, 0, 512, 文件系统起 * 512);
-  fs.writeSync(fd, 根目录, 0, 512, 根目录号 * 512);
+  fs.writeSync(fd, 根目录, 0, 根目录.length, 根目录号 * 512);
   fs.writeSync(fd, 子目录, 0, 512, 子目录号 * 512);
   fs.writeSync(fd, 盘上示例, 0, 盘上示例.length, 数据起 * 512);
   fs.writeSync(fd, 子文件, 0, 子文件.length, (数据起 + 1) * 512);
