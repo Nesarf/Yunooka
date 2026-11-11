@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 121
+stage2_sectors equ 122
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -782,6 +782,8 @@ long_entry:
     call run_prog_sum_test
     ; 第四个函数：画一个窗口。三层矩形，三种颜色。
     call run_win_test
+    ; 第五个函数：读一个文件，返回它的字节数。
+    call run_filesize_test
     ; Myon 的第二步：盘上那个只有三条指令的包，靠内置 write 把一段字打到串口。
     call run_myon_test
     call run_trap_test
@@ -1699,7 +1701,7 @@ exec:
     mov rsi, rdx
     movzx ecx, word [rsi]           ; 路径码元数
     cmp rcx, 200
-    ja .slurp_miss
+    ja .slurp_too_long
     lea rdi, [slurp_path]
     mov word [rdi], 0x03B1          ; α
     mov word [rdi + 2], 0x003A      ; :
@@ -1714,14 +1716,16 @@ exec:
     jmp .slurp_copy
 .slurp_end:
     mov word [rdi + 6 + rcx * 2], 0 ; 结尾零码元
-    ; rbx 要先存起来：fs_open_path 用 rbx 交回字节数，而 rbx 在这里是 pc。改坏它的
-    ; 症状是「包读完了文件就跳到别处」—— 与读文件毫无关系的那种症状。
+    ; 到这里路径已拼好，接下来 fs_open_path 的返回值决定成败：零则 r15 = 2。
     push rbx
     call fs_open_path
-    mov r9, rbx                     ; 字节数
+    mov r9, rbx
     pop rbx
     test rax, rax
-    jz .slurp_miss
+    jnz .slurp_ok
+    mov r15, 2
+    jmp .slurp_miss
+.slurp_ok:
     ; 内容在预读区里：[last_addr] 是起点，rbx 是字节数（fs_open_path 交回来的）。
     ; 这一版按 ASCII 一刀切：每个字节当一个码元。非 ASCII 的文件会走样，而这一版没有
     ; 编码表 —— 那件事该由包自己决定，不该藏在内置里。
@@ -1748,8 +1752,21 @@ exec:
     call push_val
     inc rbx
     jmp .loop
+.slurp_too_long:
+    mov r15, 1
+    jmp .slurp_miss
+
 .slurp_miss:
     ; 读不到就交一个空串，而不是「空」—— 包拿到的东西种类一致，它自己决定怎么处理。
+    ;
+    ; 而「读不到」有两种：路径太长（在拼之前就退），或者 fs_open_path 返回零。两条各打
+    ; 一行，因为它们要查的地方不同。用的串口行是普通诊断，不是 event —— 它只给人看。
+    mov [slurp_dbg], r15
+    mov rsi, line_slurp_miss
+    call puts64
+    mov rax, [slurp_dbg]
+    call put_hex64
+    call put_nl64
     lea rdi, [slurp_buf]
     mov word [rdi], 0
     mov rax, 2
@@ -3203,6 +3220,57 @@ run_win_test:
     ret
 .missing:
     mov rsi, line_win_bad
+    call puts64
+    ret
+
+; ======================================================================
+; slurp 的返回值参与计算：读一个文件，返回它的字节数
+; ======================================================================
+;
+; 上面那条让包读一个文件再打出来 —— 读到的值只有一条去向：交给 write。这一条要的是
+; 「读到的值能当值用」：slurp 之后接 len，而 len 读的是那个串的长度字段。
+;
+; 判据要 prog size -> 24（docs/sub/deep.txt 是 24 字节）。24 这个数在别处没有出现过，
+; 所以它只能来自那个文件。
+run_filesize_test:
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]
+    mov r8, fs_prog_name
+    mov r9, 9
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz .missing
+    mov rdi, r15
+    call fs_load
+    mov r14, rsi
+    mov [pkg_base], r14
+    mov rdi, name_filesize
+    mov r8, 8
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+    mov r15, rax
+    mov r14, rdx
+    mov qword [pkg_base], 0x20000
+    mov rsi, line_size
+    call puts64
+    mov rax, r15
+    mov rdx, r14
+    call print_value
+    call put_nl64
+    ret
+.missing:
+    mov rsi, line_size_bad
     call puts64
     ret
 
@@ -11636,6 +11704,8 @@ myon_dbg_b: dq 0
 myon_dbg_c: dq 0
 ; slurp 拼出来的路径（α:/ + 参数）与它交出去的串。
 slurp_path: times 520 dw 0
+slurp_dbg: dq 0
+line_slurp_miss: db "Yunooka: slurp miss at ", 0
 slurp_buf: times 520 db 0
 fs_myon_path: dw 0x03B1, 0x003A, 0x002F, 0x0064, 0x006F, 0x0063, 0x0073, 0x002F, 0x006D, 0x0079, 0x006F, 0x006E, 0x002E, 0x0068, 0x006D, 0x0074, 0x006E, 0
 name_echo: dw 0x0065, 0x0063, 0x0068, 0x006F
@@ -11742,6 +11812,9 @@ fs_prog_name: dw 0x0070, 0x0072, 0x006F, 0x0067, 0x002E, 0x0068, 0x006D, 0x0074,
 name_main: dw 0x006D, 0x0061, 0x0069, 0x006E
 name_sum: dw 0x0073, 0x0075, 0x006D
 name_win: dw 0x0077, 0x0069, 0x006E
+name_filesize: dw 0x0066, 0x0069, 0x006C, 0x0065, 0x0073, 0x0069, 0x007A, 0x0065
+line_size: db "Yunooka: prog size -> ", 0
+line_size_bad: db "Yunooka: prog size missing", 13, 10, 0
 line_win_px: db "Yunooka: win px ", 0
 line_win_bad: db "Yunooka: win missing", 13, 10, 0
 line_prog_sum: db "Yunooka: prog sum -> ", 0

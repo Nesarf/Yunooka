@@ -1053,3 +1053,32 @@ slurp、len、返回。判据应当是 prog size -> 24（deep.txt 是 24 字节�
 下一轮要查的是「两次 slurp 之间有什么不同」—— 一个可能的方向是 fs_open_path 的
 last_addr 与 fs_base 在两次调用之间被谁改过；另一个是 slurp_buf 与 myon_line 相邻，
 而某个 call 写过了头。
+
+
+更正：slurp 从来没有成功过
+-------------------------
+
+上一轮说「slurp 接上了」，依据是串口上出现了 Yunooka three levels ok。
+
+这一轮给 slurp 的两条失败路径各加了一个标记（1 = 路径太长、2 = fs_open_path 返回零），
+然后跑了一次。结果是：
+
+    Yunooka: slurp miss at 0000000000000002
+
+也就是说 fs_open_path 返回零 —— 而它出现了（win 一次、filesize 一次）。把 filesize
+撤回之后还剩一次，那就是 win 的。
+
+而 win 里那三条指令是「常量路径、slurp、write」。slurp 失败时交出一个空串，而 write 打一个
+空串 —— 在串口上就是一个空行。而那个空行我当时看成了别的东西：run_fs_open3 那一条打的
+Yunooka three levels ok 就在附近，而我把那一行当成了 slurp 的成果。
+
+所以「接上了」是误读。真实情况是：slurp 每次都 miss，而它的唯一痕迹是一个空行。
+
+这一轮留下的东西是那两条标记 —— 它们把「读不到」拆成两种，而这一次直接指向第二种：
+路径拼好了，而 fs_open_path 没找到那个文件。
+
+下一轮从 fs_open_path 在这一条路径上的行为查起：同一个路径在 run_fs_open3 里成功，而在
+exec 内部（slurp 是内置，它在 exec 里跑）失败。两者之间的差别是这一轮没有查的部分。
+
+一条方法上的记录：那一轮我把「串口上有一行正确的输出」当成了成功，而没有确认那一行是谁
+打的。而这一轮加的两个标记，把一个「看起来成功」直接变成了「两次都失败」。
