@@ -1766,6 +1766,14 @@ exec:
     call puts64
     mov rax, [slurp_dbg]
     call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, [fs_base]
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, [last_addr]
+    call put_hex64
     call put_nl64
     lea rdi, [slurp_buf]
     mov word [rdi], 0

@@ -836,7 +836,7 @@
         "tools/build.mjs"
       ],
       "notes": "这一条才是「真正的 OS」的门槛：现在构建与验证都还要 Windows（nasm、node、VBoxManage），所以它的「能跑」有一半是借来的。 【移出 open】需要的条件：HMYR 编译器本身能在字节码里跑。现在能跑「一个包里的一个函数」（prog.hmtn 的 main 返回 7），而编译器是几万行 HMYR，并且它要读源文件、写目标文件 —— 那两件事要的对象模型与文件写入都还没有。这一条是整个工程的方向，不是下一块砖；把它写成 blocked 是为了让它别挡着路。\n\n【读那一侧】内置 slurp 落地：一参（路径，从 α:/ 后写起），返回文件内容成串。它补上了 self-host 的半个前置 —— 写入早就有，读在这之前只有 readline（读宿主那一行，不是文件）。\n一个位置坑：fs_open_path 用 rbx 交回字节数，而 rbx 在 exec 里是 pc，所以 slurp 里要先存再调。\n包里调用还断着：让 echo 读 docs/sub/deep.txt 会断在 readline 之前（myon here 之后什么都没有），所以调用撤了、内置留着。那不是返回值错，是执行流被带偏。记录在 design/LAYERS.txt。",
-      "state": "更正：slurp 从来没有成功过。加了两个失败标记之后，串口上出现「slurp miss at 0002」——fs_open_path 返回零。上一轮那句「slurp 接上了」是误读：串口上那行 Yunooka three levels ok 是 run_fs_open3 打的，而 slurp 的痕迹只有一个空行（write 打空串）。下一轮查「同一个路径在 run_fs_open3 里成功、而在 exec 内部失败」的差别。"
+      "state": "slurp 的失败定位到了段循环：一段路径（hello.txt）能读到、并把内容打了出来；而同样的三段路径（docs/sub/deep.txt）在 slurp 里读不到，尽管它在 run_fs_open3 里是成功的。所以问题在 fs_open_path 的段循环、且只在 exec 内部出现。下一轮在段循环里每过一段打一次段名与 fs_lookup 的返回值。"
     },
     {
       "id": "resident",

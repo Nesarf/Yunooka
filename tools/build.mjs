@@ -579,7 +579,7 @@ for (const 字 of "win") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 
 // 退回一条扇区，是因为「让 prog.hmtn 长到两个扇区」要先有一次能一次算完所有偏移的重排。
 // 三条：常量路径、调 slurp、把内容写出去。布局现在跟着清单走，所以 prog.hmtn 涨到两个
 // 扇区时后面每一个偏移都会自己往后挪 —— 这一版要证明的正是那件事。
-const 试路径 = "docs/sub/deep.txt";
+const 试路径 = "hello.txt";
 程序包[位++] = 5;
 程序包[位++] = 2;
 程序包.writeUInt16LE(试路径.length, 位); 位 += 2;
