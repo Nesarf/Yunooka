@@ -495,6 +495,21 @@ for (const 字 of "win") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 
 // length * 2，于是包里只装了六条（第一个矩形的底色），后面的标题栏与内容区根本没有指令
 // 去画。症状是三个采样点都读到 0x1F：那不是 rect 坏了，是没人调用它第二次。
 程序包.writeUInt32LE(窗口矩形.length * 6, 位); 位 += 4;
+// slurp 的调用仍然不在这条链上，而这一轮把它的症状查清了一步。
+//
+// 让 win 调 slurp，串口上出现的是：
+//     unknown op 100
+//     Yunooka: exec ran out at 19 21
+//     Yunooka: win px 1C 1F 1F
+//
+// op 100 是 0x64 —— 字符 'd' 的低字节。也就是说执行流在某个串常量内部开始解释。
+// 而编译出来的字节里，'d' 只出现在路径 "docs/sub/deep.txt" 里。
+//
+// 上一轮那句「断在 readline 之前」是错的：readline 在 slurp 前面，所以 slurp 不可能是
+// 那个原因。真正的位置是「扫描阶段对那条调用算错了长度」—— exec 从 instr_offsets 取
+// 指令，所以错位只可能来自 scan_instrs 与 imm_shape，不可能来自 rsi 的前进。
+//
+// 下一轮从 scan_instrs 查起。
 for (const r of 窗口矩形) {
   for (const 值 of r) {
     程序包[位++] = 5;

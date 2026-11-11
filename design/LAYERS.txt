@@ -396,3 +396,24 @@ readline 之前：串口上 myon here 之后什么都没有，连 echo hello wor
 
 所以包里那条调用撤了，内置与它的注释留着。一条红的判据会有人说点什么，而一条把后面
 全部遮住的红会让人先去看别的 —— 后者更贵。
+
+
+unknown op 100：错位只可能来自扫描
+----------------------------------
+
+让 win 调 slurp，串口上是：
+
+    unknown op 100
+    Yunooka: exec ran out at 19 21
+    Yunooka: win px 1C 1F 1F
+
+op 100 是 0x64 —— 字符 d 的低字节。而编出来的字节里，d 只出现在路径 docs/sub/deep.txt。
+
+上一轮那句「断在 readline 之前」是错的：readline 在 slurp 前面，所以 slurp 不可能是那个
+原因。那句话说清了一件更要紧的事 —— 我没读懂自己刚截取的那段输出。
+
+而错位的位置只有一个来源：exec 从 instr_offsets 取每一条指令，而那张表由 scan_instrs
+与 imm_shape 建。rsi 怎么前进都影响不到它。
+
+所以下一个要看的是扫描，不是 rsi。下一轮从 scan_instrs 查起：形状 6（名字 + u16）对
+builtin 与 call 是同一个形状，而两边只有 builtin 会在这条路上被扫到。

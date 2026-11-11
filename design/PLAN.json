@@ -836,7 +836,7 @@
         "tools/build.mjs"
       ],
       "notes": "这一条才是「真正的 OS」的门槛：现在构建与验证都还要 Windows（nasm、node、VBoxManage），所以它的「能跑」有一半是借来的。 【移出 open】需要的条件：HMYR 编译器本身能在字节码里跑。现在能跑「一个包里的一个函数」（prog.hmtn 的 main 返回 7），而编译器是几万行 HMYR，并且它要读源文件、写目标文件 —— 那两件事要的对象模型与文件写入都还没有。这一条是整个工程的方向，不是下一块砖；把它写成 blocked 是为了让它别挡着路。\n\n【读那一侧】内置 slurp 落地：一参（路径，从 α:/ 后写起），返回文件内容成串。它补上了 self-host 的半个前置 —— 写入早就有，读在这之前只有 readline（读宿主那一行，不是文件）。\n一个位置坑：fs_open_path 用 rbx 交回字节数，而 rbx 在 exec 里是 pc，所以 slurp 里要先存再调。\n包里调用还断着：让 echo 读 docs/sub/deep.txt 会断在 readline 之前（myon here 之后什么都没有），所以调用撤了、内置留着。那不是返回值错，是执行流被带偏。记录在 design/LAYERS.txt。",
-      "state": "blocked 的理由里有一条已经过时：文件写入早就在（fs_write_file）。缺的是读 —— 内置 slurp 补上了它（一参，读一份文件成串）。而包那一侧的调用还断着：让 echo 读一个文件会让它断在 readline 之前，所以调用撤了、内置留着。下一件是查那一段。"
+      "state": "内置 slurp 落地（一参，读一份文件成串），补上了 self-host 里「读」那半个前置。而包那一侧的调用仍然断着，这一轮把症状查清了一步：unknown op 100（0x64 是字符 d 的低字节），而 d 只出现在路径串里 —— 所以执行流在串常量内部开始解释。错位只可能来自 scan_instrs 与 imm_shape 建的偏移表，下一轮从那里查。"
     },
     {
       "id": "resident",
