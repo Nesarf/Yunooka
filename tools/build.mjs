@@ -398,7 +398,7 @@ const 回声串 = "myon here";
 const 程序包 = Buffer.alloc(1024);
 程序包.write("HMYRB", 0, "latin1");
 程序包.writeUInt16LE(1, 5);       // 版本
-程序包.writeUInt16LE(4, 7);       // 四个函数
+程序包.writeUInt16LE(5, 7);       // 五个函数
 let 位 = 9;
 程序包.writeUInt16LE(4, 位); 位 += 2;                      // 名字长度
 for (const 字 of "main") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
@@ -607,6 +607,33 @@ for (const r of 窗口矩形) {
   for (const 字 of "rect") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
   程序包.writeUInt16LE(5, 位); 位 += 2;
 }
+程序包[位++] = 28;                                          // 返回
+
+// 第五个函数：filesize —— 问一份文件多少字节。
+//
+// 它比 win 短得多，而它证明的是另一件事：文件的大小能变成一个包里的数。前三样（执行、
+// 算术、读出来打出去）都不要这个数，而编译器要 —— 它读源文件之前得知道读进来多少。
+//
+// 四条：常量（路径串）、slurp、len、返回。slurp 交回一个串，len 把它的长度字段翻成数。
+// 路径与 win 里那一句用同一个常量，所以「同一份文件」不是两处各写一遍。
+程序包.writeUInt16LE(8, 位); 位 += 2;                      // 名字长度
+for (const 字 of "filesize") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包.writeUInt16LE(0, 位); 位 += 2;                      // 参数量
+程序包.writeUInt16LE(0, 位); 位 += 2;                      // 槽数
+程序包.writeUInt16LE(0, 位); 位 += 2;                      // 效果数
+程序包.writeUInt32LE(4, 位); 位 += 4;                      // 四条指令
+程序包[位++] = 5;                                           // 常量
+程序包[位++] = 2;                                           // 种类：串
+程序包.writeUInt16LE(试路径.length, 位); 位 += 2;
+for (const 字 of 试路径) { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包[位++] = 3;                                           // 调内置 slurp
+程序包.writeUInt16LE(5, 位); 位 += 2;
+for (const 字 of "slurp") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包.writeUInt16LE(1, 位); 位 += 2;                      // 一参
+程序包[位++] = 3;                                           // 调内置 len
+程序包.writeUInt16LE(3, 位); 位 += 2;
+for (const 字 of "len") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包.writeUInt16LE(1, 位); 位 += 2;                      // 一参
 程序包[位++] = 28;                                          // 返回
 const 程序字节 = 程序包.subarray(0, 位);
 
