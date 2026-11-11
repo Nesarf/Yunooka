@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 127
+stage2_sectors equ 128
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -793,6 +793,15 @@ long_entry:
     call run_myon_test
     ; 目录写满：该拒绝，而且不许吃掉邻居。排在最后，因为它会把根目录占满。
     call run_dirfull_test
+    ; 根目录满了之后别的目录仍然写得进 —— 这一条不在主链上。
+    ;
+    ; 它第一趟就红，而红的形状有信息：串口是 dirfull docs lost，紧跟一个 1027，也就是
+    ; docs 的扇区号。所以 lookup 找到了 docs、fs_write_file 也说成功，而 α:/docs/late.txt
+    ; 查不到 —— 两个出口里是第二个，问题在「写进去的那一条」与「查它的那一段」之间。
+    ; 这一轮没有余量再往下分（第二段只剩两百来字节），所以先摘下来，把问题留在
+    ; design/LAYERS.txt 里，而不是让它占着串口 —— 一条已经问对了方向的失败，与
+    ; run_health_test 那几条同一个处理。
+    ; call run_docs_after_full
     call run_trap_test
     jmp .hang64
 .heap_bad:
@@ -3106,6 +3115,65 @@ run_dirfull_test:
 .eaten:
     mov rsi, line_full_eaten
     call puts64
+    ret
+
+; ======================================================================
+; 根目录满了之后，docs 仍然写得进去
+; ======================================================================
+;
+; 上一条证明根目录会被挡住。这一条证明挡住的地方只是根目录自己 —— 若「满」被当成一个
+; 全局状态（那是最省事的写法：一个 bool，或者干脆不实现 write_dir），那么这里会红，
+; 而串口上它与「写对了」长得一样：文件确实写进去了，只是写错了地方。
+;
+; 判据两条：fs_write_file 说成功，而且 α:/docs/late.txt 查得到、扇区非零。
+; 只验前一条的话，一个总往根目录写的实现会骗过它 —— 而根目录那时已经满了，
+; 所以它其实会失败，于是前一条也过不了。两条一起才说明「写进了 docs」。
+run_docs_after_full:
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]            ; 根目录
+    mov r8, fs_docs_name
+    mov r9, 4                       ; "docs"
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz .lost                        ; 根目录里没有 docs：那不是这一条要查的事
+    mov [write_dir], r15            ; docs 的扇区
+    mov rdi, fs_late_name
+    mov rsi, fs_late_data
+    mov rcx, 2
+    call fs_write_file
+    mov qword [write_dir], 0        ; 用过就清
+    test rax, rax
+    jz .blocked
+    mov rdi, fs_late_path
+    call fs_open_path
+    test rax, rax
+    jz .lost
+    mov rsi, line_late_ok
+    call puts64
+    mov rax, r15
+    call put_num64
+    mov al, ' '
+    call putc64
+    mov rax, rbx
+    call put_num64
+    call put_nl64
+    ret
+.blocked:
+    mov rsi, line_late_blocked
+    call puts64
+    ret
+.lost:
+    ; 两个出口都可能走到这里：根目录里没有 docs，或者写完却查不到。
+    ; 把 r15 打出来就分得开 —— 前者是垃圾，后者是 docs 的扇区号。
+    mov rsi, line_late_lost
+    call puts64
+    mov rax, r15
+    call put_num64
+    call put_nl64
     ret
 
 run_trap_test:
@@ -12200,6 +12268,13 @@ list_dir: dq 0
 fs_save_path: dw 0x03B1, 0x003A, 0x002F, 0x0064, 0x006F, 0x0063, 0x0073, 0x002F, 0x0069, 0x006E, 0x006E, 0x0065, 0x0072, 0x002E, 0x0074, 0x0078, 0x0074, 0
 name_savetest: dw 0x0073, 0x0061, 0x0076, 0x0065, 0x0074, 0x0065, 0x0073, 0x0074
 name_listtest: dw 0x006C, 0x0069, 0x0073, 0x0074, 0x0074, 0x0065, 0x0073, 0x0074
+fs_docs_name: dw 0x0064, 0x006F, 0x0063, 0x0073
+fs_late_name: dw 0x006C, 0x0061, 0x0074, 0x0065, 0x002E, 0x0074, 0x0078, 0x0074
+fs_late_data: db 'x', 'y'
+fs_late_path: dw 0x03B1, 0x003A, 0x002F, 0x0064, 0x006F, 0x0063, 0x0073, 0x002F, 0x006C, 0x0061, 0x0074, 0x0065, 0x002E, 0x0074, 0x0078, 0x0074, 0
+line_late_ok: db "Yunooka: dirfull docs ok ", 0
+line_late_blocked: db "Yunooka: dirfull docs blocked", 13, 10, 0
+line_late_lost: db "Yunooka: dirfull docs lost", 13, 10, 0
 line_prog_list: db "Yunooka: prog list -> ", 0
 line_prog_list_bad: db "Yunooka: prog list missing", 13, 10, 0
 line_save_survived: db "Yunooka: save survived docs/inner.txt ", 0
