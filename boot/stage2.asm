@@ -1455,7 +1455,7 @@ exec:
 
 .try_readline:
     cmp r8, 8
-    jne .builtin_unknown
+    jne .try_border                 ; 长度不是 8 不是错，只是不是 readline
     cmp word [rdi], 0x0072          ; 'r'
     jne .builtin_unknown
     cmp word [rdi + 2], 0x0065      ; 'e'
@@ -1508,6 +1508,73 @@ exec:
     inc rbx
     jmp .loop
 .rl_empty:
+    xor eax, eax
+    xor edx, edx
+    call push_val
+    inc rbx
+    jmp .loop
+
+.try_border:
+    cmp r8, 6
+    jne .builtin_unknown
+    cmp word [rdi], 0x0062          ; 'b'
+    jne .builtin_unknown
+    cmp word [rdi + 2], 0x006F      ; 'o'
+    jne .builtin_unknown
+    cmp word [rdi + 4], 0x0072      ; 'r'
+    jne .builtin_unknown
+    cmp word [rdi + 6], 0x0064      ; 'd'
+    jne .builtin_unknown
+    cmp word [rdi + 8], 0x0065      ; 'e'
+    jne .builtin_unknown
+    cmp word [rdi + 10], 0x0072     ; 'r'
+    jne .builtin_unknown
+    cmp r14, 0
+    jne .builtin_unknown
+
+    ; border：画一个窗口的框。
+    ;
+    ; 这就是 LAYERS 第六节第三条判据说的「Ichiwatashi 那一小块」的最小版本 —— 一个包
+    ; 要画东西，而它不必知道帧缓冲在 0xA0000、也不必知道一行是 320 字节。坐标与颜色
+    ; 写死在这里不是偷懒：这一步要证明的是「包能让宿主画」，而通用绘图是 Ichiwatashi
+    ; 自己的事，排在它后面。
+    ;
+    ; 四条边用同一个 draw_line，所以这一条内置换来的是十六个像素而不是四段画线代码。
+    ;
+    ; r12 到 r15 必须先存起来：draw_line 不保存它们，而 exec 用 r12 指指令流、用 r13
+    ; 数指令数。改坏了它们，症状是「包跑完第一条就乱跳」，与画图毫无关系。
+    push r12
+    push r13
+    push r14
+    push r15
+    mov dl, 0x2F
+    mov r12, 10
+    mov r13, 10
+    mov r14, 100
+    mov r15, 10
+    call draw_line                  ; 上
+    mov r12, 10
+    mov r13, 60
+    mov r14, 100
+    mov r15, 60
+    mov dl, 0x2F
+    call draw_line                  ; 下
+    mov r12, 10
+    mov r13, 10
+    mov r14, 10
+    mov r15, 60
+    mov dl, 0x2F
+    call draw_line                  ; 左
+    mov r12, 100
+    mov r13, 10
+    mov r14, 100
+    mov r15, 60
+    mov dl, 0x2F
+    call draw_line                  ; 右
+    pop r15
+    pop r14
+    pop r13
+    pop r12
     xor eax, eax
     xor edx, edx
     call push_val
@@ -2847,6 +2914,29 @@ run_myon_test:
     xor rbx, rbx
     call exec
     mov qword [pkg_base], 0x20000
+
+    ; 画完之后读几个点。三个位置都在框的四条边上，而它们之间隔着三百二十字节的步长 ——
+    ; 所以这一条不只证明「有一个像素亮了」，还证明那个框的尺寸与位置是对的。
+    ;
+    ; 三条值都该是 0x2F。0x2F 是配色表里的一个色，而这几个点在此之前从没被写过。
+    mov rdi, 0xA0000
+    movzx r8d, byte [rdi + 3210]    ; (10,10) 左上角
+    movzx r9d, byte [rdi + 3250]    ; (50,10) 上边中间
+    movzx r10d, byte [rdi + 19300]  ; (100,60) 右下角
+    mov rsi, line_myon_px
+    call puts64
+    mov rax, r8
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, r9
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, r10
+    call put_hex64
+    call put_nl64
+
     mov rsi, line_myon_done
     call puts64
     ret
@@ -11131,6 +11221,7 @@ name_main: dw 0x006D, 0x0061, 0x0069, 0x006E
 line_prog: db "Yunooka: prog main -> ", 0
 line_prog_missing: db "Yunooka: no prog.hmtn", 13, 10, 0
 line_myon_done: db "Yunooka: event=myon write ok", 13, 10, 0
+line_myon_px: db "Yunooka: myon px ", 0
 line_myon_missing: db "Yunooka: no myon.hmtn", 13, 10, 0
 line_myon_bad: db "Yunooka: myon bad magic", 13, 10, 0
 line_myon_nofn: db "Yunooka: myon no echo", 13, 10, 0

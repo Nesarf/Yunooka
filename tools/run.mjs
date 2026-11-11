@@ -1168,7 +1168,9 @@ const 回声成 = 回声行 !== null;
 // 一次是包打出来的。只查「有没有这个串」会被前一次满足，而那一次与包无关。所以这里要
 // 的是「`myon here` 之后紧接 `echo hello world`」—— 那个顺序只有包里的两条指令能给出。
 const myon写行 = /myon here\r?\necho hello world\r?\n/.test(读到)
-  && /^Yunooka: event=myon write ok$/m.test(读到);
+  && /^Yunooka: event=myon write ok$/m.test(读到)
+  && /^Yunooka: myon px (?:[0-9A-F]{16} ){2}[0-9A-F]{16}$/m.test(读到)
+  && /^Yunooka: myon px 0{14}2F 0{14}2F 0{14}2F$/m.test(读到);
 const myon写成 = myon写行;
 
 // SHA-512 的六行：与主机逐字符相同。
@@ -1581,8 +1583,7 @@ console.log("SHA-512   " + (sha512行.length ? sha512行.length + " 个长度" :
     : "  —— 不对：有长度与主机不同，或者六行没齐"));
 console.log("Myon 写字 " + (myon写成 ? "myon here" : "(没跑到)")
   + (myon写成 ? "  —— 包里的字经内置 write 到了串口，包不知道串口在哪"
-    : "  —— 不对：那个包没有把字交出来，或者 write 那一侧没接上"));
-console.log("系统保护  " + (守成 ? "只读位挡住了重写，换个名字仍写得进" : "(没跑到)")
+    : "  —— 不对：那个包没有把字交出来，或者 write 那一侧没接上"));console.log("系统保护  " + (守成 ? "只读位挡住了重写，换个名字仍写得进" : "(没跑到)")
   + (守成 ? "  —— 拒绝时报的是只读，不是「已存在」"
     : "  —— 不对：五条里缺了哪一条，或者重写漏了过去"));
 console.log("认类型    " + (认行 ? 认行.slice(1).join(" ") : "(没跑到)")

@@ -346,7 +346,7 @@ for (const 字 of "echo") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位
 程序包.writeUInt16LE(0, 位); 位 += 2;                      // 参数量
 程序包.writeUInt16LE(0, 位); 位 += 2;                      // 槽数
 程序包.writeUInt16LE(0, 位); 位 += 2;                      // 效果数
-程序包.writeUInt32LE(5, 位); 位 += 4;                      // 五条指令
+程序包.writeUInt32LE(6, 位); 位 += 4;                      // 六条指令
 程序包[位++] = 5;                                           // 常量
 程序包[位++] = 2;                                           // 种类：串
 程序包.writeUInt16LE(回声串.length, 位); 位 += 2;
@@ -363,6 +363,10 @@ for (const 字 of "readline") { 程序包.writeUInt16LE(字.charCodeAt(0), 位);
 程序包.writeUInt16LE(5, 位); 位 += 2;
 for (const 字 of "write") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
 程序包.writeUInt16LE(1, 位); 位 += 2;
+程序包[位++] = 3;                                           // 让宿主画一个窗口的框
+程序包.writeUInt16LE(6, 位); 位 += 2;
+for (const 字 of "border") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包.writeUInt16LE(0, 位); 位 += 2;                      // 零参
 程序包[位++] = 28;                                          // 返回
 const 程序字节 = 程序包.subarray(0, 位);
 
