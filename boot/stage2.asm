@@ -11861,14 +11861,25 @@ identify:
     cmp rcx, 16
     jb .try_text
     cmp dword [rdi], 0x694C5153    ; 'S' 'Q' 'L' 'i'
-    jne .try_text
+    jne .try_hmgk
     cmp dword [rdi + 4], 0x66206574 ; 't' 'e' ' ' 'f'
-    jne .try_text
+    jne .try_hmgk
     cmp dword [rdi + 8], 0x616D726F ; 'o' 'r' 'm' 'a'
-    jne .try_text
+    jne .try_hmgk
     cmp dword [rdi + 12], 0x00332074 ; 't' ' ' '3' 0
-    jne .try_text
+    jne .try_hmgk
     mov rax, 14
+    ret
+.try_hmgk:
+    ; hmgk（ひめがく）：KID 的音乐输出文件。规范与字节布局在 design/HMGK.txt。
+    ;
+    ; 它是这张表里第一个本机自己的格式 —— 前面十四种都是别人的。而它进这张表的理由
+    ; 与那十四种一样：前四个字节是魔数，按字节比，不看扩展名。
+    cmp rcx, 20
+    jb .try_text
+    cmp dword [rdi], 0x4B474D48    ; 'H' 'M' 'G' 'K'
+    jne .try_text
+    mov rax, 15
     ret
 .try_text:
     ; 文本：头 32 个字节里没有不可打印的东西（换行、回车、制表除外）
@@ -12012,6 +12023,13 @@ run_identify_test:
     mov rcx, 64
     call identify
     call put_ident_kind
+    ; 第十六格：本机自己的格式。样本按 design/HMGK.txt 的布局造 —— 魔数、版本、
+    ; 压缩格式与级别、事件流长度、三张表的项数。识别只看前四个字节，而整份样本
+    ; 按真实布局写，是为了让「一份 hmgk 长什么样」在这里也有个可读的样子。
+    lea rdi, [samp_hmgk]
+    mov rcx, 64
+    call identify
+    call put_ident_kind
     call put_nl64
     ret
 .miss:
@@ -12051,6 +12069,8 @@ put_ident_kind:
     je .jpeg
     cmp rax, 14
     je .sqlite
+    cmp rax, 15
+    je .hmgk
     mov rsi, line_kind_none
     jmp .out
 .text:
@@ -12091,6 +12111,9 @@ put_ident_kind:
     jmp .out
 .jpeg:
     mov rsi, line_kind_jpeg
+    jmp .out
+.hmgk:
+    mov rsi, line_kind_hmgk
     jmp .out
 .sqlite:
     mov rsi, line_kind_sqlite
@@ -13529,6 +13552,7 @@ line_kind_pdf: db "pdf", 0
 line_kind_png: db "png", 0
 line_kind_jpeg: db "jpeg", 0
 line_kind_sqlite: db "sqlite", 0
+line_kind_hmgk: db "hmgk", 0
 ; 别的系统的五个样本的路径。名字是 ASCII，所以码元就是它自己的字节。
 fs_pe_path: dw 0x03B1, 0x003A, 0x002F, 0x0070, 0x0065, 0x002E, 0x0062, 0x0069, 0x006E, 0
 fs_elf_path: dw 0x03B1, 0x003A, 0x002F, 0x0065, 0x006C, 0x0066, 0x002E, 0x0062, 0x0069, 0x006E, 0
@@ -13556,6 +13580,17 @@ samp_png:
 samp_jpeg:
     db 0xFF, 0xD8, 0xFF, 0xE0
     times 60 db 0
+; 一份 hmgk 的头，按 design/HMGK.txt 的布局：
+;   'H' 'M' 'G' 'K' | 版本 1 | 压缩格式 0（不压） | 级别 0 | 事件流 24 字节
+;   | 音源 2 项 | 效果器 1 项 | 预设 0 项 | 保留 | 事件流
+samp_hmgk:
+    db 'H', 'M', 'G', 'K'
+    dw 1
+    db 0, 0
+    dd 24
+    dw 2, 1, 0, 0
+    times 44 db 0
+
 samp_sqlite:
     db 'SQLite format 3', 0
     times 48 db 0
