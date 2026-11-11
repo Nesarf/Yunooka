@@ -398,10 +398,12 @@ const 回声串 = "myon here";
 // 跨扇区不是问题 —— 它在预读区里是连续的一段，而 fs_lookup 交回来的是「起始扇区 + 字节
 // 数」，fs_load 只算起点。真正要跟着动的是盘上的布局：示例扇区数用的是
 // Math.ceil(程序字节.length / 512)，所以它自己会变成 2。
-const 程序包 = Buffer.alloc(1024);
+// 1280：第八个函数把包顶过了 1024。它自己占九十来字节，而路径那个常量又不能省 ——
+// 这一版的包没有变量，常量是唯一能重复取用的东西。
+const 程序包 = Buffer.alloc(1280);
 程序包.write("HMYRB", 0, "latin1");
 程序包.writeUInt16LE(1, 5);       // 版本
-程序包.writeUInt16LE(7, 7);       // 七个函数
+程序包.writeUInt16LE(8, 7);       // 八个函数
 let 位 = 9;
 程序包.writeUInt16LE(4, 位); 位 += 2;                      // 名字长度
 for (const 字 of "main") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
@@ -741,6 +743,34 @@ for (const 字 of "len") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 
     失败("返回字节写了 " + 写了几次 + " 次，而包声明了 " + 声明几个
       + " 个函数 —— 一个函数恰好一个，多一个就会让后面每个函数都找不到");
 }
+程序包.writeUInt16LE(10, 位); 位 += 2;                     // 名字长度
+for (const 字 of "removetest") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包.writeUInt16LE(0, 位); 位 += 2;                      // 参数量
+程序包.writeUInt16LE(0, 位); 位 += 2;                      // 槽数
+程序包.writeUInt16LE(0, 位); 位 += 2;                      // 效果数
+程序包.writeUInt32LE(7, 位); 位 += 4;                      // 七条指令
+程序包[位++] = 5;                                           // 常量：路径
+程序包[位++] = 2;
+程序包.writeUInt16LE(14, 位); 位 += 2;
+for (const 字 of "docs/inner.txt") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包[位++] = 3;                                           // 调内置 remove（一参）
+程序包.writeUInt16LE(6, 位); 位 += 2;
+for (const 字 of "remove") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包.writeUInt16LE(1, 位); 位 += 2;
+程序包[位++] = 26;                                          // 丢掉返回值
+程序包[位++] = 5;                                           // 常量：目录
+程序包[位++] = 2;
+程序包.writeUInt16LE(4, 位); 位 += 2;
+for (const 字 of "docs") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包[位++] = 3;                                           // 调内置 list（一参）
+程序包.writeUInt16LE(4, 位); 位 += 2;
+for (const 字 of "list") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包.writeUInt16LE(1, 位); 位 += 2;
+程序包[位++] = 3;                                           // 调内置 len（一参）
+程序包.writeUInt16LE(3, 位); 位 += 2;
+for (const 字 of "len") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包.writeUInt16LE(1, 位); 位 += 2;
+程序包[位++] = 28;                                          // 返回
 const 程序字节 = 程序包.subarray(0, 位);
 
 // ---- 三·二·二、第二个包：Myon 的回声 ----

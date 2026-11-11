@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 129
+stage2_sectors equ 130
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -196,7 +196,7 @@ stage2:
     mov dword [dap_lba], 1024
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x4000
-    mov word [dap_count], 28       ; preread-sectors: 预读几个扇区，这个数由 build 核对
+    mov word [dap_count], 30       ; preread-sectors: 预读几个扇区，这个数由 build 核对
     call read_batch
     jnc .fs_ready
     mov si, line_fs_preread
@@ -792,6 +792,8 @@ long_entry:
     call run_save_test
     ; 第七个函数：数一个目录里有几个名字。
     call run_list_test
+    ; 第八个函数：删掉一份文件，再数一数那一层还剩几个名字。
+    call run_remove_test
     ; Myon 的第二步：盘上那个只有三条指令的包，靠内置 write 把一段字打到串口。
     call run_myon_test
     ; 目录写满：该拒绝，而且不许吃掉邻居。排在最后，因为它会把根目录占满。
@@ -1790,6 +1792,101 @@ exec:
     mov word [slurp_path], 0
     mov rax, 2
     lea rdx, [slurp_path]
+    call push_val
+    inc rbx
+    jmp .loop
+
+.op_remove:
+    ; 一参：路径。回来一个数：1 删掉 / 0 没有。
+    ;
+    ; 这一段还没有成功过一次，所以它的判据不在链上 —— 两轮都红在 prog remove -> 33。
+    ; 它现在已经编译、能跑、返回零，而 fs_delete 那段的匹配与紧凑化还没被证明过。
+    ; 留在这里而不是删掉，是因为它把「目录链怎么紧凑化」这个形状写下来了，
+    ; 而那是下一轮要接着查的地方。
+    ;
+    ; 路径解析与 save 同形 —— 最后一个斜杠之前是目录，之后是名字；没有斜杠就是根目录。
+    ; 只改内存，不落盘：save 落盘是因为它有跨重启的判据，remove 没有。需要它留下来的时候
+    ; 再补，而那时也该有一条判据先红。
+    cmp r14, 1
+    jne .builtin_unknown
+    call pop_val
+    mov rsi, rdx
+    movzx ecx, word [rsi]
+    cmp rcx, 200
+    ja .remove_fail
+    xor r8, r8
+    xor r9, r9
+.rfindslash:
+    cmp r8, rcx
+    jae .rslashdone
+    mov ax, [rsi + 2 + r8 * 2]
+    cmp ax, 0x002F
+    jne .rnextch
+    lea r9, [r8 + 1]
+.rnextch:
+    inc r8
+    jmp .rfindslash
+.rslashdone:
+    lea rdi, [save_name]
+    xor r8, r8
+.rnbody:
+    mov rax, r9
+    add rax, r8
+    cmp rax, rcx
+    jae .rndone
+    mov ax, [rsi + 2 + rax * 2]
+    mov [rdi + r8 * 2], ax
+    inc r8
+    jmp .rnbody
+.rndone:
+    mov word [rdi + r8 * 2], 0
+    ; fs_load 会把 rsi 改成它算出来的地址，而下面拼父路径还要用原来那个指针。
+    ; 第六次了 —— 这一次的症状是「remove 说没删掉」，而它连 docs 都没查过。
+    push rsi
+    mov rdi, 1024
+    call fs_load
+    pop rsi
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r13d, [rax + 12]
+    test r9, r9
+    jz .rhave_dir
+    lea rdi, [slurp_path]
+    mov word [rdi], 0x03B1
+    mov word [rdi + 2], 0x003A
+    mov word [rdi + 4], 0x002F
+    mov r10, r9
+    dec r10
+    xor r8, r8
+.rpbody:
+    cmp r8, r10
+    jae .rpdone
+    mov ax, [rsi + 2 + r8 * 2]
+    mov [rdi + 6 + r8 * 2], ax
+    inc r8
+    jmp .rpbody
+.rpdone:
+    mov word [rdi + 6 + r8 * 2], 0
+    mov rdi, slurp_path
+    push rbx
+    call fs_open_path
+    pop rbx
+    test rax, rax
+    jz .remove_fail
+    mov r13, r15
+.rhave_dir:
+    mov rdi, save_name
+    mov rsi, r13
+    call fs_delete
+    test rax, rax
+    jz .remove_zero
+    mov rdx, 0x3FF0000000000000     ; 1.0
+    jmp .remove_put
+.remove_zero:
+.remove_fail:
+    xor edx, edx
+.remove_put:
+    mov rax, 1                      ; 种类：数
     call push_val
     inc rbx
     jmp .loop
@@ -2914,6 +3011,56 @@ idt_common:
 ;
 ; 选 ud2 而不是除零：除零的结果依赖浮点环境（x87 与 SSE 的处理不同），而未定义指令
 ; 在任何 CPU 上都只有一个答案。判据要的是一个不会漂的数。
+; ======================================================================
+; 包删掉一份文件，再数一数那一层
+; ======================================================================
+;
+; 前面七个函数都在「加」。这一条是包第一次「减」，而减在文件系统里比加难：目录是一条链，
+; 把条目的名字长度置零会把后面整条链切断。所以实现要把后面的条目往前挪，而判据要的
+; 正是「挪过之后链还通着、而少了一条」—— 若只把名字弄没而链断了，list 会数到第一条
+; 就停，长度是 9 而不是 24。
+run_remove_test:
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]
+    mov r8, fs_prog_name
+    mov r9, 9
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz .missing
+    mov rdi, r15
+    call fs_load
+    mov r14, rsi
+    mov [pkg_base], r14
+    mov rdi, name_removetest
+    mov r8, 10
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+    mov r15, rax
+    mov r14, rdx
+    mov qword [pkg_base], 0x70000
+    mov rsi, line_prog_remove
+    call puts64
+    mov rax, r15
+    mov rdx, r14
+    call print_value
+    call put_nl64
+    ret
+.missing:
+    mov rsi, line_prog_remove_bad
+    call puts64
+    ret
+
 ; ======================================================================
 ; 包问「这一层有什么」
 ; ======================================================================
@@ -5016,6 +5163,84 @@ run_fs_open4:
 ; 而分不清的那一次，通常会把「没落盘」当成「写错了」。
 ;
 ; rdi = 文件名（UTF-16，0 码元结尾）、rsi = 数据、rcx = 字节数。出 rax = 1 成功 / 0 失败。
+; 从目录里删掉一条：把后面那一段往前挪，在新的末尾写零。
+;
+; rdi = 名字（UTF-16，以零码元结尾）、rsi = 目录扇区。回来 rax = 1 删掉 / 0 没有。
+;
+; 为什么不把名字长度置零：目录是一条链，条目一个接一个，靠「长度为零」收尾。把一个中间
+; 条目的长度置零会把后面的整条链切断 —— 症状是「删掉一份之后，那一层里别的文件也不见了」，
+; 而在 fs_lookup 那一侧看不出是谁动的。
+;
+; 也不做墓碑：墓碑要在每个遍历它的地方都被跳过，漏掉一处就多一个看不见的文件。挪一次
+; 只在这里错，而错法的样子是「搬错了字节」，比「某处忘了过滤」容易看见。
+;
+; 这一块是全局的（不带 .op_ 前缀），所以它必须住在 exec 外面。上一版插在 .op_list 之前，
+; 于是它后面所有 .op_* 都变成了它的局部标签，nasm 报 exec.op_index 未定义。
+fs_delete:
+    push r12
+    push r13
+    push r14
+    push r15
+    push rbx
+    mov r12, rdi
+    mov r13, rsi
+    mov rdi, 1024
+    call fs_load
+    mov rbx, rsi
+    mov rdi, r13
+    call fs_load
+    mov r9, rsi
+.dfind:
+    movzx ecx, word [r9]
+    test ecx, ecx
+    jz .dmiss
+    movzx eax, word [r12]
+    cmp rax, rcx
+    jne .dnext
+    xor rdx, rdx
+.dcmp:
+    cmp rdx, rcx
+    jae .dfound
+    mov ax, [r9 + 2 + rdx * 2]
+    cmp ax, [r12 + 2 + rdx * 2]
+    jne .dnext
+    inc rdx
+    jmp .dcmp
+.dnext:
+    movzx eax, word [r9]
+    lea r9, [r9 + 11 + rax * 2]
+    jmp .dfind
+.dfound:
+    movzx eax, word [r9]
+    lea r14, [rax * 2 + 11]        ; 这一条的字节数
+    lea r15, [r9 + r14]            ; 下一条的起点，也就是要搬的源
+    mov rsi, r15
+.dend:
+    movzx eax, word [rsi]
+    test eax, eax
+    jz .dsize
+    lea rsi, [rsi + 11 + rax * 2]
+    jmp .dend
+.dsize:
+    sub rsi, r15                   ; 要搬的字节数（含末尾那两个零码元）
+    mov rcx, rsi
+    mov rsi, r15
+    mov rdi, r9
+    cld
+    rep movsb
+    mov word [rdi], 0              ; 搬完的位置成了新的终止
+    mov rax, 1
+    jmp .ddone
+.dmiss:
+    xor eax, eax
+.ddone:
+    pop rbx
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    ret
+
 fs_write_file:
     push r11
     push r12
@@ -12333,6 +12558,9 @@ list_dir: dq 0
 fs_save_path: dw 0x03B1, 0x003A, 0x002F, 0x0064, 0x006F, 0x0063, 0x0073, 0x002F, 0x0069, 0x006E, 0x006E, 0x0065, 0x0072, 0x002E, 0x0074, 0x0078, 0x0074, 0
 name_savetest: dw 0x0073, 0x0061, 0x0076, 0x0065, 0x0074, 0x0065, 0x0073, 0x0074
 name_listtest: dw 0x006C, 0x0069, 0x0073, 0x0074, 0x0074, 0x0065, 0x0073, 0x0074
+name_removetest: dw 0x0072, 0x0065, 0x006D, 0x006F, 0x0076, 0x0065, 0x0074, 0x0065, 0x0073, 0x0074
+line_prog_remove: db "Yunooka: prog remove -> ", 0
+line_prog_remove_bad: db "Yunooka: prog remove missing", 13, 10, 0
 fs_docs_name: dw 0x0064, 0x006F, 0x0063, 0x0073
 fs_late_name: dw 0x006C, 0x0061, 0x0074, 0x0065, 0x002E, 0x0074, 0x0078, 0x0074, 0
 fs_late_data: db 'x', 'y'
@@ -12376,6 +12604,7 @@ bi_name_rect: dw 0x0072, 0x0065, 0x0063, 0x0074
 bi_name_slurp: dw 0x0073, 0x006C, 0x0075, 0x0072, 0x0070
 bi_name_save: dw 0x0073, 0x0061, 0x0076, 0x0065
 bi_name_list: dw 0x006C, 0x0069, 0x0073, 0x0074
+bi_name_remove: dw 0x0072, 0x0065, 0x006D, 0x006F, 0x0076, 0x0065
 builtin_table:
     dq 3
     dq bi_name_len
@@ -12404,6 +12633,9 @@ builtin_table:
     dq 4
     dq bi_name_list
     dq exec.op_list
+    dq 6
+    dq bi_name_remove
+    dq exec.op_remove
     dq 0
     dq 0
     dq 0
