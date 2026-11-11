@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 95
+stage2_sectors equ 98
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -712,6 +712,9 @@ long_entry:
     ; 标量乘压在点加与点倍上。它的三条判据全部与前面已经站住的东西比 —— 一个能过
     ; 前两层的实现，不该在这里才第一次被问到「3P 是不是 2P 加 P」。
     call run_pt_mul_test
+    ; 编码是验签链上唯一输出到外面的地方：验签比的是两个点的编码。它压住模逆、乘法、
+    ; 字节序与符号位四件事，所以它单独有一组判据，而不是躲在验签里。
+    call run_pt_enc_test
     call run_ata_test
     call run_fs_test
     call run_fs_open
@@ -5754,6 +5757,206 @@ run_pt_mul_test:
     ret
 
 ; ======================================================================
+; 模逆与压缩点的编码
+; ======================================================================
+;
+; 模逆用费马小定理：a^(p-2)。p 是素数，所以 a * a^(p-2) = a^(p-1) = 1。
+;
+; 这条路的代价是 255 次平方加若干次乘法，比一次乘法贵两个数量级 —— 而整条验签链只在
+; 编码时用一次。为它写一个扩展欧几里得是省了时间，却多了一整段只有一种用法的代码；
+; 而这一层的判据现在只有四条读数，不值得为省那点时间多一处会错的地方。
+;
+; 指数是常量（p-2），所以写成数据段里的八格，逐位读。最高位是第 254 位。
+;
+; 注意：这支例程会覆盖 fp_a / fp_b / fp_out，编码那一段也是。调用顺序上它们是串的，
+; 不会相互踩到 —— 但如果将来有人在中间插一段用 fp_* 的代码，这里会静默地算错。
+
+; 第 i 位（i 存在 fp_inv_i）是不是一。出 rax = 0 或 1。
+fp_inv_bit:
+    mov rax, [fp_inv_i]
+    mov rcx, rax
+    shr rax, 5                      ; 落在第几格
+    and ecx, 31                     ; 格内第几位
+    mov edx, [fp_im1 + rax * 4]
+    shr edx, cl
+    and edx, 1
+    mov eax, edx
+    ret
+
+; fp_inv：rdi = 目标，rsi = 源
+fp_inv:
+    push rdi
+    push rsi
+    lea rdi, [fp_inv_a]
+    call fp_copy
+    lea rdi, [fp_inv_r]
+    lea rsi, [fp_one]
+    call fp_copy
+    mov qword [fp_inv_i], 254
+.loop:
+    lea rdi, [fp_a]
+    lea rsi, [fp_inv_r]
+    call fp_copy
+    lea rdi, [fp_b]
+    lea rsi, [fp_inv_r]
+    call fp_copy
+    call fp_mulmod
+    lea rdi, [fp_inv_r]
+    lea rsi, [fp_out]
+    call fp_copy
+    call fp_inv_bit
+    test rax, rax
+    jz .skip
+    lea rdi, [fp_a]
+    lea rsi, [fp_inv_r]
+    call fp_copy
+    lea rdi, [fp_b]
+    lea rsi, [fp_inv_a]
+    call fp_copy
+    call fp_mulmod
+    lea rdi, [fp_inv_r]
+    lea rsi, [fp_out]
+    call fp_copy
+.skip:
+    dec qword [fp_inv_i]
+    cmp qword [fp_inv_i], 0
+    jge .loop
+    pop rsi
+    pop rdi
+    lea rsi, [fp_inv_r]
+    call fp_copy
+    ret
+
+; ----------------------------------------------------------------------
+; pt_encode：rdi = 三十二字节输出，rsi = 点
+;
+; 压缩点的形状：y 的三十二字节小端，最高位放 x 的最低位。x 本身不存 —— 它由曲线方程
+; 与那个符号位唯一确定，而这就是「压缩」的意思。
+;
+; 所以编码只做一件事：把投影坐标除回仿射（一次模逆），取 y，再看 x 的奇偶。解码那边
+; 才是难的一半 —— 它要从 y 解出 x，而那要一次开方。
+; ----------------------------------------------------------------------
+pt_encode:
+    mov [pt_src], rsi
+    mov [pt_dst], rdi
+    lea rdi, [fp_inv_t]
+    mov rax, [pt_src]
+    lea rsi, [rax + 64]             ; Z
+    call fp_inv
+
+    lea rdi, [fp_a]
+    mov rax, [pt_src]
+    lea rsi, [rax + 32]             ; Y
+    call fp_copy
+    lea rdi, [fp_b]
+    lea rsi, [fp_inv_t]
+    call fp_copy
+    call fp_mulmod
+    mov rdi, [pt_dst]
+    lea rsi, [fp_out]
+    call fp_copy                    ; y 的三十二字节就位
+
+    lea rdi, [fp_a]
+    mov rax, [pt_src]
+    lea rsi, [rax]                  ; X
+    call fp_copy
+    lea rdi, [fp_b]
+    lea rsi, [fp_inv_t]
+    call fp_copy
+    call fp_mulmod
+    mov al, byte [fp_out]
+    and eax, 1
+    shl eax, 7
+    mov rdi, [pt_dst]
+    or byte [rdi + 31], al
+    ret
+
+; ----------------------------------------------------------------------
+; 编码的判据
+;
+; 四组：基点、2B、3B、4B 各编码一次。基点的编码是 RFC 8032 给的那一串常量（5866 打头，
+; 后面一路 66），所以它连主机都不用 —— 而另外三组要与主机算的逐字节比。
+;
+; 为什么编码值得单独有判据：它一次压住四件事 —— 模逆对不对、乘法对不对、y 的字节序对
+; 不对、符号位取的是 x 还是 y 的最低位。四件事里任何一件错，32 字节里都会有一位不对，
+; 而这一层是验签链上唯一输出到「外面」的地方：验签比的是两个点的编码，编码错了，
+; 前面每一层再对也白搭。
+; ----------------------------------------------------------------------
+run_pt_enc_test:
+    lea rdi, [pt_enc]
+    lea rsi, [pt_base]
+    call pt_encode
+    mov rsi, line_pte_b
+    call puts64
+    lea rdi, [pt_enc]
+    mov rcx, 32
+    call put_hex_bytes
+    call put_nl64
+
+    lea rdi, [pt_enc]
+    lea rsi, [pt_o2]
+    call pt_encode
+    mov rsi, line_pte_2b
+    call puts64
+    lea rdi, [pt_enc]
+    mov rcx, 32
+    call put_hex_bytes
+    call put_nl64
+
+    ; 3B：run_pt_mul_test 最后一组把 add-3b 的坐标留在 pt_o 里
+    lea rdi, [pt_enc]
+    lea rsi, [pt_o]
+    call pt_encode
+    mov rsi, line_pte_3b
+    call puts64
+    lea rdi, [pt_enc]
+    mov rcx, 32
+    call put_hex_bytes
+    call put_nl64
+
+    lea rdi, [pt_enc]
+    lea rsi, [pt_o3]
+    call pt_encode
+    mov rsi, line_pte_4b
+    call puts64
+    lea rdi, [pt_enc]
+    mov rcx, 32
+    call put_hex_bytes
+    call put_nl64
+
+    ; 5B：唯一一组 x 为奇数的读数。
+    ;
+    ; 前四组（B、2B、3B、4B）的 x 全是偶数，所以符号位那一位全程是零 —— 把 shl 7 改成
+    ; shl 6，四组编码一个字节都不变，判据照旧绿。这不是判据写错了，是它的覆盖少了一半：
+    ; 压缩点的最高位，那个唯一不来自 y 的位，从来没有被走到过。
+    ;
+    ; 找一个奇数 x 的倍数不是为了凑数。五组里两组覆盖 0、三组覆盖 1，那一位才真的
+    ; 被问过；而验签那边 R 与 A 的符号位是随机的，一半的概率会用到它。
+    lea rdi, [pt_scalar]
+    lea rsi, [pt_k5]
+    call fp_copy
+    lea rdi, [pt_a]
+    lea rsi, [pt_base]
+    call pt_copy
+    call pt_mul
+    mov rsi, line_ptm_mul5
+    lea rdi, [pt_o]
+    call pt_show
+    lea rdi, [pt_enc]
+    lea rsi, [pt_o]
+    call pt_encode
+    mov rsi, line_pte_5b
+    call puts64
+    lea rdi, [pt_enc]
+    mov rcx, 32
+    call put_hex_bytes
+    call put_nl64
+
+    mov rsi, line_pte_ok
+    call puts64
+    ret
+
+; ======================================================================
 ; 家庭组的第一步：共享是目录条目上的一个位
 ; ======================================================================
 ;
@@ -9945,6 +10148,13 @@ line_pt_mul2: db "Yunooka: ptm mul-2 ", 0
 line_pt_mul3: db "Yunooka: ptm mul-3 ", 0
 line_pt_add3b: db "Yunooka: ptm add-3b ", 0
 line_pt_mul_ok: db "Yunooka: event=ptmul ok vectors=4", 13, 10, 0
+line_pte_b: db "Yunooka: pte b ", 0
+line_pte_2b: db "Yunooka: pte 2b ", 0
+line_pte_3b: db "Yunooka: pte 3b ", 0
+line_pte_4b: db "Yunooka: pte 4b ", 0
+line_pte_5b: db "Yunooka: pte 5b ", 0
+line_ptm_mul5: db "Yunooka: ptm mul-5 ", 0
+line_pte_ok: db "Yunooka: event=ptenc ok vectors=5", 13, 10, 0
 line_pt_in_a: db "Yunooka: pti in-a ", 0
 line_pt_in_b: db "Yunooka: pti in-b ", 0
 ; SHA-256 的工作区。a..h 就放在 sha_h 里原地更新，W[0..63] 放 sha_w。
@@ -10151,6 +10361,27 @@ pt_k2: dd 0x00000002, 0x00000000, 0x00000000, 0x00000000
       dd 0x00000000, 0x00000000, 0x00000000, 0x00000000
 pt_k3: dd 0x00000003, 0x00000000, 0x00000000, 0x00000000
       dd 0x00000000, 0x00000000, 0x00000000, 0x00000000
+; 5 是第一个 x 为奇数的倍数（1 到 4 的 x 全是偶数）。符号位那一条判据靠它才走到。
+pt_k5: dd 0x00000005, 0x00000000, 0x00000000, 0x00000000
+      dd 0x00000000, 0x00000000, 0x00000000, 0x00000000
+
+; ---- 模逆与编码的工作区 ------------------------------------------------
+;
+; fp_im1 是 p-2，模逆的指数：p 是素数，所以 a^(p-2) 就是 a 的逆。最低那个是 0xFFFFFFEB，
+; 因为 p 的最低一位是 0xED 而减二要再退两格。
+fp_im1:
+    dd 0xFFFFFFEB, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF
+    dd 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x7FFFFFFF
+fp_one:
+    dd 0x00000001, 0x00000000, 0x00000000, 0x00000000
+    dd 0x00000000, 0x00000000, 0x00000000, 0x00000000
+fp_inv_a: times 8 dd 0
+fp_inv_r: times 8 dd 0
+fp_inv_t: times 8 dd 0
+fp_inv_i: dq 0
+pt_src: dq 0
+pt_dst: dq 0
+pt_enc: times 32 db 0
 
 ; SHA-512 的 80 个常量：K[i] = floor(frac(cbrt(p_i)) * 2^64)，p_i 是第 i 个质数。
 ;
