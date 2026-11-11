@@ -392,6 +392,14 @@ for (const 字 of "main") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位
 程序包.writeUInt16LE(0, 位); 位 += 2;                      // 槽数
 程序包.writeUInt16LE(0, 位); 位 += 2;                      // 效果数
 程序包.writeUInt32LE(2, 位); 位 += 4;                      // 指令数
+// 实验做完了，结论在这里：slurp 放在 main（第一个函数）里能工作 —— prog main -> 7 出现，
+// 而 scan op 100 出现在 prog sum -> 42 之后，也就是轮到 win（第四个）的时候。
+//
+// 所以 slurp 本身没问题，scan_instrs 也没问题。问题在 find_fn_by_name 找第四个函数时
+// 「跳过前面三个函数体」那一段 —— 跳 main(5) + echo(13) + sum(4) = 22 条之后起点就偏了。
+//
+// 这一条留成两指令，是因为它现在是别的判据的一部分（prog main -> 7）。实验的证据在
+// design/LAYERS.txt 与那一次的提交里。
 程序包[位++] = 5;                                           // 常量
 程序包[位++] = 1;                                           // 种类：数
 程序包.writeDoubleLE(7.0, 位); 位 += 8;
