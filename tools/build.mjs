@@ -515,7 +515,7 @@ for (const 字 of "win") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 
 // 这里原先写的是 length * 6（十八），于是返回不在指令数里：exec 跑完十八条就 pc == r13、
 // 直接停下，返回那一条永远不执行。而症状不是「窗口画错」—— 矩形都画了，所以 win px 全对，
 // 而 win 从来没有真的返回到调用者。
-程序包.writeUInt32LE(窗口矩形.length * 6 + 1, 位); 位 += 4;
+程序包.writeUInt32LE(窗口矩形.length * 6 + 1 + 3, 位); 位 += 4;
 // slurp 的调用仍然不在这条链上，而这一轮把它的症状查清了一步。
 //
 // 让 win 调 slurp，串口上出现的是：
@@ -577,6 +577,21 @@ for (const 字 of "win") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 
 // 也出现了：也就是说这些轮一直在追的错位，根因就是这一处布局。
 //
 // 退回一条扇区，是因为「让 prog.hmtn 长到两个扇区」要先有一次能一次算完所有偏移的重排。
+// 三条：常量路径、调 slurp、把内容写出去。布局现在跟着清单走，所以 prog.hmtn 涨到两个
+// 扇区时后面每一个偏移都会自己往后挪 —— 这一版要证明的正是那件事。
+const 试路径 = "docs/sub/deep.txt";
+程序包[位++] = 5;
+程序包[位++] = 2;
+程序包.writeUInt16LE(试路径.length, 位); 位 += 2;
+for (const 字 of 试路径) { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包[位++] = 3;
+程序包.writeUInt16LE(5, 位); 位 += 2;
+for (const 字 of "slurp") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包.writeUInt16LE(1, 位); 位 += 2;
+程序包[位++] = 3;
+程序包.writeUInt16LE(5, 位); 位 += 2;
+for (const 字 of "write") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包.writeUInt16LE(1, 位); 位 += 2;
 for (const r of 窗口矩形) {
   for (const 值 of r) {
     程序包[位++] = 5;

@@ -836,7 +836,7 @@
         "tools/build.mjs"
       ],
       "notes": "这一条才是「真正的 OS」的门槛：现在构建与验证都还要 Windows（nasm、node、VBoxManage），所以它的「能跑」有一半是借来的。 【移出 open】需要的条件：HMYR 编译器本身能在字节码里跑。现在能跑「一个包里的一个函数」（prog.hmtn 的 main 返回 7），而编译器是几万行 HMYR，并且它要读源文件、写目标文件 —— 那两件事要的对象模型与文件写入都还没有。这一条是整个工程的方向，不是下一块砖；把它写成 blocked 是为了让它别挡着路。\n\n【读那一侧】内置 slurp 落地：一参（路径，从 α:/ 后写起），返回文件内容成串。它补上了 self-host 的半个前置 —— 写入早就有，读在这之前只有 readline（读宿主那一行，不是文件）。\n一个位置坑：fs_open_path 用 rbx 交回字节数，而 rbx 在 exec 里是 pc，所以 slurp 里要先存再调。\n包里调用还断着：让 echo 读 docs/sub/deep.txt 会断在 readline 之前（myon here 之后什么都没有），所以调用撤了、内置留着。那不是返回值错，是执行流被带偏。记录在 design/LAYERS.txt。",
-      "state": "内置 slurp 落地。布局重排成功：三次失败之后，用「比重排前后 disk.img 的前 64 KB」找出根因 ——链尾那五个偏移（核心清单起、签名起、外五起、auth起、myon起）是 const，在 假样本起 还是 0 时就算定了，于是核心清单被写到偏移 512、盖掉了加载器。改成 let 并在清单之后赋值之后，盘的前 64 KB 与「好」那版 sha256 相同，全套判据绿。下一件是把 slurp 的三条加回 win。"
+      "state": "内置 slurp 接上了：prog.hmtn 的 win 现在读 docs/sub/deep.txt 并把它写出去，而 win px 仍读到 1C 0F 1F、scan op 不再出现。这一轮是三件事一条链：链尾五个 const 修好（核心清单不再盖掉加载器）-> prog.hmtn 能涨到两扇区 -> 预读那条数跟着 25 改 27。下一件：让 slurp 的返回值被包真正用起来（比如读到几字节、或者按内容走一条分支）。"
     },
     {
       "id": "resident",
