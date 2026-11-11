@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 110
+stage2_sectors equ 111
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -8059,7 +8059,73 @@ run_nvme_health:
     call putc64
     mov rax, [nvme_lbads]
     call put_num64
-    jmp put_nl64
+    call put_nl64
+
+    ; 第三条命令：Get Log Page 拿 SMART / Health（opcode 0x02，LID 0x02）。
+    ;
+    ; 这一条以前被整段拿掉过，理由是「命令成功而返回一页零」。但那一版的读法没有留在
+    ; 代码里，所以那个结论没有东西支撑它 —— 而「全零」有两种可能：盘真的不报，或者
+    ; CDW10 的 NUMD 写错了。NUMD 是「要几个 dword，减一」，而这一页是 512 字节 =
+    ; 128 个 dword，所以它该是 127。写小了不会报错，只会让盘少写几个字节，剩下的
+    ; 就是缓冲区里原本的零 —— 而症状与「盘不报」一模一样。
+    ;
+    ; 所以这一段把 NUMD 写对、把前 32 字节打出来。全零与不全零都在串口上，判据那一侧
+    ; 只需要认「有没有那一行」，以及「非零的话温度像不像一个温度」。
+    mov rbx, [nvme_asq]
+    lea rbx, [rbx + 128]           ; 槽 2：前两条用掉了 0 与 1
+    mov dword [rbx + 0x00], 0x02
+    mov dword [rbx + 0x04], 0xFFFFFFFF   ; NSID：控制器级日志
+    mov rax, [nvme_log]
+    mov [rbx + 0x18], rax
+    mov dword [rbx + 0x28], 0x007F0002   ; CDW10：LID=2、NUMDL=127
+    mov dword [rbx + 0x2C], 0            ; CDW11：NUMDU=0
+    mov dword [r13 + 0x1000], 3          ; SQ 的 tail 走到 3
+
+    mov rbx, [nvme_acq]
+    lea rbx, [rbx + 32]
+    mov rcx, 50000000
+.wnsm:
+    mov eax, [rbx + 0x0E]
+    test eax, 1
+    jnz .sm_got
+    dec rcx
+    jnz .wnsm
+    mov rsi, line_nvme_smtimeout
+    call puts64
+    ret
+.sm_got:
+    ; 先把完成项的 status 打出来。它是「命令被拒」与「命令号称成功却没写数据」这两种
+    ; 处境的唯一分界 —— 而缓冲区里有旧数据的时候，这两种在串口上看起来一样。
+    mov eax, [rbx + 0x0E]
+    shr eax, 1
+    and eax, 0x7FFF
+    mov [nvme_status], rax
+    mov rsi, line_nvme_smstat
+    call puts64
+    mov rax, [nvme_status]
+    call put_num64
+    call put_nl64
+
+    mov rsi, line_nvme_smart
+    call puts64
+    mov rbx, [nvme_log]
+    mov rdi, rbx
+    mov rcx, 32
+    call put_hex_bytes
+    call put_nl64
+
+    ; 温度在 offset 1 与 2，小端、单位开尔文。全零的时候它就是零 —— 而零不是一个
+    ; 温度，所以这一行「零」应当被读成「盘不报」，不是「零度」。
+    mov rsi, line_nvme_temp
+    call puts64
+    movzx eax, byte [rbx + 1]
+    movzx edx, byte [rbx + 2]
+    shl edx, 8
+    or eax, edx
+    mov [nvme_temp], rax
+    call put_num64
+    call put_nl64
+    ret
 
 ; ======================================================================
 ; 家庭组的第二步：边界是一个可以比较的数
@@ -11485,6 +11551,9 @@ nvme_media: dq 0
 line_nvme_noen: db "Yunooka: nvme no enable", 13, 10, 0
 line_nvme_timeout: db "Yunooka: nvme cmd timeout", 13, 10, 0
 line_nvme_smart: db "Yunooka: nvme smart ", 0
+line_nvme_smtimeout: db "Yunooka: nvme smart -> no answer", 13, 10, 0
+line_nvme_temp: db "Yunooka: nvme temp ", 0
+line_nvme_smstat: db "Yunooka: nvme smstat ", 0
 line_nvme_model: db "Yunooka: nvme model ", 0
 line_nvme_serial: db "Yunooka: nvme serial ", 0
 nvme_model: times 48 db 0
