@@ -1191,6 +1191,23 @@ scan_instrs:
     mov [instr_offsets + rcx * 8], rsi
     movzx eax, byte [rsi]
     inc rsi
+    ; 形状表只有 34 项（opcode 0 到 33）。越界读到的会是紧跟着的那串字符
+    ; （line_letters 的 'Y'），而 'Y' = 89 会落到「8 tuple」那一支上跳两字节 ——
+    ; 于是偏移表从某一条起全部错位，而执行时才以 unknown op 的形式露出来。
+    ;
+    ; 这条诊断只写一次（坏一次就够知道了），而且它走在真正的循环前面：如果它出现，
+    ; 后面那些 unknown op 就有一个明确的来源。
+    cmp eax, 33
+    jbe .shape_ok
+    ; puts64 用 lodsb，它会把 rax 改掉 —— 所以 opcode 先抄到 r15 里再看。
+    mov r15, rax
+    mov rsi, line_op_bad
+    call puts64
+    mov rax, r15
+    call put_num64
+    call put_nl64
+    jmp .done
+.shape_ok:
     movzx eax, byte [imm_shape + rax]
     call skip_imm
     inc rcx
@@ -11481,6 +11498,7 @@ imm_shape:
     db 0, 0, 0, 0, 0, 0, 0, 5, 0, 4, 0, 1, 6, 3
 
 line_letters: db "Yunooka: letters -> ", 0
+line_op_bad: db "Yunooka: scan op ", 0
 line_string: db "string ", 0
 line_number: db "number", 13, 10, 0
 line_bool: db "bool", 13, 10, 0

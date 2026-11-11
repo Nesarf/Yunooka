@@ -510,6 +510,14 @@ for (const 字 of "win") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 
 // 指令，所以错位只可能来自 scan_instrs 与 imm_shape，不可能来自 rsi 的前进。
 //
 // 下一轮从 scan_instrs 查起。
+// slurp 的调用仍然不在链上。这一轮把定位推进了一层：
+//
+// 加了一条诊断（scan_instrs 里 opcode 超过形状表长度就报一行），而让 win 调 slurp 之后
+// 串口上先出现 scan op 100、再出现 unknown op 100。所以错位发生在 scan_instrs 之前 ——
+// 也就是 find_fn_by_name 交给 r12 的那个「函数体起点」已经偏了。
+//
+// 而 win 与前面三个函数的区别只有一处：它是第四个。所以下一轮要在 find_fn_by_name 的
+// .nomatch 那一段（跳过前面每个函数体）里找 —— 前三个能跳过，第四个没跳对。
 for (const r of 窗口矩形) {
   for (const 值 of r) {
     程序包[位++] = 5;

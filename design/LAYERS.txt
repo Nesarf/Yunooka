@@ -417,3 +417,27 @@ op 100 是 0x64 —— 字符 d 的低字节。而编出来的字节里，d 只�
 
 所以下一个要看的是扫描，不是 rsi。下一轮从 scan_instrs 查起：形状 6（名字 + u16）对
 builtin 与 call 是同一个形状，而两边只有 builtin 会在这条路上被扫到。
+
+
+scan op 100：起点已经偏了
+-------------------------
+
+在 scan_instrs 里加了一条诊断：opcode 超过形状表长度（34）就报一行。因为 imm_shape 后面
+紧跟着 line_letters，越界读到的会是字符 'Y'，而 'Y' 落到「8 tuple」那一支上跳两字节 ——
+偏移表会从某一条起全部错位。
+
+把 slurp 的调用加回去之后，串口上是：
+
+    Yunooka: scan op 100
+    unknown op 100
+
+所以错位发生在 scan_instrs 之前 —— 也就是 find_fn_by_name 交给 r12 的那个「函数体起点」
+已经偏了。scan_instrs 从 r12 起、按 skip_imm 走，它读到 100 说明 r12 本身就在串里。
+
+而 win 与前面三个函数（main、echo、sum）的区别只有一处：它是第四个。
+
+find_fn_by_name 找名字的办法是「跳过前面每一个函数体」—— 用 r13 里的指令数配 skip_imm。
+前三个跳得对，第四个就对不上。所以下一轮要在那一段 .skip 循环里找，而不是在 scan_instrs
+或 exec 里找。
+
+诊断留着：它在下一次有人调 slurp 的时候会先说话。
