@@ -1518,7 +1518,6 @@ exec:
 .op_border:
     cmp r14, 0
     jne .builtin_unknown
-
     ; border：画一个窗口的框。
     ;
     ; 这就是 LAYERS 第六节第三条判据说的「Ichiwatashi 那一小块」的最小版本 —— 一个包
@@ -1567,6 +1566,74 @@ exec:
     call push_val
     inc rbx
     jmp .loop
+
+.op_runpkg:
+    ; 桥接：一个包请求宿主去跑另一个包。
+    ;
+    ; 这是 LAYERS 第六节第四条判据说的那一半 —— 「两个包之间的东西由它转」。前三个判据
+    ; 都是包与宿主之间（读、写、画），而这一条是包与包之间：外层在跑 prog.hmtn 的 echo，
+    ; 它请求宿主把 docs/myon.hmtn 的 echo 也跑一趟。
+    ;
+    ; 零参数、路径写死，因为它要证明的是「这件事能发生」，不是「包名可以任意传」。
+    ; 传包名要先把串拼成 UTF-16 路径，那是另一件事。
+    ;
+    ; 保存与恢复是这一条的全部难点：exec 用 r12 指指令流、r13 数指令数、rbx 当 pc，
+    ; 而 pkg_base / stack_top / frame_sp 是全局的。少存一样，症状是外层在回来后跳到
+    ; 别处，或者栈从头开始 —— 两种都不会说「嵌套调用坏了」。
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    push qword [pkg_base]
+    push qword [stack_top]
+    push qword [frame_sp]
+
+    ; 刷新 docs 那一页再查。
+    ;
+    ; 预读区是启动时的快照，而 fs_write_file 会往它里面写 —— 外层包跑到这里时，docs
+    ; 那一页早就不是盘上那一份了。所以这一条不能靠「排在写之前」来救：它由 shell 之后
+    ; 的包发起，而 shell 本身排在写之后。能做的只有一件事：读一次盘。
+    ;
+    ; 1026 是 docs 的扇区号，而 fs_load 把它算成预读区里的地址 —— ata_read 就往那里写。
+    ; 于是紧接着的 fs_open_path 查到的就是盘上的原样。
+    mov rdi, 1026
+    call fs_load
+    mov rdi, 1026
+    call ata_read
+
+    mov rdi, fs_myon_path
+    call fs_open_path
+    test rax, rax
+    jz .rp_done
+    mov rax, [last_addr]
+    mov [pkg_base], rax
+    mov rdi, name_echo
+    mov r8, 4
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .rp_done
+    mov r12, rsi
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+.rp_done:
+    pop qword [frame_sp]
+    pop qword [stack_top]
+    pop qword [pkg_base]
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    xor eax, eax
+    xor edx, edx
+    call push_val
+    inc rbx
+    jmp .loop
+
 .builtin_unknown:
     mov rsi, line_unknown_builtin
     call puts64
@@ -11279,6 +11346,7 @@ bi_name_len: dw 0x006C, 0x0065, 0x006E
 bi_name_write: dw 0x0077, 0x0072, 0x0069, 0x0074, 0x0065
 bi_name_readline: dw 0x0072, 0x0065, 0x0061, 0x0064, 0x006C, 0x0069, 0x006E, 0x0065
 bi_name_border: dw 0x0062, 0x006F, 0x0072, 0x0064, 0x0065, 0x0072
+bi_name_runpkg: dw 0x0072, 0x0075, 0x006E, 0x0070, 0x006B, 0x0067
 builtin_table:
     dq 3
     dq bi_name_len
@@ -11292,6 +11360,9 @@ builtin_table:
     dq 6
     dq bi_name_border
     dq exec.op_border
+    dq 6
+    dq bi_name_runpkg
+    dq exec.op_runpkg
     dq 0
     dq 0
     dq 0
