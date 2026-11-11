@@ -1207,22 +1207,14 @@ scan_instrs:
     call put_nl64
     jmp .done
 .shape_ok:
-    ; 诊断撤了，而它给出的三行是这一轮的全部产出。
+    ; 诊断撤了，而它给出的一个数是这一轮的结论：shape=7、skip 的实际差是 9 字节。
     ;
-    ; win 的指令流起点是 0x41121，盘上那里的字节是 05 01（opcode 5 = 常量，种类 1 = 数），
-    ; 后面八个字节是 60.0 的 f64 —— 一条完整的常量指令，长 10 字节。
+    ; 也就是说 skip_imm 对 win 的第一条（常量 60）完全正确：读种类一字节、再跳八个
+    ; 字节的 f64。imm_shape[5] = 7 与 .value → .v_num 那条路都是通的。
     ;
-    ; 而扫描打出来的是：
-    ;     0x41121 #0
-    ;     0x41122 #1
-    ;     0x41124 #2
-    ;     0x41124 #3   ← 从这一条起不动了
-    ;
-    ; 第 0 条只前进 1 字节 —— 那正好是 scan_instrs 自己那句 inc rsi（跳过 opcode），
-    ; 也就是说 skip_imm 收到的是「跳 0」那一支，跳了零个字节。
-    ;
-    ; 所以下一轮要查的是：skip_imm 在那里到底收到了什么。imm_shape[5] 应当是 7（值），
-    ; 而 7 会走 .value（读种类）再走 .v_num（跳八字节）。
+    ; 而上一轮那十八行「scan at」是误读：打印条件里的 cmp rax, 0x41100 比较时，rax 已经
+    ; 被前面的 movzx eax, byte [rsi] 改成了 opcode（5），于是 5 < 0x41100 永远成立、那些
+    ; 行来自别的调用。一个诊断自己也会犯它要查的那种错 —— 这是第二次。
     movzx eax, byte [imm_shape + rax]
     call skip_imm
     inc rcx
@@ -11540,6 +11532,10 @@ line_skip_dbg: db "Yunooka: skip at ", 0
 line_scan_dbg: db "Yunooka: scan at ", 0
 dbg_rsi: dq 0
 dbg_len: dq 0
+dbg_a: dq 0
+dbg_b: dq 0
+dbg_c: dq 0
+line_measure: db "Yunooka: shape ", 0
 line_string: db "string ", 0
 line_number: db "number", 13, 10, 0
 line_bool: db "bool", 13, 10, 0
