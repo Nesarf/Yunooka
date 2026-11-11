@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 117
+stage2_sectors equ 121
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -1647,6 +1647,80 @@ exec:
     call puts64
     call put_nl64
     jmp .none
+
+.op_slurp:
+    ; 一个参数：路径（从 α:/ 之后的部分，UTF-16 码元）。返回那一份文件的内容，成一个串。
+    ;
+    ; 这一条是 self-host 的第一块。它的 notes 原先说「读源文件、写目标文件那两件事要的
+    ; 对象模型与文件写入都还没有」—— 写入早就有了（fs_write_file），缺的是读。而「读」
+    ; 在这之前只有一个口子：readline 读的是宿主攒的那一行，不是文件。
+    ;
+    ; 路径的拼法：内置自己补上 α:/ 三个码元，参数从第四个位置接上去。让包写全 α:/ 也
+    ; 可以，但那样每一个包都要知道盘符 —— 而那正是「包不必知道宿主细节」要避免的。
+    cmp r14, 1
+    jne .builtin_unknown
+    call pop_val                    ; 路径串：rdx 是指针，[rdx] 是长度
+    mov rsi, rdx
+    movzx ecx, word [rsi]           ; 路径码元数
+    cmp rcx, 200
+    ja .slurp_miss
+    lea rdi, [slurp_path]
+    mov word [rdi], 0x03B1          ; α
+    mov word [rdi + 2], 0x003A      ; :
+    mov word [rdi + 4], 0x002F      ; /
+    xor r8, r8
+.slurp_copy:
+    cmp r8, rcx
+    jae .slurp_end
+    mov ax, [rsi + 2 + r8 * 2]
+    mov [rdi + 6 + r8 * 2], ax
+    inc r8
+    jmp .slurp_copy
+.slurp_end:
+    mov word [rdi + 6 + rcx * 2], 0 ; 结尾零码元
+    ; rbx 要先存起来：fs_open_path 用 rbx 交回字节数，而 rbx 在这里是 pc。改坏它的
+    ; 症状是「包读完了文件就跳到别处」—— 与读文件毫无关系的那种症状。
+    push rbx
+    call fs_open_path
+    mov r9, rbx                     ; 字节数
+    pop rbx
+    test rax, rax
+    jz .slurp_miss
+    ; 内容在预读区里：[last_addr] 是起点，rbx 是字节数（fs_open_path 交回来的）。
+    ; 这一版按 ASCII 一刀切：每个字节当一个码元。非 ASCII 的文件会走样，而这一版没有
+    ; 编码表 —— 那件事该由包自己决定，不该藏在内置里。
+    mov rsi, [last_addr]
+    lea rdi, [slurp_buf]
+    mov rcx, r9
+    cmp rcx, 255
+    jbe .slurp_len_ok
+    mov rcx, 255                    ; 串的长度字段是一个 u16，而这一版的缓冲吃 255
+.slurp_len_ok:
+    mov [rdi], cx
+    xor r8, r8
+.slurp_body:
+    cmp r8, rcx
+    jae .slurp_done
+    mov al, [rsi + r8]
+    movzx eax, al
+    mov [rdi + 2 + r8 * 2], ax
+    inc r8
+    jmp .slurp_body
+.slurp_done:
+    mov rax, 2                      ; 串
+    mov rdx, rdi
+    call push_val
+    inc rbx
+    jmp .loop
+.slurp_miss:
+    ; 读不到就交一个空串，而不是「空」—— 包拿到的东西种类一致，它自己决定怎么处理。
+    lea rdi, [slurp_buf]
+    mov word [rdi], 0
+    mov rax, 2
+    mov rdx, rdi
+    call push_val
+    inc rbx
+    jmp .loop
 
 .op_rect:
     ; 画一个由包指定的填充矩形：五个参数，从栈顶往下是颜色、高、宽、y、x。
@@ -11493,6 +11567,9 @@ fs_myon_name: dw 0x006D, 0x0079, 0x006F, 0x006E, 0x002E, 0x0068, 0x006D, 0x0074,
 myon_dbg_a: dq 0
 myon_dbg_b: dq 0
 myon_dbg_c: dq 0
+; slurp 拼出来的路径（α:/ + 参数）与它交出去的串。
+slurp_path: times 520 dw 0
+slurp_buf: times 520 db 0
 fs_myon_path: dw 0x03B1, 0x003A, 0x002F, 0x0064, 0x006F, 0x0063, 0x0073, 0x002F, 0x006D, 0x0079, 0x006F, 0x006E, 0x002E, 0x0068, 0x006D, 0x0074, 0x006E, 0
 name_echo: dw 0x0065, 0x0063, 0x0068, 0x006F
 
@@ -11511,6 +11588,7 @@ bi_name_readline: dw 0x0072, 0x0065, 0x0061, 0x0064, 0x006C, 0x0069, 0x006E, 0x0
 bi_name_border: dw 0x0062, 0x006F, 0x0072, 0x0064, 0x0065, 0x0072
 bi_name_runpkg: dw 0x0072, 0x0075, 0x006E, 0x0070, 0x006B, 0x0067
 bi_name_rect: dw 0x0072, 0x0065, 0x0063, 0x0074
+bi_name_slurp: dw 0x0073, 0x006C, 0x0075, 0x0072, 0x0070
 builtin_table:
     dq 3
     dq bi_name_len
@@ -11530,6 +11608,9 @@ builtin_table:
     dq 4
     dq bi_name_rect
     dq exec.op_rect
+    dq 5
+    dq bi_name_slurp
+    dq exec.op_slurp
     dq 0
     dq 0
     dq 0
