@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 130
+stage2_sectors equ 131
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -776,6 +776,9 @@ long_entry:
     call run_kohane_list_test
     call run_kohane_stat_test
     call run_identify_test
+    ; 第十六格那份样本不是只有四个字节，它按 design/HMGK.txt 的布局写成一份真的头。
+    ; 这一条把布局读一遍：版本、BPM、结构段字节数、pattern 数。
+    call run_hmgk_test
     call run_pci_scan
     ; AHCI 那两个探测不再上主链。它在两个芯片组上都判死了（六个 port 的 PxSSTS 全零，
     ; 而 BIOS 通过同一个控制器访问过盘），而一条已经查清的失败不该继续占着串口 ——
@@ -12039,6 +12042,39 @@ run_identify_test:
     call puts64
     ret
 
+; hmgk 的头：按布局把四个字段读出来。
+;
+; 这一条与上面那一格问的不是同一件事。上面认只需要头四个字节 —— 魔数对了就答 hmgk，
+; 而这一条要按偏移走完整个头、读出四个数，所以「魔数对」在这里只是前提，不是答案。
+;
+; 挑这四个字段的理由：
+;   版本在偏移 4、结构段在偏移 8、pattern 数在偏移 22、BPM 在偏移 28 —— 后三个都不在
+;   头四个字节里，读错了位置只会得到别的数；而 pattern 数夹在两串 u16 之间，最容易
+;   数错一格。
+; 判据是三个写死在样本里的数（BPM 120500、结构段 40、pattern 3）加上版本 1。它们只有
+; 按布局算偏移才报得出来：从「恰好非零」里凑不出 120500 这样的值。
+;
+; 寄存器：rbx 存样本地址，put_num64 自己 push/pop 它，puts64 不碰它，所以全程安全。
+run_hmgk_test:
+    lea rbx, [samp_hmgk]
+    mov rsi, line_hmgk_v
+    call puts64
+    movzx eax, word [rbx + 4]      ; 版本
+    call put_num64
+    mov rsi, line_hmgk_bpm
+    call puts64
+    mov eax, [rbx + 28]            ; BPM × 1000
+    call put_num64
+    mov rsi, line_hmgk_struct
+    call puts64
+    mov eax, [rbx + 8]             ; 结构段字节数
+    call put_num64
+    mov rsi, line_hmgk_pattern
+    call puts64
+    movzx eax, word [rbx + 22]     ; pattern 数
+    call put_num64
+    jmp put_nl64
+
 ; 把一个类型码打成名字，接在后面。
 ;
 ; 名字用短的：这一行要在一行里挤八个结果，而判据要能一眼看出哪一格不对。
@@ -13555,6 +13591,11 @@ line_kind_png: db "png", 0
 line_kind_jpeg: db "jpeg", 0
 line_kind_sqlite: db "sqlite", 0
 line_kind_hmgk: db "hmgk", 0
+; 读字段那一条用的四段文字。数字各由 put_num64 打，所以这里只有前后缀。
+line_hmgk_v:       db "Yunooka: hmgk v", 0
+line_hmgk_bpm:     db " bpm ", 0
+line_hmgk_struct:  db " struct ", 0
+line_hmgk_pattern: db " pattern ", 0
 ; 别的系统的五个样本的路径。名字是 ASCII，所以码元就是它自己的字节。
 fs_pe_path: dw 0x03B1, 0x003A, 0x002F, 0x0070, 0x0065, 0x002E, 0x0062, 0x0069, 0x006E, 0
 fs_elf_path: dw 0x03B1, 0x003A, 0x002F, 0x0065, 0x006C, 0x0066, 0x002E, 0x0062, 0x0069, 0x006E, 0
