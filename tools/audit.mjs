@@ -65,8 +65,9 @@ for (const g of 计划.goals) {
 // 加粗用全文匹配而不是逐行：这个检查的头一版是逐行的，而 LAYERS 里有一对星号跨了两行，
 // 于是那一处留了下来，而检查报了「十七个文件都没有」。全文匹配才看得见跨行的。
 const 设计目录 = path.join(ROOT, "design");
+const 设计文件 = fs.readdirSync(设计目录).filter((f) => f.endsWith(".txt"));
 const 带毒 = [];
-for (const 名 of fs.readdirSync(设计目录).filter((f) => f.endsWith(".txt"))) {
+for (const 名 of 设计文件) {
   const 文 = fs.readFileSync(path.join(设计目录, 名), "utf8");
   const 行 = 文.split(/\r?\n/);
   for (let i = 0; i < 行.length; i++) {
@@ -82,7 +83,10 @@ for (const 名 of fs.readdirSync(设计目录).filter((f) => f.endsWith(".txt"))
     带毒.push(名 + "（" + 处 + " 处加粗）");
   }
 }
-判("design 是纯文本", 带毒.length === 0, 带毒.length ? "有 markdown 记号：" + 带毒.join("、") : "十七个文件都没有");
+// 文件数用实际的，不写字面量：这一条原先写的是「十七个文件都没有」，而 design 里加到第
+// 十八个之后它照旧报十七 —— 一条检查说了一个自己没数过的数，那正是它该防的那类话。
+判("design 是纯文本", 带毒.length === 0,
+  带毒.length ? "有 markdown 记号：" + 带毒.join("、") : 设计文件.length + " 个文件都没有");
 
 // ---- 四、每个 event= 行都有人读 ----
 //
