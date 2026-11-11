@@ -11,6 +11,7 @@
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
+import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -1152,6 +1153,32 @@ const nv健康成 = nvSmart行 !== null && nvSmstat行 !== null
 const 回声行 = /Yunooka: shell> echo hello world\r?\nhello world/.exec(读到);
 const 回声成 = 回声行 !== null;
 
+// SHA-512 的六行：与主机逐字符相同。
+//
+// 以前这一条靠 tools/checksha512.mjs 手动跑。而那个脚本读 build/serial.log，run.mjs
+// 早就不写那个文件了 —— 也就是说那条判据已经与主链脱节，却一直挂在那里像还活着。
+// 手动跑的判据不算判据：它不在任何一次通过的路径上，所以它红不红没人知道。
+//
+// 判据只有一句：字符串相等。不解释、不近似 —— 一个 512 位哈希里错一位与错一半，在
+// 「相等」这件事上是同一件事；而只看前 8 字节的那种比较，会让一个错到离谱的实现也报绿。
+//
+// 六个长度覆盖补齐的四种处境：0（空消息）、1（末尾只有一字节）、111（长度字段仍能塞进
+// 同一块）、112（正好跨到第二块）、128（正好一整块）、239（两块之后还剩大半块）。
+// 只测一个长度最多碰到其中一种，剩下三种坏了也看不见 —— 那个多块缺陷就是这样躲了很久。
+const sha512行 = [...读到.matchAll(/^Yunooka: event=sha512 len=(\d+) hex=([0-9A-F]{128})$/gm)]
+  .map((m) => [Number(m[1]), m[2]]);
+const sha512成 = (() => {
+  if (sha512行.length !== 6) return false;
+  const t = Buffer.alloc(256);
+  for (let i = 0; i < 256; i++) t[i] = i & 0xff;
+  return [0, 1, 111, 112, 128, 239].every((L) => {
+    const r = sha512行.find((x) => x[0] === L);
+    if (r === undefined) return false;
+    const want = crypto.createHash("sha512").update(t.subarray(0, L)).digest("hex").toUpperCase();
+    return r[1] === want;
+  });
+})();
+
 // 补完界面的骨架：**正常启动时不该出现**。
 //
 // 这一条判据的形状与别处不同 —— 它验的是「没有」。而那种判据最容易被写成
@@ -1531,6 +1558,9 @@ console.log("盘的健康  " + (nvSmstat行 ? "status=" + nvSmstat行[1] : "(没
 console.log("Myon 切词 " + (回声成 ? "echo hello world" : "(没跑到)")
   + (回声成 ? "  —— 一行被切成词与参数，词之后的部分原样回来了"
     : "  —— 不对：这一行没有被切开，或者参数没有传过去"));
+console.log("SHA-512   " + (sha512行.length ? sha512行.length + " 个长度" : "(没跑到)")
+  + (sha512成 ? "  —— 六个长度全部与主机逐字符相同，其中四个在两块以上"
+    : "  —— 不对：有长度与主机不同，或者六行没齐"));
 console.log("系统保护  " + (守成 ? "只读位挡住了重写，换个名字仍写得进" : "(没跑到)")
   + (守成 ? "  —— 拒绝时报的是只读，不是「已存在」"
     : "  —— 不对：五条里缺了哪一条，或者重写漏了过去"));
@@ -1625,6 +1655,7 @@ const 其余成 = 有种子
     && on3成
     && nv健康成
     && 回声成
+    && sha512成
     && 详成
     && 认前二
     && 认第三
@@ -1697,7 +1728,7 @@ if (!成了) {
       索引: 索成, 窗口: 窗成, 此电脑: 列成, 健康: 健成, 大小: 量成, 系统保护: 守成,
       详情: 详成, 签名: 签成, 域算术: fp成, 域加减: fp2成, 点运算: pt成, 标量乘: ptm成,
       点编码: pte成, 点解码: ptr成, 验签: sig成, 第三环: on3成, 盘健康: nv健康成,
-      切词: 回声成,
+      切词: 回声成, sha512: sha512成,
       认前二: 认前二, 认第三: 认第三, 认外五: 认外五, 壳: 壳成,
       求值2: 重求成, 除法: 除成, 数学: 数学成, 表达式: 曲线成,
     };

@@ -63,6 +63,10 @@ tools/build.mjs    编两段、各查形状、拼成一块盘、转成 vdi（`--
 tools/run.mjs      挂盘、引导、读串口、比对
 ```
 
+`tools/` 下现在有六个脚本：`build` 与 `run` 是链，`ed25519` / `refed25519` / `refsha512`
+是尺子，`genconst` 被 `stage2.asm` 里 `sha512_k` 的注释指着。哪一个在、哪一个走了、为什么，
+写在 [tools/README.txt](tools/README.txt) 里。
+
 跑：
 
 ```
