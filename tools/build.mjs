@@ -354,10 +354,10 @@ const 数学输入 = Buffer.from(
 // 放不下，症状是构建抛 RangeError）。而多函数本来就是包格式支持的东西，所以这不是
 // 妥协，是把已有的形状用起来。
 const 回声串 = "myon here";
-const 程序包 = Buffer.alloc(192);
+const 程序包 = Buffer.alloc(256);
 程序包.write("HMYRB", 0, "latin1");
 程序包.writeUInt16LE(1, 5);       // 版本
-程序包.writeUInt16LE(2, 7);       // 两个函数
+程序包.writeUInt16LE(3, 7);       // 三个函数
 let 位 = 9;
 程序包.writeUInt16LE(4, 位); 位 += 2;                      // 名字长度
 for (const 字 of "main") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
@@ -400,6 +400,28 @@ for (const 字 of "border") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); �
 程序包.writeUInt16LE(6, 位); 位 += 2;
 for (const 字 of "runpkg") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
 程序包.writeUInt16LE(0, 位); 位 += 2;                      // 零参
+程序包[位++] = 28;                                          // 返回
+
+// 第三个函数：sum，算 40 + 2。
+//
+// 它不再是一个常量返回。main 返 7、echo 打字，两者都不用到算术 —— 而「住得下 HMYR」
+// 里最要紧的一条是解释器真的能算：一份编译器产出的字节码不会只有常量和内置调用。
+//
+// 40 与 2 挑得没有讲究，只要和是 42 —— 而 42 在这里没有别处出现过，所以它不可能来自
+// 宿主里写死的数。
+程序包.writeUInt16LE(3, 位); 位 += 2;
+for (const 字 of "sum") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包.writeUInt16LE(0, 位); 位 += 2;                      // 参数量
+程序包.writeUInt16LE(0, 位); 位 += 2;                      // 槽数
+程序包.writeUInt16LE(0, 位); 位 += 2;                      // 效果数
+程序包.writeUInt32LE(4, 位); 位 += 4;                      // 四条指令
+程序包[位++] = 5;                                           // 常量 40
+程序包[位++] = 1;
+程序包.writeDoubleLE(40.0, 位); 位 += 8;
+程序包[位++] = 5;                                           // 常量 2
+程序包[位++] = 1;
+程序包.writeDoubleLE(2.0, 位); 位 += 8;
+程序包[位++] = 0;                                           // 加
 程序包[位++] = 28;                                          // 返回
 const 程序字节 = 程序包.subarray(0, 位);
 

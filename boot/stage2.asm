@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 116
+stage2_sectors equ 117
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -774,6 +774,8 @@ long_entry:
     call run_shell_live
     call run_repl_live
     call run_program
+    ; 同一份包里的第三个函数：算 40 + 2。上面那条是常量返回，这一条要走算术。
+    call run_prog_sum_test
     ; Myon 的第二步：盘上那个只有三条指令的包，靠内置 write 把一段字打到串口。
     call run_myon_test
     call run_trap_test
@@ -2920,6 +2922,58 @@ run_program:
     call print_value
     call put_nl64
     ret
+
+; ======================================================================
+; 解释器真的能算：一个包返回 40 + 2
+; ======================================================================
+;
+; 「住得下 HMYR」里最要紧的一条是解释器真的能算 —— 一份编译器产出的字节码不会只有
+; 常量与内置调用。main 返 7、echo 打字，两者都没用到算术。
+;
+; 40 与 2 挑得没有讲究，只要和是 42；而 42 在这里没有别处出现过 —— 它不可能来自宿主
+; 里写死的数，只能来自包里的那两条常量与一次 add。
+run_prog_sum_test:
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]
+    mov r8, fs_prog_name
+    mov r9, 9                       ; "prog.hmtn"
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz .missing
+    mov rdi, r15
+    call fs_load
+    mov r14, rsi
+    mov [pkg_base], r14
+    mov rdi, name_sum
+    mov r8, 3
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi                    ; 指令流
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+    mov r15, rax
+    mov r14, rdx
+    mov qword [pkg_base], 0x20000
+    mov rsi, line_prog_sum
+    call puts64
+    mov rax, r15
+    mov rdx, r14
+    call print_value
+    call put_nl64
+    ret
+.missing:
+    mov rsi, line_prog_sum_bad
+    call puts64
+    ret
+
 prog_missing:
     mov rsi, line_prog_missing
     call puts64
@@ -11425,6 +11479,9 @@ line_false_flat: db "false", 0
 ; 盘上那个程序包与它里面的入口。
 fs_prog_name: dw 0x0070, 0x0072, 0x006F, 0x0067, 0x002E, 0x0068, 0x006D, 0x0074, 0x006E, 0
 name_main: dw 0x006D, 0x0061, 0x0069, 0x006E
+name_sum: dw 0x0073, 0x0075, 0x006D
+line_prog_sum: db "Yunooka: prog sum -> ", 0
+line_prog_sum_bad: db "Yunooka: prog sum missing", 13, 10, 0
 line_prog: db "Yunooka: prog main -> ", 0
 line_prog_missing: db "Yunooka: no prog.hmtn", 13, 10, 0
 line_myon_done: db "Yunooka: event=myon write ok", 13, 10, 0
