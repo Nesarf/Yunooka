@@ -1938,7 +1938,10 @@ const 存活成 = (() => {
   for (let i = 0; i < 120; i++) {
     睡(500);
     try { 又读到 = fs.readFileSync(串口, "utf8"); } catch { }
-    if (/Yunooka: persist (survived|write -> same)/.test(又读到)) {
+    // 等到 save 那一段，不只是 persist —— persist 在 run_save_test 之前，而第二趟
+    // 一旦见到 persist 就断电，save 根本没机会跑。上一版就是这样：落盘其实成功了，
+    // 而串口里永远没有那一行，于是判据红在一个它自己造成的缺口上。
+    if (/Yunooka: save (survived|out\.txt)/.test(又读到)) {
       // 见到 persist 那一行之后再等一会儿，让后面几行也写出来
       for (let j = 0; j < 6; j++) {
         睡(300);
@@ -1953,9 +1956,22 @@ const 存活成 = (() => {
   try { fs.writeFileSync(path.join(建, "serial2.log"), 又读到, "utf8"); } catch { }
   return /Yunooka: persist survived a reboot/.test(又读到);
 })();
+// 第二趟里包写下的那一份还在不在。
+//
+// 它靠的是 serial2.log —— 那一趟只跑一次，串口不留就再也没有证据。而这一条与上面那条
+// 各管一个层次：上面证明裸扇区写下去会留在盘上，这一条证明文件系统那一层也是。
+const 二趟 = (() => {
+  try { return fs.readFileSync(path.join(建, "serial2.log"), "utf8"); } catch { return ""; }
+})();
+const 存存活 = /Yunooka: save survived ([0-9A-F]+) (\d+)/.exec(二趟);
+const 存存活成 = 留机 || (存存活 !== null && !/^0+$/.test(存存活[1]) && Number(存存活[2]) > 0);
 console.log("落盘      " + (存活成 ? "第二趟读到 survived" : "(第二趟没有 survived)")
   + (存活成 ? "  —— 关掉再开机，那 512 个字节还在盘上：写真的落下去了"
     : "  —— 不对：第二次启动应当报 persist survived a reboot"));
 if (!留机) console.log("机器已关（--keep 可以留着它，用 GUI 打开看）。");
-const 全成 = 成了 && 存活成;
+console.log("包写的东西 " + (留机 ? "(留机模式，第二趟没跑)"
+  : 存存活 ? "save survived " + 存存活[1].slice(-3) + " " + 存存活[2] + " 字节" : "(第二趟没见到那一份)")
+  + (存存活成 ? "  —— 上一次启动时包写的 out.txt，这一次开机还在"
+    : "  —— 不对：第二趟应当报 save survived，也就是那一份真的落在盘上了"));
+const 全成 = 成了 && 存活成 && 存存活成;
 process.exit(全成 ? 0 : 1);

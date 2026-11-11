@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 125
+stage2_sectors equ 126
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -1743,6 +1743,34 @@ exec:
     call fs_write_file              ; 它自己 push/pop 了 rbx，所以 exec 的 pc 不用外面保
     test rax, rax
     jz .save_zero
+    ; 落盘：目录那一页与数据那一页，各写回盘一次。
+    ;
+    ; save 与 fs_write_file 的差别就在这两次 PIO。fs_write_file 是内存那一层 —— 它改的是
+    ; 预读区，重启就没了；而包要的是一份留在盘上的东西。两件事分开，是因为一次全改成落盘
+    ; 会让 guard 那几条判据每写一次都多两次写盘，而它们要证的只是「目录里多了一条」。
+    ;
+    ; 写盘失败就不许说「写成了」：那正是「看起来成功」最会伪装的地方。
+    ;
+    ; 目录不止一页：根目录占两格，而条目会跨过页边界 —— new.txt 那一条就是前七个字节留在
+    ; 第一页、其余落到第二页。只写第一页的话，跨页的那一条在盘上就只剩半截，而第二页
+    ; 在盘上仍是零。症状是「第二趟看不到 out.txt」，而写盘本身没有报错。
+    xor r9, r9
+.dir_save:
+    mov rdi, [last_dir_sec]
+    add rdi, r9
+    call fs_load                    ; rsi = 这一页在预读区里的地址
+    mov rdi, [last_dir_sec]
+    add rdi, r9
+    call ata_write
+    jc .save_zero
+    inc r9
+    cmp r9, [last_dir_pages]
+    jb .dir_save
+    mov rdi, [last_write_sec]
+    call fs_load
+    mov rdi, [last_write_sec]
+    call ata_write
+    jc .save_zero
     mov rdx, 0x3FF0000000000000     ; 1.0
     jmp .save_put
 .save_zero:
@@ -2741,6 +2769,26 @@ idt_common:
 ; 而包自己的读回不足以证明写成功：两半各错一半恰好抵消也是可能的。所以宿主随后独立查
 ; 一次目录，那一步不吃包里任何东西。两条都成立才算数 —— 包说写成了，并且目录里真的有。
 run_save_test:
+    ; 第二趟该走的门：上一次启动时包写下的那一份应当还在盘上。
+    ;
+    ; 这一条与 persist 那条同一个道理 —— 同一次运行里写下去再读回来，读到的也可能只是内存。
+    ; 而那正是「看起来写成功了」最会伪装的样子。区别是 persist 用的是裸扇区，这一条用的是
+    ; 文件系统：目录里那一条、以及它指向的那一页，两样都得在。
+    mov rdi, fs_save_path
+    call fs_open_path
+    test rax, rax
+    jz .first
+    mov rsi, line_save_survived
+    call puts64
+    mov rax, r15
+    call put_num64
+    mov al, ' '
+    call putc64
+    mov rax, rbx
+    call put_num64
+    call put_nl64
+    ret
+.first:
     mov rdi, 1024
     call fs_load
     mov [fs_buf], rsi
@@ -4681,8 +4729,12 @@ fs_write_file:
     sub eax, [rbx + 24]
     add eax, [rbx + 20]
     mov r15d, eax
+    mov [last_write_sec], r15       ; 数据那一页：save 要把它写回盘
     ; 找根目录里的第一个空条目（名字长度为 0）
     mov edi, [rbx + 12]
+    mov [last_dir_sec], rdi         ; 目录那一页：同上
+    mov eax, [rbx + 16]             ; 根目录占几个扇区 —— 落盘要把它们都写回
+    mov [last_dir_pages], rax
     call fs_load
     mov r9, rsi
     ; 条目区的上界 = 目录自己那几页的末尾。
@@ -11934,9 +11986,13 @@ slurp_buf: times 520 db 0
 save_buf: times 512 db 0
 save_name: times 132 dw 0
 save_len: dq 0
+last_write_sec: dq 0
+last_dir_sec: dq 0
+last_dir_pages: dq 0
 ; 包写出来的那一份，用完整路径再查一次。
 fs_save_path: dw 0x03B1, 0x003A, 0x002F, 0x006F, 0x0075, 0x0074, 0x002E, 0x0074, 0x0078, 0x0074, 0
 name_savetest: dw 0x0073, 0x0061, 0x0076, 0x0065, 0x0074, 0x0065, 0x0073, 0x0074
+line_save_survived: db "Yunooka: save survived ", 0
 line_save_ok: db "Yunooka: save out.txt ", 0
 line_save_lost: db "Yunooka: save out.txt lost", 13, 10, 0
 line_save_missing: db "Yunooka: save missing", 13, 10, 0
