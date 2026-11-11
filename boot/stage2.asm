@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 131
+stage2_sectors equ 132
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -779,6 +779,8 @@ long_entry:
     ; 第十六格那份样本不是只有四个字节，它按 design/HMGK.txt 的布局写成一份真的头。
     ; 这一条把布局读一遍：版本、BPM、结构段字节数、pattern 数。
     call run_hmgk_test
+    ; 同一份格式的另一种活法：它被嵌在别的程序里，魔数不在偏移 0。
+    call run_hmgk_embed_test
     call run_pci_scan
     ; AHCI 那两个探测不再上主链。它在两个芯片组上都判死了（六个 port 的 PxSSTS 全零，
     ; 而 BIOS 通过同一个控制器访问过盘），而一条已经查清的失败不该继续占着串口 ——
@@ -12075,6 +12077,68 @@ run_hmgk_test:
     call put_num64
     jmp put_nl64
 
+; 在一段字节里找四字节魔数。
+;
+; 为什么要这个函数：identify 只看头上那几个字节，而那套约定在「一份文件被嵌进另一个
+; 程序」之后就不成立了 —— 那时 hmgk 的魔数出现在任意位置。认出这种形态只有一条路：扫。
+;
+; 入参 rdi 起点、rcx 长度、eax 要找的 dword。返回 rax = 偏移，找不到给 -1。
+; 上界是 rcx - 4：最后一个合法起点要能读满四个字节，否则会读出边界外。
+; r8 与 r9 是这段的循环变量，不保存 —— 调用者不能指望它们。
+scan_magic:
+    cmp rcx, 4
+    jb .none
+    mov r8, rcx
+    sub r8, 4
+    xor r9, r9
+.loop:
+    cmp r9, r8
+    ja .none
+    cmp dword [rdi + r9], eax
+    je .found
+    inc r9
+    jmp .loop
+.found:
+    mov rax, r9
+    ret
+.none:
+    mov rax, -1
+    ret
+
+; 嵌入形态：一个 PE 头后面跟着一份 hmgk。
+;
+; 判据要两样东西，缺一不算：主类型答 pe（说明外面那层先被认出来了），并且扫出来的偏移
+; 正好是 256（说明里面那份 hmgk 确实在它该在的地方）。只答一样不够 —— 只答 pe 的实现
+; 根本不知道里面有东西，只答 hmgk 的实现则把外面那层漏了。
+;
+; 256 这个数不是挑的：样本按那个偏移造，而扫描要从 0 一路走到 255 才撞上它，所以「扫到
+; 了」这件事本身包含了「前面那 255 个字节都不是魔数」。
+;
+; 顺序上有个坑值得记：puts64 会 clobber rax（lodsb 改 al），所以前缀必须先打、类型码必须
+; 后取。反过来写会打出上一格留下的数字，而那种错看起来像「identify 算错了」。
+run_hmgk_embed_test:
+    mov rsi, line_embed_main
+    call puts64
+    lea rdi, [samp_embed]
+    mov rcx, samp_embed_len
+    call identify
+    call put_ident_kind
+
+    mov rsi, line_embed_inner
+    call puts64
+    lea rdi, [samp_embed]
+    mov rcx, samp_embed_len
+    mov eax, 0x4B474D48            ; 'H' 'M' 'G' 'K'
+    call scan_magic
+    cmp rax, -1
+    je .none
+    call put_num64
+    jmp put_nl64
+.none:
+    mov rsi, line_embed_missing
+    call puts64
+    jmp put_nl64
+
 ; 把一个类型码打成名字，接在后面。
 ;
 ; 名字用短的：这一行要在一行里挤八个结果，而判据要能一眼看出哪一格不对。
@@ -13596,6 +13660,12 @@ line_hmgk_v:       db "Yunooka: hmgk v", 0
 line_hmgk_bpm:     db " bpm ", 0
 line_hmgk_struct:  db " struct ", 0
 line_hmgk_pattern: db " pattern ", 0
+; 嵌入形态那一条用的三段文字。类型名与偏移各由 put_ident_kind 与 put_num64 打。
+; line_embed_inner 不能带前导空格：put_ident_kind 打的名字后面已经有一个空格，
+; 再加一个就会变成 "pe  hmgk" —— 而判据写的是单空格，那一格因此会红成「没扫到」。
+line_embed_main:    db "Yunooka: embed ", 0
+line_embed_inner:   db "hmgk at ", 0
+line_embed_missing: db " none", 0
 ; 别的系统的五个样本的路径。名字是 ASCII，所以码元就是它自己的字节。
 fs_pe_path: dw 0x03B1, 0x003A, 0x002F, 0x0070, 0x0065, 0x002E, 0x0062, 0x0069, 0x006E, 0
 fs_elf_path: dw 0x03B1, 0x003A, 0x002F, 0x0065, 0x006C, 0x0066, 0x002E, 0x0062, 0x0069, 0x006E, 0
@@ -13645,6 +13715,32 @@ samp_hmgk:
     dd 120500
     dw 4, 0
     times 28 db 0
+
+; 嵌入形态的样本：一个 PE 头，然后一份 hmgk 从偏移 256 开始。
+;
+; PE 那一段按 identify 要的定义造，不是按缩写：MZ 两字节，并且 offset 0x3C 那个 u32
+; 指着 PE 签名在 0x40。少一样它就答不出 pe，而那时这条判据红的理由会变成「外面那层
+; 不认识」，与内嵌那件事无关 —— 这正是两个断言要分开报的原因。
+;
+; hmgk 那一段与 samp_hmgk 的头同形（都是 36 字节），但 BPM 写成 90000 而不是 120500：
+; 这样两份样本不是互为副本，读错哪一份都看得出来。
+samp_embed_len equ 512
+samp_embed:
+    db 'M', 'Z'
+    times 0x3A db 0                ; 补到偏移 0x3C
+    dd 0x40                        ; e_lfanew：PE 签名在 0x40
+    dd 0x00004550                  ; 'P' 'E' 0 0
+    times (256 - 0x44) db 0        ; 补到偏移 256
+    db 'H', 'M', 'G', 'K'
+    dw 1
+    db 0, 0
+    dd 40
+    dd 24
+    dw 2, 1, 0
+    dw 3, 2, 5
+    dd 90000
+    dw 4, 0
+    times (512 - 256 - 36) db 0    ; 补到整整 512 字节
 
 samp_sqlite:
     db 'SQLite format 3', 0
