@@ -125,6 +125,26 @@ const vbox = (参数, 超时 = 120000) => spawnSync(VBox, 参数, { encoding: "u
 
 if (!fs.existsSync(盘)) 做不了("还没有 build/disk.vdi，先跑 node tools/build.mjs");
 
+// disk.vdi 必须比 disk.img 新 —— 否则说明 build 没有成功，而这一趟跑的是上一趟的盘。
+//
+// 这个坑踩过两次，而两次的症状都不是「build 失败」：build 因为某个数字对不上而拒绝
+// 收尾，run 照旧启动，读的是上一次留下的盘。上一次（第 77 轮）是一趟的盘上已经有
+// save 写过的东西，于是 run_save_test 走了「第二趟」那个分支，而判据红在写盘 ——
+// 一条与该错误毫无关系的判据上。查它花掉的时间比加这一句多得多。
+//
+// 比的就是两个文件的修改时间。build 每次先删再重建 vdi，所以正常情形下它一定更新；
+// 而它比 disk.img 旧的时候，只可能是那一次 build 半路停了。
+{
+  const 像 = path.join(建, "disk.img");
+  if (fs.existsSync(像)) {
+    const 盘时 = fs.statSync(盘).mtimeMs;
+    const 像时 = fs.statSync(像).mtimeMs;
+    if (盘时 < 像时)
+      做不了("disk.vdi 比 disk.img 旧 —— 上一次 build 没有成功，而这一趟会读到上一趟留下"
+        + "的盘。先跑 node tools/build.mjs，并看它的退出码");
+  }
+}
+
 // ---- 一、机器：没有就建，有就复用 ----
 const 册 = vbox(["list", "vms"]);
 if (册.status !== 0) 做不了("VBoxManage list vms 跑不动");
