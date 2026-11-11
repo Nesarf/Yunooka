@@ -780,6 +780,8 @@ long_entry:
     call run_program
     ; 同一份包里的第三个函数：算 40 + 2。上面那条是常量返回，这一条要走算术。
     call run_prog_sum_test
+    ; 第四个函数：画一个窗口。三层矩形，三种颜色。
+    call run_win_test
     ; Myon 的第二步：盘上那个只有三条指令的包，靠内置 write 把一段字打到串口。
     call run_myon_test
     call run_trap_test
@@ -3008,6 +3010,68 @@ run_prog_sum_test:
     ret
 .missing:
     mov rsi, line_prog_sum_bad
+    call puts64
+    ret
+
+; ======================================================================
+; 一个包画一个窗口
+; ======================================================================
+;
+; 上面那条 rect 证明的是「包能指定画在哪里」；这一条要的是「包能画出有结构的东西」——
+; 底色、标题栏、内容区，三层矩形落在一起。
+;
+; 而它也是 LAYERS 第六节第三条判据说的「Ichiwatashi 那一小块」最接近的一次：窗口碎片
+; 的形状就是三种颜色的关系，而不是一个盒子。
+;
+; 判据读三个点，各在一个区里：标题栏 (160,86)、内容区 (160,120)、底色左上 (60,80)。
+run_win_test:
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]
+    mov r8, fs_prog_name
+    mov r9, 9
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz .missing
+    mov rdi, r15
+    call fs_load
+    mov r14, rsi
+    mov [pkg_base], r14
+    mov rdi, name_win
+    mov r8, 3
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+    mov qword [pkg_base], 0x20000
+    mov rdi, 0xA0000
+    movzx r8d, byte [rdi + 27680]   ; (160, 86) 标题栏
+    movzx r9d, byte [rdi + 38560]   ; (160,120) 内容区
+    movzx r10d, byte [rdi + 25660]  ; (60, 80)  底色左上
+    mov rsi, line_win_px
+    call puts64
+    mov rax, r8
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, r9
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, r10
+    call put_hex64
+    call put_nl64
+    ret
+.missing:
+    mov rsi, line_win_bad
     call puts64
     ret
 
@@ -11529,6 +11593,9 @@ line_false_flat: db "false", 0
 fs_prog_name: dw 0x0070, 0x0072, 0x006F, 0x0067, 0x002E, 0x0068, 0x006D, 0x0074, 0x006E, 0
 name_main: dw 0x006D, 0x0061, 0x0069, 0x006E
 name_sum: dw 0x0073, 0x0075, 0x006D
+name_win: dw 0x0077, 0x0069, 0x006E
+line_win_px: db "Yunooka: win px ", 0
+line_win_bad: db "Yunooka: win missing", 13, 10, 0
 line_prog_sum: db "Yunooka: prog sum -> ", 0
 line_prog_sum_bad: db "Yunooka: prog sum missing", 13, 10, 0
 line_prog: db "Yunooka: prog main -> ", 0

@@ -381,7 +381,7 @@ const 回声串 = "myon here";
 const 程序包 = Buffer.alloc(512);
 程序包.write("HMYRB", 0, "latin1");
 程序包.writeUInt16LE(1, 5);       // 版本
-程序包.writeUInt16LE(3, 7);       // 三个函数
+程序包.writeUInt16LE(4, 7);       // 四个函数
 let 位 = 9;
 程序包.writeUInt16LE(4, 位); 位 += 2;                      // 名字长度
 for (const 字 of "main") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
@@ -459,6 +459,42 @@ for (const 字 of "sum") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 
 程序包[位++] = 1;
 程序包.writeDoubleLE(2.0, 位); 位 += 8;
 程序包[位++] = 0;                                           // 加
+程序包[位++] = 28;                                          // 返回
+
+// 第四个函数：win，画一个窗口的骨架。
+//
+// 这是 rect 的用处所在，也是 LAYERS 第六节第三条判据要的那一块：一个包画一个窗口 ——
+// 底色、标题栏、内容区，三层矩形。border 是一个盒子，而窗口是三种颜色的关系。
+//
+// 而它比 border 多证明一件事：一个包能画出「有结构的东西」，而不只是一个框。Ichiwatashi
+// 那边要的窗口碎片，形状就是这样。
+//
+// 坐标：320×200 的屏，窗口落在 (60,80) 到 (260,170)。
+const 窗口矩形 = [
+  [60, 80, 200, 90, 0x1F],   // 底色
+  [61, 81, 198, 12, 0x1C],   // 标题栏
+  [61, 94, 198, 75, 0x0F],   // 内容区
+];
+程序包.writeUInt16LE(3, 位); 位 += 2;
+for (const 字 of "win") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包.writeUInt16LE(0, 位); 位 += 2;                      // 参数量
+程序包.writeUInt16LE(0, 位); 位 += 2;                      // 槽数
+程序包.writeUInt16LE(0, 位); 位 += 2;                      // 效果数
+// 每个矩形六条指令：五个常量，加一次 rect 调用。三个矩形就是十八条 —— 而这里原先写的是
+// length * 2，于是包里只装了六条（第一个矩形的底色），后面的标题栏与内容区根本没有指令
+// 去画。症状是三个采样点都读到 0x1F：那不是 rect 坏了，是没人调用它第二次。
+程序包.writeUInt32LE(窗口矩形.length * 6, 位); 位 += 4;
+for (const r of 窗口矩形) {
+  for (const 值 of r) {
+    程序包[位++] = 5;
+    程序包[位++] = 1;
+    程序包.writeDoubleLE(值, 位); 位 += 8;
+  }
+  程序包[位++] = 3;
+  程序包.writeUInt16LE(4, 位); 位 += 2;
+  for (const 字 of "rect") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+  程序包.writeUInt16LE(5, 位); 位 += 2;
+}
 程序包[位++] = 28;                                          // 返回
 const 程序字节 = 程序包.subarray(0, 位);
 
