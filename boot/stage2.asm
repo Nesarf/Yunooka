@@ -2068,6 +2068,16 @@ find_fn_by_name:
     jae .skipdone
     cmp rbx, 10000
     ja .skipout
+    ; 诊断撤了，而它给出的两个数留在这里。
+    ;
+    ; 跳第一个函数体时，rsi 是 0x4301D —— 那正是 main 指令流的起点（0x43009 + 20），
+    ; 所以那一处是对的。而 r13 读成了 3，main 的指令数是 2。
+    ;
+    ; 两个数放在一起只说一件事：find_fn_by_name 的 .effed 那里读到的「指令数」不是这个
+    ; 函数的指令数。多读 1 条之后，跳过的字节数自然对不上 —— 而 27 那个差就出在这里。
+    ;
+    ; 下一轮查 .effed 那四行（名字长度、跳名字、加四、效果数、加二）对 prog.hmtn 的头
+    ; 到底算到了哪里。
     movzx eax, byte [rsi]
     inc rsi
     movzx eax, byte [imm_shape + rax]
@@ -11509,6 +11519,7 @@ imm_shape:
 line_letters: db "Yunooka: letters -> ", 0
 line_op_bad: db "Yunooka: scan op ", 0
 line_fn_dbg: db "Yunooka: fn at ", 0
+line_skip_dbg: db "Yunooka: skip at ", 0
 dbg_rsi: dq 0
 dbg_len: dq 0
 line_string: db "string ", 0

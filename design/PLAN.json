@@ -836,7 +836,7 @@
         "tools/build.mjs"
       ],
       "notes": "这一条才是「真正的 OS」的门槛：现在构建与验证都还要 Windows（nasm、node、VBoxManage），所以它的「能跑」有一半是借来的。 【移出 open】需要的条件：HMYR 编译器本身能在字节码里跑。现在能跑「一个包里的一个函数」（prog.hmtn 的 main 返回 7），而编译器是几万行 HMYR，并且它要读源文件、写目标文件 —— 那两件事要的对象模型与文件写入都还没有。这一条是整个工程的方向，不是下一块砖；把它写成 blocked 是为了让它别挡着路。\n\n【读那一侧】内置 slurp 落地：一参（路径，从 α:/ 后写起），返回文件内容成串。它补上了 self-host 的半个前置 —— 写入早就有，读在这之前只有 readline（读宿主那一行，不是文件）。\n一个位置坑：fs_open_path 用 rbx 交回字节数，而 rbx 在 exec 里是 pc，所以 slurp 里要先存再调。\n包里调用还断着：让 echo 读 docs/sub/deep.txt 会断在 readline 之前（myon here 之后什么都没有），所以调用撤了、内置留着。那不是返回值错，是执行流被带偏。记录在 design/LAYERS.txt。",
-      "state": "内置 slurp 落地（读一份文件成串）。包那侧的调用仍断着，而这一轮拿到一个具体的数：find_fn_by_name 里，main 的函数头读成 0x43009（对），跳过后 rsi 落在 0x43043，而正确的应是 0x43028 —— 差 27。27 不是指令体的倍数，所以「跳过少一条」这个解释对不上。下一轮在 .skip 循环里逐条打印 rsi。"
+      "state": "内置 slurp 落地。包那侧的调用仍断着，而这一轮把怀疑对象收窄到一个读头上：跳 main 时 rsi 起点对（0x4301D），而 r13（指令数）读成 3 —— main 实际是 2。多读一条之后跳过的字节数对不上，那个 27 就是从这儿来的。下一轮核对 find_fn_by_name 的 .effed 那几行与 build 写头的顺序。"
     },
     {
       "id": "resident",
