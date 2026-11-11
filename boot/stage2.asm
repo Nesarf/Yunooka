@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 132
+stage2_sectors equ 133
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -801,6 +801,8 @@ long_entry:
     call run_prog_sum_test
     ; 第四个函数：画一个窗口。三层矩形，三种颜色。
     call run_win_test
+    ; 窗口那一层到现在只有线与框。这一条让它能写字。
+    call run_glyph_test
     ; 第五个函数：读一个文件，返回它的字节数。
     call run_filesize_test
     ; 第六个函数：写一份文件，再读回来打出去。它要排在 dirfull 之前 —— 那一条会把
@@ -10033,6 +10035,114 @@ draw_line:
 ;
 ; 判据不靠眼睛：读回的字节说明「这条线上真的有像素」。截图那一层仍然留给人 ——
 ; 一条一像素宽的对角线在缩放的截图里本来就淡，让它承担自动判据是把脆弱当成了严谨。
+; 读一个像素。rdi = x，rsi = y，返回 rax（调色板索引，零扩展 —— 高位要干净，
+; 因为调用者会拿整只 rax 去打十六进制）。
+read_pixel:
+    push rbx
+    mov rax, rsi
+    imul rax, rax, 320
+    add rax, rdi
+    mov rbx, 0xA0000
+    add rbx, rax
+    movzx eax, byte [rbx]
+    pop rbx
+    ret
+
+; 把一块 8x8 抹成某个颜色。入参：rdi = x，rsi = y，dl = 颜色。
+;
+; 为什么要单独一段，而不是「画一份全零的位图」：位图里的 0 表示「这个像素不写」，
+; 所以全零位图画完什么也没发生 —— 那正是这里第一版的做法，而它让下面「该暗」那一点
+; 读到了前面测试留在屏幕上的 0x0F。用「画」来实现「擦」在单色位图上不成立，因为
+; 「不写」与「写背景色」是两件事，而位图表达的是前者。
+clear_block:
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push r8
+    mov r8b, dl                    ; 颜色挪到 r8，因为 rdx 马上要当地址用
+    xor rcx, rcx                   ; 行 0..7
+.row:
+    cmp rcx, 8
+    jae .done
+    xor rbx, rbx                   ; 列 0..7
+.col:
+    cmp rbx, 8
+    jae .next_row
+    mov rax, rcx
+    add rax, rsi                   ; y + 行
+    imul rax, rax, 320
+    add rax, rdi                   ; x
+    add rax, rbx                   ; + 列
+    mov rdx, 0xA0000
+    add rdx, rax
+    mov [rdx], r8b
+    inc rbx
+    jmp .col
+.next_row:
+    inc rcx
+    jmp .row
+.done:
+    pop r8
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    ret
+
+; 屏幕上写一个字母，判据读四个像素。
+;
+; 为什么到这一轮才做：屏幕上有过像素、线、框、矩形与整窗，但从没出现过一个字母。
+; 而「窗口那一层」若不能写字就不算窗口 —— 一份界面最先要能说人话。
+;
+; 判据的形状：把 H 铺在 (100, 60)，读四个点。
+;   (100,60) 与 (107,60) 该亮 —— H 的两竖，左端与右端各一个
+;   (101,60) 该暗 —— 两竖之间
+;   (100,64) 该亮 —— 中间那一横的左端
+; 四个点合起来证明三件事：位图读对了、列的方向没反（左端在左）、行也走对了。只读一个点
+; 亮不亮证明不了方向 —— 一个把最高位当成最右位的实现也能让某个点亮起来，而它写出来的
+; 字是镜像的。
+;
+; 先把这一小块抹成零：前面几条测试在同一片屏幕上画过线，而「暗」这个断言只有在背景
+; 确实为零时才有意义。抹的方式是画一份全零的位图 —— 复用同一个函数，不另写一段清屏。
+run_glyph_test:
+    mov rdi, 100
+    mov rsi, 60
+    xor dl, dl                     ; 抹成 0
+    call clear_block
+
+    mov rdi, 100
+    mov rsi, 60
+    lea rdx, [font_H]
+    mov r8b, 0x2F
+    call draw_glyph
+
+    mov rsi, line_glyph
+    call puts64
+    mov rdi, 100
+    mov rsi, 60
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 107
+    mov rsi, 60
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 101
+    mov rsi, 60
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 100
+    mov rsi, 64
+    call read_pixel
+    call put_hex64
+    jmp put_nl64
+
 run_line_test:
     mov r12, 0
     mov r13, 0
@@ -11236,6 +11346,68 @@ run_index_test:
 ; 为什么参数走内存：draw_line 自己要用 r12 到 r15（那是它的四个端点），所以四次调用之间
 ; 没有寄存器可以托付 x、y、w、h、颜色。这一份文件里「寄存器被吃掉」的教训已经有五条了，
 ; 这一条是同一族 —— 只是这次吃寄存器的是画线。
+; 把一份 8x8 位图铺到帧缓冲。
+;
+; 入参：rdi = 屏幕 x，rsi = 屏幕 y，rdx = 八个字节的位图（每字节一行，最高位在左边），
+;       r8b = 颜色。
+;
+; 为什么是 8x8 单色：帧缓冲是每像素一字节的调色板索引（320x200），所以一个字符就是
+; 「六十四次写或不写」。每行一字节、最高位对齐左边，比存六十四个字节省八倍，而「第几
+; 行第几列」这个关系在移位里是明摆着的 —— 左移 r11 位之后，原来第 (7-r11) 位到了最高位。
+;
+; 全部寄存器都保存：调用者是 exec，它用 r12 指指令流、r13 数指令数，而这两个不在这里的
+; 保存名单里 —— 也正因如此这一段不碰它们。draw_line 不保存 r12 到 r15（那是它的入参），
+; 所以调用它之前要自己存，而这一段只碰通用寄存器。
+draw_glyph:
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r9
+    push r10
+    push r11
+    xor r9, r9                     ; 行 0..7
+.row:
+    cmp r9, 8
+    jae .done
+    movzx r10, byte [rdx + r9]     ; 这一行的八个位
+    xor r11, r11                   ; 列 0..7
+.col:
+    cmp r11, 8
+    jae .next_row
+    mov rcx, r11                   ; 移位量要在 cl 里
+    mov rax, r10
+    shl rax, cl                    ; 把第 (7-列) 位顶到最高位
+    test rax, 0x80
+    jz .skip
+    mov rax, r9
+    add rax, rsi                   ; y + 行
+    imul rax, rax, 320
+    add rax, rdi                   ; x
+    add rax, r11                   ; + 列
+    mov rbx, 0xA0000
+    add rbx, rax
+    mov [rbx], r8b
+.skip:
+    inc r11
+    jmp .col
+.next_row:
+    inc r9
+    jmp .row
+.done:
+    pop r11
+    pop r10
+    pop r9
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    ret
+
 draw_rect:
     mov [rect_x], rdi
     mov [rect_y], rsi
@@ -13666,6 +13838,11 @@ line_hmgk_pattern: db " pattern ", 0
 line_embed_main:    db "Yunooka: embed ", 0
 line_embed_inner:   db "hmgk at ", 0
 line_embed_missing: db " none", 0
+; 8x8 位图那一份字模，以及它用到的两段文字。H 的中间那一横在第 4 行（从 0 起算），
+; 所以它的位图是「四行两竖、一行全亮、三行两竖」—— 判据读的那四个点各自的亮暗就来自这里。
+font_H:     db 0x81, 0x81, 0x81, 0x81, 0xFF, 0x81, 0x81, 0x81
+line_glyph: db "Yunooka: glyph ", 0
+line_space: db " ", 0
 ; 别的系统的五个样本的路径。名字是 ASCII，所以码元就是它自己的字节。
 fs_pe_path: dw 0x03B1, 0x003A, 0x002F, 0x0070, 0x0065, 0x002E, 0x0062, 0x0069, 0x006E, 0
 fs_elf_path: dw 0x03B1, 0x003A, 0x002F, 0x0065, 0x006C, 0x0066, 0x002E, 0x0062, 0x0069, 0x006E, 0
