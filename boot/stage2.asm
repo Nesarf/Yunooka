@@ -1382,23 +1382,44 @@ exec:
     ret
 
 .op_builtin:
-    ; 立即数与「调函数」同一个形状：名字在前，参数个数在后。
+    ; 立即数：名字（u16 长度 + 码元）再跟一个 u16 的参数个数。
     ;
-    ; 现在有两个：len 与 write。它们的形状一样，区别只在「做什么」—— 而这件事本身
-    ; 就是 Myon 那条判据的一半：一个包要能把一段字交给宿主去打，而它不必知道串口在
-    ; 哪个端口、也不必知道帧缓冲在哪。「出去的那一段字节」由宿主给，这就是宿主口。
+    ; 找处理者靠一张表，不是一条跳转链。上一版每加一个内置就要回头改上一个的失败出口，
+    ; 而同一个「忘了改」在一轮里犯了两次，症状都是 unknown builtin —— 那看起来像名字
+    ; 写错了，而不像「分派链少接了一段」。
+    ;
+    ; 表项三样：名字长度、名字指针、处理者。长度为零是表尾。加一个内置就是加一行数据，
+    ; 不动任何跳转 —— 而这一条正是这张表存在的全部理由。
     movzx r8d, word [rsi]
     lea rdi, [rsi + 2]
     lea rsi, [rsi + 2 + r8 * 2]
     movzx r14d, word [rsi]          ; 参数个数
-    cmp r8, 3
-    jne .try_write
-    cmp word [rdi], 0x006C          ; 'l'
-    jne .builtin_unknown
-    cmp word [rdi + 2], 0x0065      ; 'e'
-    jne .builtin_unknown
-    cmp word [rdi + 4], 0x006E      ; 'n'
-    jne .builtin_unknown
+    lea r9, [builtin_table]
+.bt_next:
+    mov rcx, [r9]
+    test rcx, rcx
+    jz .builtin_unknown
+    cmp rcx, r8
+    jne .bt_step
+    mov r10, [r9 + 8]
+    xor r11, r11
+.bt_cmp:
+    cmp r11, rcx
+    jae .bt_hit
+    mov ax, [rdi + r11 * 2]
+    cmp ax, [r10 + r11 * 2]
+    jne .bt_step
+    inc r11
+    jmp .bt_cmp
+.bt_hit:
+    mov rax, [r9 + 16]
+    jmp rax
+.bt_step:
+    add r9, 24
+    jmp .bt_next
+
+; len：一个参数，返回串的长度。
+.op_len:
     cmp r14, 1
     jne .builtin_unknown
     call pop_val
@@ -1410,19 +1431,7 @@ exec:
     inc rbx
     jmp .loop
 
-.try_write:
-    cmp r8, 5
-    jne .try_readline               ; 长度不是 5 不是错，只是不是 write
-    cmp word [rdi], 0x0077          ; 'w'
-    jne .builtin_unknown
-    cmp word [rdi + 2], 0x0072      ; 'r'
-    jne .builtin_unknown
-    cmp word [rdi + 4], 0x0069      ; 'i'
-    jne .builtin_unknown
-    cmp word [rdi + 6], 0x0074      ; 't'
-    jne .builtin_unknown
-    cmp word [rdi + 8], 0x0065      ; 'e'
-    jne .builtin_unknown
+.op_write:
     cmp r14, 1
     jne .builtin_unknown
     ; write：把那一串码元打出去，再换行。
@@ -1453,25 +1462,7 @@ exec:
     inc rbx
     jmp .loop
 
-.try_readline:
-    cmp r8, 8
-    jne .try_border                 ; 长度不是 8 不是错，只是不是 readline
-    cmp word [rdi], 0x0072          ; 'r'
-    jne .builtin_unknown
-    cmp word [rdi + 2], 0x0065      ; 'e'
-    jne .builtin_unknown
-    cmp word [rdi + 4], 0x0061      ; 'a'
-    jne .builtin_unknown
-    cmp word [rdi + 6], 0x0064      ; 'd'
-    jne .builtin_unknown
-    cmp word [rdi + 8], 0x006C      ; 'l'
-    jne .builtin_unknown
-    cmp word [rdi + 10], 0x0069     ; 'i'
-    jne .builtin_unknown
-    cmp word [rdi + 12], 0x006E     ; 'n'
-    jne .builtin_unknown
-    cmp word [rdi + 14], 0x0065     ; 'e'
-    jne .builtin_unknown
+.op_readline:
     cmp r14, 0
     jne .builtin_unknown
 
@@ -1514,21 +1505,7 @@ exec:
     inc rbx
     jmp .loop
 
-.try_border:
-    cmp r8, 6
-    jne .builtin_unknown
-    cmp word [rdi], 0x0062          ; 'b'
-    jne .builtin_unknown
-    cmp word [rdi + 2], 0x006F      ; 'o'
-    jne .builtin_unknown
-    cmp word [rdi + 4], 0x0072      ; 'r'
-    jne .builtin_unknown
-    cmp word [rdi + 6], 0x0064      ; 'd'
-    jne .builtin_unknown
-    cmp word [rdi + 8], 0x0065      ; 'e'
-    jne .builtin_unknown
-    cmp word [rdi + 10], 0x0072     ; 'r'
-    jne .builtin_unknown
+.op_border:
     cmp r14, 0
     jne .builtin_unknown
 
@@ -11159,6 +11136,36 @@ name_is_digit: dw 0x0069, 0x0073, 0x005F, 0x0064, 0x0069, 0x0067, 0x0069, 0x0074
 fs_myon_name: dw 0x006D
 fs_myon_path: dw 0x03B1, 0x003A, 0x002F, 0x0064, 0x006F, 0x0063, 0x0073, 0x002F, 0x006D, 0x0079, 0x006F, 0x006E, 0x002E, 0x0068, 0x006D, 0x0074, 0x006E, 0
 name_echo: dw 0x0065, 0x0063, 0x0068, 0x006F
+
+; ---- 内置表 ------------------------------------------------------------
+;
+; 表项三样：名字长度、名字指针、处理者。长度为零结束。
+;
+; 换成表之前的形状是一条跳转链 —— 每加一个内置都要回头改上一个的失败出口。那个错
+; 在一轮里犯了两次（readline 与 border 都因此没被试到），症状都是 unknown builtin，
+; 而那看起来像名字写错。表之后加一个内置就是加下面三行。
+;
+; 处理者用全名（exec.op_len 之类）引用：它们是 exec 的局部标签，而这里在数据段。
+bi_name_len: dw 0x006C, 0x0065, 0x006E
+bi_name_write: dw 0x0077, 0x0072, 0x0069, 0x0074, 0x0065
+bi_name_readline: dw 0x0072, 0x0065, 0x0061, 0x0064, 0x006C, 0x0069, 0x006E, 0x0065
+bi_name_border: dw 0x0062, 0x006F, 0x0072, 0x0064, 0x0065, 0x0072
+builtin_table:
+    dq 3
+    dq bi_name_len
+    dq exec.op_len
+    dq 5
+    dq bi_name_write
+    dq exec.op_write
+    dq 8
+    dq bi_name_readline
+    dq exec.op_readline
+    dq 6
+    dq bi_name_border
+    dq exec.op_border
+    dq 0
+    dq 0
+    dq 0
 
 ; 两个单字符串，形状与种子里的一样：u16 长度在前，码元在后。「索引」交出来的
 ; 也是这个形状 —— 所以这两份既是参数，也是「索引」的对照物。
