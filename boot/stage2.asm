@@ -26,6 +26,9 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
+; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
+; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
+; 起，而这个数管盘上第二段占到哪里。
 stage2_sectors equ 128
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
@@ -81,19 +84,19 @@ stage2:
     ; 就没有），于是第二批会从同一个位置重读。症状很绕：种子读进来了、魔数也对、
     ; 只有一个深处的字节不对（读到 29 而不是 19），因为那一段其实被第一段覆盖了。
     ;
-    ; 种子读到 0x20000 起，不是 0x8000 —— 第二段自己被加载在 0x7E00，32 扇区就是
-    ; 16 KB，铺到 0xBE00，而 0x8000 起的种子会把它覆盖成零。0x20000 在实模式 1 MB
+    ; 种子读到 0x70000 起，不是 0x8000 —— 第二段自己被加载在 0x7E00，32 扇区就是
+    ; 16 KB，铺到 0xBE00，而 0x8000 起的种子会把它覆盖成零。0x70000 在实模式 1 MB
     ; 之内，离得够远。
     mov dword [dap_lba], seed_lba
     mov word [dap_off], 0x0000
-    mov word [dap_seg], 0x2000
+    mov word [dap_seg], 0x7000
     mov word [dap_count], 64
     call read_batch
     jc .seed_fail
 
     mov dword [dap_lba], seed_lba + 64
     mov word [dap_off], 0x0000
-    mov word [dap_seg], 0x2800
+    mov word [dap_seg], 0x7800
     mov word [dap_count], 64
     call read_batch
     jc .seed_fail
@@ -102,22 +105,22 @@ stage2:
     ; 而 0x10000 是空的。主体搬到 0x10000 之后，这一批就把自己盖掉了，
     ; 而症状是「stage2 ok 之后没有下文」：种子读到一半，代码就没了。
     ;
-    ; 0x30000 那一段主体占不到（它从 0x10000 起、上限 0x20000），所以第三批能写在那里：
+    ; 0x30000 那一段主体占不到（它从 0x10000 起、上限 0x30000），所以第三批能写在那里：
     ; 18 个扇区铺到 0x32400，而预读区从 0x40000 起 —— 三段互不相撞。
     ;
-    ; 而 0x20000 到 0x30000 那 128 个扇区是种子的头一段，由加载器读（它读的两批各 64
+    ; 而 0x70000 到 0x30000 那 128 个扇区是种子的头一段，由加载器读（它读的两批各 64
     ; 个扇区正好铺满这 128 个）。两批加这一批，种子一共 146 个扇区 —— 而这条路上每一处
     ; 地址都是写死的，所以 design/MEMORY.txt 把整张图数了一遍。
     mov dword [dap_lba], seed_lba + 128
     mov word [dap_off], 0x0000
-    mov word [dap_seg], 0x3000
+    mov word [dap_seg], 0x8000
     mov word [dap_count], 18
     call read_batch
     jc .seed_fail
 
-    ; 魔数在 0x20000 起，所以用 es 指向它，与 ds 里的 seed_magic 比。
+    ; 魔数在 0x70000 起，所以用 es 指向它，与 ds 里的 seed_magic 比。
     push es
-    mov ax, 0x2000
+    mov ax, 0x7000
     mov es, ax
     xor di, di
     mov si, seed_magic
@@ -421,7 +424,7 @@ same:
     stc
     ret
 
-; 比较 ds:si 与 es:di 各 cx 字节。种子读在 0x20000 起，超出 ds 能指的偏移，
+; 比较 ds:si 与 es:di 各 cx 字节。种子读在 0x70000 起，超出 ds 能指的偏移，
 ; 所以那一侧用 es。相等清进位，不等置进位。
 same_es:
     push si
@@ -818,7 +821,7 @@ long_entry:
 ; 这里只碰前九个字节。能报出版本与函数数，就说明它读懂了种子的开头 —— 而那一行数字
 ; 是可以拿真实种子核对的（这一份是版本 1、202 个函数）。
 seed_header:
-    mov rsi, 0x20000
+    mov rsi, 0x70000
     movzx eax, word [rsi + 5]      ; 版本
     mov r12, rax
     movzx eax, word [rsi + 7]      ; 函数数
@@ -939,7 +942,7 @@ put_f64:
 ; 只碰第一个函数与它的第一条指令。再往下就要按立即数形状算长度，而那是「能执行
 ; 字节码」那一块的活，不是这一块的 —— 这里要证明的是「读得懂结构」。
 fn_probe:
-    mov rsi, 0x20000 + 9
+    mov rsi, 0x70000 + 9
 
     ; 名字：UTF-16，但函数名都是 ASCII，所以只取每字符的低字节
     movzx ecx, word [rsi]
@@ -1143,7 +1146,7 @@ run_and_report:
 ; 沿途要跳过每个函数的头与整条指令流 —— 而「跳过整条指令流」正是上一块做出来的
 ; skip_imm 的用处，所以这一段没有任何新东西，只是把它接到遍历上。
 find_fn:
-    mov rsi, 0x20000 + 9
+    mov rsi, 0x70000 + 9
     xor rbx, rbx
 .each:
     cmp rbx, r15
@@ -2250,7 +2253,7 @@ call_test:
     push r12                        ; 调用者的指令流
     push r13                        ; 调用者的指令数
 
-    mov r12, 0x20000 + 65950
+    mov r12, 0x70000 + 65950
     mov r13, 2
     mov qword [stack_top], 32
     mov qword [frame_sp], 0
@@ -2298,7 +2301,7 @@ call_report:
 ; rdi = 名字的 UTF-16 码元，r8 = 码元数，r15 = 模式（0 走完整张表 / 1 第一个就停）
 ; 回来 rax = 1 找到 / 0 没有，rsi = 指令流起点，r13 = 指令数。
 find_fn_by_name:
-    ; 从哪个包开始扫：读 pkg_base，不是写死 0x20000。种子只是「启动时就在那里的那个包」，
+    ; 从哪个包开始扫：读 pkg_base，不是写死 0x70000。种子只是「启动时就在那里的那个包」，
     ; 而盘上读进来的包住在别处 —— 同一段查找代码两处都用，靠这一个变量分。
     mov rsi, [pkg_base]
     add rsi, 9                     ; 头九个字节：HMYRB + 版本 u16 + 函数数 u16
@@ -2558,7 +2561,7 @@ is_digit_report_bad:
 ; 只活在实模式，所以这一段必须自己碰端口 —— 主通道 0x1F0 那一组，LBA28 的 PIO 读。
 ;
 ; 判据不是「读出来了」，而是「与 BIOS 读的是同一份」：种子已经由 int 0x13 读到
-; 0x20000，这里再用 ATA 读同一个扇区（LBA 33，种子在盘上的第一个扇区），
+; 0x70000，这里再用 ATA 读同一个扇区（LBA 33，种子在盘上的第一个扇区），
 ; 512 字节逐字节比。两条完全不同的路给出同样的字节，才说明这一段对。
 
 ; rdi = LBA，rsi = 目标缓冲区（512 字节）。进位清表示读到。
@@ -2951,7 +2954,7 @@ run_list_test:
     call exec
     mov r15, rax
     mov r14, rdx
-    mov qword [pkg_base], 0x20000
+    mov qword [pkg_base], 0x70000
     mov rsi, line_prog_list
     call puts64
     mov rax, r15
@@ -3020,7 +3023,7 @@ run_save_test:
     mov qword [frame_sp], 0
     xor rbx, rbx
     call exec
-    mov qword [pkg_base], 0x20000   ; 种子是默认的那个包
+    mov qword [pkg_base], 0x70000   ; 种子是默认的那个包
     ; 宿主自己查一次：包说它写成了，而目录里是不是真有那一条
     mov rdi, fs_save_path
     call fs_open_path
@@ -3622,7 +3625,7 @@ run_program:
     ; 结果先存进寄存器：恢复 pkg_base 那两句会用到 rax
     mov r15, rax
     mov r14, rdx
-    mov qword [pkg_base], 0x20000   ; 种子是默认的那个包，别让后面的测试读错地方
+    mov qword [pkg_base], 0x70000   ; 种子是默认的那个包，别让后面的测试读错地方
     mov rsi, line_prog
     call puts64
     mov rax, r15
@@ -3669,7 +3672,7 @@ run_prog_sum_test:
     call exec
     mov r15, rax
     mov r14, rdx
-    mov qword [pkg_base], 0x20000
+    mov qword [pkg_base], 0x70000
     mov rsi, line_prog_sum
     call puts64
     mov rax, r15
@@ -3720,7 +3723,7 @@ run_win_test:
     mov qword [frame_sp], 0
     xor rbx, rbx
     call exec
-    mov qword [pkg_base], 0x20000
+    mov qword [pkg_base], 0x70000
     mov rdi, 0xA0000
     movzx r8d, byte [rdi + 27680]   ; (160, 86) 标题栏
     movzx r9d, byte [rdi + 38560]   ; (160,120) 内容区
@@ -3782,7 +3785,7 @@ run_filesize_test:
     call exec
     mov r15, rax
     mov r14, rdx
-    mov qword [pkg_base], 0x20000
+    mov qword [pkg_base], 0x70000
     mov rsi, line_size
     call puts64
     mov rax, r15
@@ -3842,7 +3845,7 @@ run_myon_test:
     mov qword [frame_sp], 0
     xor rbx, rbx
     call exec
-    mov qword [pkg_base], 0x20000
+    mov qword [pkg_base], 0x70000
 
     ; 画完之后读几个点。三个位置都在框的四条边上，而它们之间隔着三百二十字节的步长 ——
     ; 所以这一条不只证明「有一个像素亮了」，还证明那个框的尺寸与位置是对的。
@@ -3880,12 +3883,12 @@ run_myon_test:
     call puts64
     ret
 .bad:
-    mov qword [pkg_base], 0x20000
+    mov qword [pkg_base], 0x70000
     mov rsi, line_myon_bad
     call puts64
     ret
 .nofn:
-    mov qword [pkg_base], 0x20000
+    mov qword [pkg_base], 0x70000
     mov rsi, line_myon_nofn
     call puts64
     ret
@@ -3924,7 +3927,7 @@ run_myon2_test:
     mov qword [frame_sp], 0
     xor rbx, rbx
     call exec
-    mov qword [pkg_base], 0x20000
+    mov qword [pkg_base], 0x70000
     mov rsi, line_myon2_ok
     call puts64
     ret
@@ -3947,22 +3950,22 @@ run_myon2_test:
     call puts64
     ret
 .bad:
-    mov qword [pkg_base], 0x20000
+    mov qword [pkg_base], 0x70000
     mov rsi, line_myon2_bad
     call puts64
     ret
 .nofn:
-    mov qword [pkg_base], 0x20000
+    mov qword [pkg_base], 0x70000
     mov rsi, line_myon2_nofn
     call puts64
     ret
 prog_bad:
-    mov qword [pkg_base], 0x20000
+    mov qword [pkg_base], 0x70000
     mov rsi, line_prog_bad
     call puts64
     ret
 prog_nomain:
-    mov qword [pkg_base], 0x20000
+    mov qword [pkg_base], 0x70000
     mov rsi, line_prog_nomain
     call puts64
     ret
@@ -4405,7 +4408,7 @@ run_ata_test:
     call ata_read
     jc ata_fail
     mov rsi, [ata_buf]
-    mov rdi, 0x20000
+    mov rdi, 0x70000
     mov rcx, 512
     repe cmpsb
     jne ata_differ
@@ -11899,7 +11902,7 @@ run_fn116:
     ; 算出来的确定位置。这里不走遍历：Map 会把重名折成一个，所以「第几个函数」在
     ; 两侧不是同一个数（这一侧按文件顺序数，node 那边给的是 121），而这一块只需要
     ; 一个确定的字节位置，不需要一个可能对不上的序号。
-    mov rsi, 0x20000 + 43920
+    mov rsi, 0x70000 + 43920
     mov r12, rsi
     mov r13, 11
     ; 参数进帧 0 的槽 0。「取」读的是槽区，不是运算栈 —— 所以这里直接写槽，
@@ -12457,9 +12460,9 @@ line_len: dq 0
 line_buf16: times 128 db 0
 ; Shift 有没有按着。表里只有小写与不用 Shift 的字符，所以它只用来把 = 变成 +。
 shift_state: db 0
-; 当前在扫哪一个包。种子的地址是 0x20000，而盘上读进来的包住在预读区里 ——
+; 当前在扫哪一个包。种子的地址是 0x70000，而盘上读进来的包住在预读区里 ——
 ; find_fn_by_name 靠这个变量就知道该从哪儿开始，不必写两份查找器。
-pkg_base: dq 0x20000
+pkg_base: dq 0x70000
 line_fs_open: db "Yunooka: open ", 0
 line_fs_arrow: db " -> ", 0
 line_fs_nofile: db "Yunooka: not found", 13, 10, 0
@@ -13335,7 +13338,7 @@ line_unknown_op: db "  unknown op ", 0
 line_got: db "Yunooka: fn116 returned", 13, 10, 0
 
 ; 分配器的游标。从 4 MB 起 —— 前 4 MB 已经被引导扇区、第二段、页表占着，种子在
-; 0x20000，而 4 MB 往上是干净且被页表映着的一片。dq 在 16 位段里只是数据定义，
+; 0x70000，而 4 MB 往上是干净且被页表映着的一片。dq 在 16 位段里只是数据定义，
 ; 与指令位宽无关。
 align 8
 heap_next: dq 0x400000
