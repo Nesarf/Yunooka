@@ -370,11 +370,38 @@ for (const 字 of "border") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); �
 程序包[位++] = 28;                                          // 返回
 const 程序字节 = 程序包.subarray(0, 位);
 
-// ---- 三·二·二、Myon 的回声函数 ----
+// ---- 三·二·二、第二个包：Myon 的回声 ----
 //
-// 上面那个块里已经把它写进去了（"echo"，三条指令）。它原来是一个独立的包，后来并进
-// prog.hmtn —— 根目录那一个扇区放不下第四条 29 字节的条目，而多函数本来就是包格式
-// 支持的东西。并进去之后它不占新扇区、不占新条目，也就没有新的布局要照顾。
+// prog.hmtn 里那个 echo 是「一个包里的第二个函数」。这一份是另一件事：一个**独立的**
+// 包，放在 docs 里，由路径查到。
+//
+// 为什么它值得单独一份：桥接要有两个包才谈得上，而 prog.hmtn 的两个函数共享一个包头、
+// 一个地址空间 —— 那不叫两个。这一份从盘上的另一条路径读进来，占另一块内存，跑自己的
+// 函数表。
+//
+// 放在 docs 而不是根目录，是因为根目录只有一个扇区、已经满了（加一条 29 字节的条目会让
+// 构建抛 RangeError，不是「少一条」）。而 docs 还有空间，fs_open_path 本来就能逐段查。
+const 回声包 = Buffer.alloc(128);
+回声包.write("HMYRB", 0, "latin1");
+回声包.writeUInt16LE(1, 5);
+回声包.writeUInt16LE(1, 7);
+let 回位 = 9;
+回声包.writeUInt16LE(4, 回位); 回位 += 2;
+for (const 字 of "echo") { 回声包.writeUInt16LE(字.charCodeAt(0), 回位); 回位 += 2; }
+回声包.writeUInt16LE(0, 回位); 回位 += 2;
+回声包.writeUInt16LE(0, 回位); 回位 += 2;
+回声包.writeUInt16LE(0, 回位); 回位 += 2;
+回声包.writeUInt32LE(3, 回位); 回位 += 4;
+回声包[回位++] = 5;
+回声包[回位++] = 2;
+回声包.writeUInt16LE(回声串.length, 回位); 回位 += 2;
+for (const 字 of 回声串) { 回声包.writeUInt16LE(字.charCodeAt(0), 回位); 回位 += 2; }
+回声包[回位++] = 3;
+回声包.writeUInt16LE(5, 回位); 回位 += 2;
+for (const 字 of "write") { 回声包.writeUInt16LE(字.charCodeAt(0), 回位); 回位 += 2; }
+回声包.writeUInt16LE(1, 回位); 回位 += 2;
+回声包[回位++] = 28;
+const 回声字节 = 回声包.subarray(0, 回位);
 
 // 一个改名成 hello.txt 的包。它的存在只为了一条判据：认一个文件是什么，要看内容，
 // 不看名字。没有它，「按魔数分析」与「按扩展名猜」在判据上分不开 —— 而分不开的那一对，
@@ -579,7 +606,8 @@ const 外五件 = [
 // auth.bin 排在五个样本之后，所以它不必把前面任何一份文件往后挪 —— 插入在中间的代价
 // 是那一段布局的每一个偏移都要重新对一遍，而它们各自都有一条判据指着。
 const auth起 = 外五起 + 外五件.length;
-const 最后一份扇区 = auth起;
+const myon起 = auth起 + 1;
+const 最后一份扇区 = myon起;
 
 const 示例扇区数 = Math.ceil(示例文件.length / 512) + Math.ceil(子文件.length / 512)
   + Math.ceil(命令文件.length / 512) + Math.ceil(求值输入.length / 512)
@@ -592,6 +620,7 @@ const 示例扇区数 = Math.ceil(示例文件.length / 512) + Math.ceil(子文�
   + 1                                     // 核心清单自己占一个扇区
   + 1                                     // SHA-256 清单（sign.bin）也占一个
   + 1                                     // 第三环的签名（auth.bin）
+  + 1                                     // 第二个包（docs/myon.hmtn）
   + 外五件.length;                        // 五个头部样本，每个一个扇区
 
 const 码元 = (s) => {
@@ -711,6 +740,7 @@ for (let i = 0; i < 外五件.length; i++) {
 const 子目录 = Buffer.alloc(512);
 let 子位 = 写条目(子目录, 0, "note.txt", 0, 数据起 + 1, 子文件.length);
 子位 = 写条目(子目录, 子位, "sub", 1, 子目录2号, 0);
+子位 = 写条目(子目录, 子位, "myon.hmtn", 0, myon起, 回声字节.length);
 
 const 子目录2 = Buffer.alloc(512);
 写条目(子目录2, 0, "deep.txt", 0, 深层文件起, 深层文件.length);
@@ -751,6 +781,7 @@ try {
   fs.writeSync(fd, 核心清单, 0, 512, 核心清单起 * 512);
   fs.writeSync(fd, 签名清单, 0, 512, 签名起 * 512);
   fs.writeSync(fd, 第三环签名, 0, 第三环签名.length, auth起 * 512);
+  fs.writeSync(fd, 回声字节, 0, 回声字节.length, myon起 * 512);
   for (let i = 0; i < 外五件.length; i++) {
     fs.writeSync(fd, 外五件[i][1], 0, 外五件[i][1].length, (外五起 + i) * 512);
   }

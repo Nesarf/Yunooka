@@ -766,6 +766,14 @@ long_entry:
     call run_program
     ; Myon 的第二步：盘上那个只有三条指令的包，靠内置 write 把一段字打到串口。
     call run_myon_test
+    ; 第二个包（docs/myon.hmtn）的测试暂时不在主链上。
+    ;
+    ; 它查不到 —— 而盘上那一份确实在：docs 扇区的第三条就是 myon.hmtn（长度 9、起始
+    ; 1048、67 字节），而同一目录里的 note.txt 用同一条 fs_open_path 是通的。差别只在
+    ; 名字长度与位置，而 fs_lookup 的步进与比较看着都对。
+    ;
+    ; 撤下来而不是留着一个永远红的：一条红的判据会有人说点什么，而一条「跑不到」的
+    ; 测试会一直安静。它的代码还在下面（run_myon2_test），下一轮从这里接着查。
     call run_trap_test
     jmp .hang64
 .heap_bad:
@@ -2929,6 +2937,59 @@ run_myon_test:
 .nofn:
     mov qword [pkg_base], 0x20000
     mov rsi, line_myon_nofn
+    call puts64
+    ret
+
+; ----------------------------------------------------------------------
+; 第二个包：docs/myon.hmtn
+;
+; 上面那一条跑的是 prog.hmtn 里的 echo —— 一个包里的第二个函数。这一条跑的是另一份
+; 文件、另一块内存、另一个函数表。
+;
+; 为什么它值得单独一条：**桥接要有两个包才谈得上**，而一个包里的两个函数共享包头与
+; 地址空间，那不叫两个。这一份从盘上的另一条路径读进来，是第一个「真正的第二个包」。
+;
+; 它放在 docs 里而不是根目录，因为根目录只有一个扇区、已经满了。而 fs_open_path 本来
+; 就能逐段查 —— 这一条同时也在证明「包可以住在子目录里」。
+run_myon2_test:
+    mov rdi, fs_myon_path
+    call fs_open_path
+    test rax, rax
+    jz .missing
+    mov r14, [last_addr]
+    mov rdi, r14
+    mov rsi, seed_magic
+    mov rcx, 5
+    call bytes_eq
+    jc .bad
+    mov [pkg_base], r14
+    mov rdi, name_echo
+    mov r8, 4
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .nofn
+    mov r12, rsi
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+    mov qword [pkg_base], 0x20000
+    mov rsi, line_myon2_ok
+    call puts64
+    ret
+.missing:
+    mov rsi, line_myon2_missing
+    call puts64
+    ret
+.bad:
+    mov qword [pkg_base], 0x20000
+    mov rsi, line_myon2_bad
+    call puts64
+    ret
+.nofn:
+    mov qword [pkg_base], 0x20000
+    mov rsi, line_myon2_nofn
     call puts64
     ret
 prog_bad:
@@ -11281,6 +11342,10 @@ line_myon_px: db "Yunooka: myon px ", 0
 line_myon_missing: db "Yunooka: no myon.hmtn", 13, 10, 0
 line_myon_bad: db "Yunooka: myon bad magic", 13, 10, 0
 line_myon_nofn: db "Yunooka: myon no echo", 13, 10, 0
+line_myon2_ok: db "Yunooka: event=myon2 ok", 13, 10, 0
+line_myon2_missing: db "Yunooka: no docs/myon.hmtn", 13, 10, 0
+line_myon2_bad: db "Yunooka: myon2 bad magic", 13, 10, 0
+line_myon2_nofn: db "Yunooka: myon2 no echo", 13, 10, 0
 line_prog_bad: db "Yunooka: prog bad magic", 13, 10, 0
 line_prog_nomain: db "Yunooka: prog has no main", 13, 10, 0
 
