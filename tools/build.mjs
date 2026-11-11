@@ -482,20 +482,31 @@ const 签名起 = 核心清单起 + 1;
 // 清单自己有没有被动过。而 sign.bin 本身也会被一起重算 —— 下决心的人可以把两份一起
 // 改对。第三环挡的是这一手：对 sign.bin 的内容签一次名，公钥内嵌在第二段里。
 //
-// 用的是 RFC 8032 第 7.1 节第一条向量给的种子。它是公开的，所以这里的签名只能证明
-// 「这条链接得通」，不能证明「谁签的」—— 生产上要换成一对没人贴过网的密钥，而那只是
-// 换两个常量，不是改设计。
+// 种子在 keys/onlysign.seed（三十二字节）。它不存在的时候用 RFC 8032 第 7.1 节第一条
+// 向量给的那一颗 —— 那一颗是公开的，所以那种情况下的签名只能证明「这条链接得通」，
+// 不能证明「谁签的」。
 //
-// 签名覆盖的是 签位 个字节，不是整个 512 字节的缓冲区：盘上那条目的长度就是 签位，
-// 而固件读到的也正是那么多。多签四十九个零是小事，但它会让「文件内容」与「被签的
-// 内容」从此有两个定义，而这两个定义总有一天会分家。
-const 第三环种子 = Buffer.from(
-  "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60", "hex");
-const 第三环期望公钥 = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+// 公钥不是秘密：它写进 boot/pubkey.inc，跟着源码走。而 build 每次都核对一遍 —— 种子换过
+// 而 inc 没跟着换的时候，这里的检查会让构建停下来，而不是让盘上出现一个「签名对不上」
+// 的谜。那正是这一轮要解决的东西：在这之前，公钥是三十二个写死在 stage2 里的字节，
+// 而「换密钥」意味着去源码里改它们 —— 一处改错，症状是验签不过。
+const 种子路径 = path.join(ROOT, "keys", "onlysign.seed");
+const 用测试种子 = !fs.existsSync(种子路径);
+const 第三环种子 = 用测试种子
+  ? Buffer.from("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60", "hex")
+  : fs.readFileSync(种子路径);
+if (第三环种子.length !== 32) 失败("keys/onlysign.seed 应当是 32 字节，实际 " + 第三环种子.length);
 const 第三环签 = edSign(new Uint8Array(第三环种子), 签名清单.subarray(0, 签位));
-if (edHex(第三环签.publicKey) !== 第三环期望公钥) {
-  失败("第三环的公钥与第二段里那个常量对不上：" + edHex(第三环签.publicKey)
-    + " —— 换种子就要同时换 stage2.asm 里那三十二个字节");
+const 派生公钥 = Buffer.from(第三环签.publicKey);
+const 记录公钥 = Buffer.from(
+  fs.readFileSync(path.join(ROOT, "boot", "pubkey.inc"), "utf8")
+    .split("\n")
+    .filter((l) => l.trim().startsWith("db "))
+    .flatMap((l) => l.replace("db ", "").split(",").map((x) => parseInt(x.trim(), 16))),
+);
+if (!记录公钥.equals(派生公钥)) {
+  失败("boot/pubkey.inc 与种子派生出来的公钥不一致 —— 种子换过就要让它跟着换。新公钥是：\n  "
+    + [...派生公钥].map((b) => "0x" + b.toString(16).toUpperCase().padStart(2, "0")).join(", "));
 }
 const 第三环签名 = Buffer.from(第三环签.signature);
 
