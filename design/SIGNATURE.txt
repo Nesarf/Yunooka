@@ -11,15 +11,15 @@ Yunooka 的签名匹配（Nanodesu 与 Torikago 的素材从哪来）
   Torikago       E:\~Sayori~Sleeping~\Torikago     静态分诊；Nanodesu 在 nanodesu-release
 
 库的实测体量：main.cvd 89 MB、daily.cld 86 MB、bytecode.cvd 0.3 MB，加载后 3,628,164 条
-签名。那三个文件是**打包格式**（压缩 + 签名），不是能直接读的文本。
+签名。那三个文件是打包格式（压缩 + 签名），不是能直接读的文本。
 
 二、所以「训练」在 Yunooka 上是什么
 
 它首先不是神经网络。ClamAV 的库是签名——一段十六进制、一个偏移、一个名字；YARA 的规则是
-文本——字符串、条件、名字。两者都是**数据加匹配**，不是梯度下降。
+文本——字符串、条件、名字。两者都是数据加匹配，不是梯度下降。
 
-所以「把 ClamAV 的素材拿进去训练」在这台机器上的意思，应当读成：**把签名的形状搬进来，
-让机器学会照着它比字节**。这一层做对了，往后换成谁的库都只是换数据。
+所以「把 ClamAV 的素材拿进去训练」在这台机器上的意思，应当读成：把签名的形状搬进来，
+让机器学会照着它比字节。这一层做对了，往后换成谁的库都只是换数据。
 
 三、哪一种素材能直接进来
 
@@ -32,7 +32,7 @@ Yunooka 的签名匹配（Nanodesu 与 Torikago 的素材从哪来）
   .yar          YARA 规则，文本；条件部分要一个解释器，字符串部分不需要
   测试串        EICAR——它是一段公开的、专为测杀毒软件而造的字符串，不是恶意代码
 
-第一批素材因此用 EICAR 与自造的 ndb 行。理由不是它简单，是它**合法且可核对**：一段
+第一批素材因此用 EICAR 与自造的 ndb 行。理由不是它简单，是它合法且可核对：一段
 打印得出来的串，命不命中当场看得见。
 
 四、第一步：固定偏移的十六进制匹配
@@ -51,12 +51,12 @@ Yunooka 的签名匹配（Nanodesu 与 Torikago 的素材从哪来）
   vault       sample_vault.py —— 加密 zip（pyzipper），只写一份副本，原件不动
   handoff     --handoff defender|clamav —— 把样本「递过去」，判定逐字标注是别人的
 
-而 Torikago 有一条比这三层更硬的约束，写在它的 argparse 描述里：**Never runs the target**，
+而 Torikago 有一条比这三层更硬的约束，写在它的 argparse 描述里：Never runs the target，
 并且有 test/test_never_executes.py 把这条变成带断言的红线（按作用域解析每个 spawn 调用的
 argv[0]，只允许已知工具）。任何「要执行目标才能工作」的工具与这条直接冲突 ——
 EXTERNAL_TOOLS.md 那张三十条的表，大部分结论都是因为这个而写「不需要」。
 
-它对 Yunooka 的直接影响是一条：**样本本体不进盘**。本机 Torikago 的规矩是
+它对 Yunooka 的直接影响是一条：样本本体不进盘。本机 Torikago 的规矩是
 「corpus 收下身份、vault 封住、quarantine 只是复制」，而「搬移」这件事它不做。所以
 Yunooka 这一侧同样只带签名与事实，不带样本 —— 而 EICAR 之所以能进，正因为它不是样本，
 是一段公开的测试串。
