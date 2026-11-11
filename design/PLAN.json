@@ -836,7 +836,7 @@
         "tools/build.mjs"
       ],
       "notes": "这一条才是「真正的 OS」的门槛：现在构建与验证都还要 Windows（nasm、node、VBoxManage），所以它的「能跑」有一半是借来的。 【移出 open】需要的条件：HMYR 编译器本身能在字节码里跑。现在能跑「一个包里的一个函数」（prog.hmtn 的 main 返回 7），而编译器是几万行 HMYR，并且它要读源文件、写目标文件 —— 那两件事要的对象模型与文件写入都还没有。这一条是整个工程的方向，不是下一块砖；把它写成 blocked 是为了让它别挡着路。\n\n【读那一侧】内置 slurp 落地：一参（路径，从 α:/ 后写起），返回文件内容成串。它补上了 self-host 的半个前置 —— 写入早就有，读在这之前只有 readline（读宿主那一行，不是文件）。\n一个位置坑：fs_open_path 用 rbx 交回字节数，而 rbx 在 exec 里是 pc，所以 slurp 里要先存再调。\n包里调用还断着：让 echo 读 docs/sub/deep.txt 会断在 readline 之前（myon here 之后什么都没有），所以调用撤了、内置留着。那不是返回值错，是执行流被带偏。记录在 design/LAYERS.txt。",
-      "state": "内置 slurp 落地。包那侧的调用仍断着，而前两轮那个「差 27」是一个误判：我用的 0x43xxx 是 docs/myon.hmtn 的地址（第 1048 扇区），而 prog.hmtn 在 0x41000（第 1032 扇区）。按 myon.hmtn 重算，find_fn_by_name 一切正常。真的问题只剩 scan op 100 —— 扫 prog.hmtn 找第四个函数时要跳过 19 条，下一轮看那 19 条。"
+      "state": "内置 slurp 落地。包那侧的调用仍断着。用正确地址（0x41000）之后，跳过 main(2) + echo(13) + sum(4) 这十九条全部对得上，所以 find_fn_by_name 在前三个函数上是干净的。而 win 的体共 21 条、总长应 0x101，最后一条该在 0x41221，实际落在 0x41205 —— 差 28。下一轮在第十八条之后那一段找。"
     },
     {
       "id": "resident",
