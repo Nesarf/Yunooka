@@ -2015,6 +2015,15 @@ find_fn_by_name:
 .each:
     cmp rbx, 400                   ; 函数数不会超过这个数；越界就说没找到，不长跑
     ja .done
+    ; 诊断撤了，而它给出的数留在这里 —— 那是这一轮唯一的产出。
+    ;
+    ; prog.hmtn 的头五个函数头位置：第一个读成 0x43009（名字长度 4，正是 main），而
+    ; 跳过 main 的体之后 rsi 落在 0x43043，名字长度 0。而 main 的指令体只有 11 个字节：
+    ; 常量 7（1 + 1 + 8）加返回（1）。所以正确的下一个函数头是 0x43009 + 20 + 11 =
+    ; 0x43028，而它落在 0x43043 —— 差了 27。
+    ;
+    ; 27 不是 11 的倍数，也不是函数头的长度。所以更可能不是「跳过算错」，而是「读第二个
+    ; 函数头时 rsi 已经从别处来过」—— 下一轮要在 .skip 循环里逐条打印 rsi 才知道。
     mov rbp, rsi                   ; 本函数头的起点 —— 稍后回头比名字
     movzx ecx, word [rsi]
     lea rsi, [rsi + 2 + rcx * 2]   ; 跳过名字
@@ -11499,6 +11508,9 @@ imm_shape:
 
 line_letters: db "Yunooka: letters -> ", 0
 line_op_bad: db "Yunooka: scan op ", 0
+line_fn_dbg: db "Yunooka: fn at ", 0
+dbg_rsi: dq 0
+dbg_len: dq 0
 line_string: db "string ", 0
 line_number: db "number", 13, 10, 0
 line_bool: db "bool", 13, 10, 0
