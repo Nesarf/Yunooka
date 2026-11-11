@@ -2305,11 +2305,65 @@ run_shell:
     jmp .echo
 .echo_end:
     call put_nl64
+
+    ; 切出第一个词，按「词长 + 词」分派。
+    ;
+    ; 以前这里是拿前五个字节与 "files" 比 —— 于是 "filesx" 也会被当成 files，而
+    ; 「一行只认一个词、只回一行」那句话就是这样落在代码里的。切成「词 + 其余」之后，
+    ; 多一个词只是多一个分支，而参数就在「其余」里。
+    mov rdi, r14
+    xor ecx, ecx
+.split:
+    mov al, [rdi + rcx]
+    test al, al
+    jz .split_done
+    cmp al, 10
+    je .split_done
+    cmp al, ' '
+    je .split_done
+    inc rcx
+    jmp .split
+.split_done:
+    mov [sh_wordlen], rcx
+
+    cmp qword [sh_wordlen], 5
+    jne .try_echo
     mov rdi, r14
     mov rsi, fs_cmd_files
     mov rcx, 5
     call bytes_eq
+    jc .try_echo
+    jmp .do_files
+
+.try_echo:
+    cmp qword [sh_wordlen], 4
+    jne shell_unknown
+    mov rdi, r14
+    mov rsi, fs_cmd_echo
+    mov rcx, 4
+    call bytes_eq
     jc shell_unknown
+
+    ; echo：把第一个空格之后的全部原样打回来。
+    ;
+    ; 它看着比 files 简单，而它证明的是另一件事：这一行不只有「一个词」，还有「词之后
+    ; 的部分」，而那一段是参数。Myon 作为宿主口的第一步就是它 —— 一个包要能收到一整行
+    ; 字，而不是一个命令名。
+    mov rsi, r14
+    add rsi, 4
+    cmp byte [rsi], ' '
+    jne .ec
+    inc rsi
+.ec:
+    lodsb
+    test al, al
+    jz .done
+    cmp al, 10
+    je .done
+    call putc64
+    jmp .ec
+
+.do_files:
     ; files：把根目录里的名字逐个打出来
     mov rdi, 1024
     call fs_load
@@ -11734,6 +11788,8 @@ const_100: dq 0x4059000000000000
 ; 而比较那一步按字节比。
 fs_cmd_name: dw 0x0063, 0x006D, 0x0064, 0x002E, 0x0074, 0x0078, 0x0074, 0
 fs_cmd_files: db "files"
+fs_cmd_echo: db "echo"
+sh_wordlen: dq 0
 line_shell_prompt: db "Yunooka: shell> ", 0
 ; 输入从哪来。这两行不是装饰：只打 files 的答案，看不出那句话是信箱里的还是盘上的，
 ; 而这两件事的成败完全不同。
