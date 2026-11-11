@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 123
+stage2_sectors equ 125
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -784,6 +784,9 @@ long_entry:
     call run_win_test
     ; 第五个函数：读一个文件，返回它的字节数。
     call run_filesize_test
+    ; 第六个函数：写一份文件，再读回来打出去。它要排在 dirfull 之前 —— 那一条会把
+    ; 根目录占满，之后写什么都进不去。
+    call run_save_test
     ; Myon 的第二步：盘上那个只有三条指令的包，靠内置 write 把一段字打到串口。
     call run_myon_test
     ; 目录写满：该拒绝，而且不许吃掉邻居。排在最后，因为它会把根目录占满。
@@ -1687,6 +1690,69 @@ exec:
     call puts64
     call put_nl64
     jmp .none
+
+.op_save:
+    ; 两参：名字（串，不带路径）、内容（串）。回来一个数：1 写成 / 0 没写成。
+    ;
+    ; 与 slurp 对称：那边把字节摊成码元，这边把码元压回字节。文件是按字节计的，而包里的
+    ; 串是 UTF-16，所以两边各做一次同一个近似 —— 非 ASCII 会走样，而这一版没有编码表。
+    ; 那个限制只该记住一处，所以这里不另立一套规矩。
+    ;
+    ; 名字不带路径：fs_write_file 只会往根目录追加条目，它还不认子目录。让接口先长成实现
+    ; 做得到的样子，比让包以为它能写任何地方好 —— 后者失败的时候，包会以为是自己写错了。
+    ;
+    ; 返回 1 或 0，不返回字节数：字节数在失败时也有值（它本来要写那么多），拿它当成功
+    ; 标志会把「没写成」读成「写成了」。
+    cmp r14, 2
+    jne .builtin_unknown
+    call pop_val                    ; 内容（最后一个参数在栈顶）
+    mov rsi, rdx
+    movzx ecx, word [rsi]           ; 码元数
+    cmp rcx, 511
+    ja .save_fail
+    lea rdi, [save_buf]
+    xor r8, r8
+.save_body:
+    cmp r8, rcx
+    jae .save_copied
+    mov ax, [rsi + 2 + r8 * 2]
+    mov [rdi + r8], al              ; 低字节，与 slurp 的读取对称
+    inc r8
+    jmp .save_body
+.save_copied:
+    mov [save_len], rcx
+    call pop_val                    ; 名字
+    mov rsi, rdx
+    movzx ecx, word [rsi]
+    cmp rcx, 64
+    ja .save_fail
+    lea rdi, [save_name]
+    xor r8, r8
+.save_nbody:
+    cmp r8, rcx
+    jae .save_ndone
+    mov ax, [rsi + 2 + r8 * 2]
+    mov [rdi + r8 * 2], ax
+    inc r8
+    jmp .save_nbody
+.save_ndone:
+    mov word [rdi + rcx * 2], 0     ; fs_write_file 要的是以零码元收尾的名字
+    mov rdi, save_name
+    lea rsi, [save_buf]
+    mov rcx, [save_len]
+    call fs_write_file              ; 它自己 push/pop 了 rbx，所以 exec 的 pc 不用外面保
+    test rax, rax
+    jz .save_zero
+    mov rdx, 0x3FF0000000000000     ; 1.0
+    jmp .save_put
+.save_zero:
+.save_fail:
+    xor edx, edx                    ; 0.0 的位模式是全零
+.save_put:
+    mov rax, 1                      ; 种类：数
+    call push_val
+    inc rbx
+    jmp .loop
 
 .op_slurp:
     ; 一个参数：路径（从 α:/ 之后的部分，UTF-16 码元）。返回那一份文件的内容，成一个串。
@@ -2665,6 +2731,67 @@ idt_common:
 ;
 ; 选 ud2 而不是除零：除零的结果依赖浮点环境（x87 与 SSE 的处理不同），而未定义指令
 ; 在任何 CPU 上都只有一个答案。判据要的是一个不会漂的数。
+; ======================================================================
+; 包往文件系统里放东西，再自己读回来
+; ======================================================================
+;
+; 上面五样都只往一个方向走：执行、算术、读、画。这一条是包第一次写 —— 而它自己把写进去
+; 的读回来，所以「写」与「读」两半都在这一行里。
+;
+; 而包自己的读回不足以证明写成功：两半各错一半恰好抵消也是可能的。所以宿主随后独立查
+; 一次目录，那一步不吃包里任何东西。两条都成立才算数 —— 包说写成了，并且目录里真的有。
+run_save_test:
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]
+    mov r8, fs_prog_name
+    mov r9, 9                       ; "prog.hmtn"
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz .missing
+    mov rdi, r15
+    call fs_load
+    mov r14, rsi
+    mov [pkg_base], r14
+    mov rdi, name_savetest
+    mov r8, 8
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+    mov qword [pkg_base], 0x20000   ; 种子是默认的那个包
+    ; 宿主自己查一次：包说它写成了，而目录里是不是真有那一条
+    mov rdi, fs_save_path
+    call fs_open_path
+    test rax, rax
+    jz .lost
+    mov rsi, line_save_ok
+    call puts64
+    mov rax, r15
+    call put_num64
+    mov al, ' '
+    call putc64
+    mov rax, rbx
+    call put_num64
+    call put_nl64
+    ret
+.lost:
+    mov rsi, line_save_lost
+    call puts64
+    ret
+.missing:
+    mov rsi, line_save_missing
+    call puts64
+    ret
+
 ; ======================================================================
 ; 目录写满：该拒绝，而且不许吃掉邻居
 ; ======================================================================
@@ -11803,6 +11930,16 @@ slurp_path: times 520 dw 0
 slurp_dbg: dq 0
 line_slurp_miss: db "Yunooka: slurp miss at ", 0
 slurp_buf: times 520 db 0
+; save 内置用的两块缓冲：名字（去掉长度前缀、以零码元收尾）与内容（码元压成字节）。
+save_buf: times 512 db 0
+save_name: times 132 dw 0
+save_len: dq 0
+; 包写出来的那一份，用完整路径再查一次。
+fs_save_path: dw 0x03B1, 0x003A, 0x002F, 0x006F, 0x0075, 0x0074, 0x002E, 0x0074, 0x0078, 0x0074, 0
+name_savetest: dw 0x0073, 0x0061, 0x0076, 0x0065, 0x0074, 0x0065, 0x0073, 0x0074
+line_save_ok: db "Yunooka: save out.txt ", 0
+line_save_lost: db "Yunooka: save out.txt lost", 13, 10, 0
+line_save_missing: db "Yunooka: save missing", 13, 10, 0
 dirfull_ok: dq 0
 dirfull_no: dq 0
 fs_full_name: times 8 dw 0
@@ -11829,6 +11966,7 @@ bi_name_border: dw 0x0062, 0x006F, 0x0072, 0x0064, 0x0065, 0x0072
 bi_name_runpkg: dw 0x0072, 0x0075, 0x006E, 0x0070, 0x006B, 0x0067
 bi_name_rect: dw 0x0072, 0x0065, 0x0063, 0x0074
 bi_name_slurp: dw 0x0073, 0x006C, 0x0075, 0x0072, 0x0070
+bi_name_save: dw 0x0073, 0x0061, 0x0076, 0x0065
 builtin_table:
     dq 3
     dq bi_name_len
@@ -11851,6 +11989,9 @@ builtin_table:
     dq 5
     dq bi_name_slurp
     dq exec.op_slurp
+    dq 4
+    dq bi_name_save
+    dq exec.op_save
     dq 0
     dq 0
     dq 0

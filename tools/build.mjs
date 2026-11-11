@@ -398,7 +398,7 @@ const 回声串 = "myon here";
 const 程序包 = Buffer.alloc(1024);
 程序包.write("HMYRB", 0, "latin1");
 程序包.writeUInt16LE(1, 5);       // 版本
-程序包.writeUInt16LE(5, 7);       // 五个函数
+程序包.writeUInt16LE(6, 7);       // 六个函数
 let 位 = 9;
 程序包.writeUInt16LE(4, 位); 位 += 2;                      // 名字长度
 for (const 字 of "main") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
@@ -634,6 +634,47 @@ for (const 字 of "slurp") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); �
 程序包.writeUInt16LE(3, 位); 位 += 2;
 for (const 字 of "len") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
 程序包.writeUInt16LE(1, 位); 位 += 2;                      // 一参
+程序包[位++] = 28;                                          // 返回
+
+// 第六个函数：写一份文件，再读回来打出去。
+//
+// 前面五样都只往一个方向走 —— 执行、算术、读、画。这一条是包第一次往文件系统里放东西，
+// 而它自己把「放进去的」读回来：写和读如果各错一半、恰好抵消，它还过得去；但宿主随后
+// 独立查一次目录（run_save_test 那一侧），那一步不吃包里的任何东西。
+//
+// 八条：常量（名字）、常量（内容）、save、丢掉返回值、常量（名字）、slurp、write、返回。
+// 名字写两遍，是因为这一版的包没有局部变量 —— 常量是唯一能重复取用的东西。
+程序包.writeUInt16LE(8, 位); 位 += 2;                      // 名字长度
+for (const 字 of "savetest") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包.writeUInt16LE(0, 位); 位 += 2;                      // 参数量
+程序包.writeUInt16LE(0, 位); 位 += 2;                      // 槽数
+程序包.writeUInt16LE(0, 位); 位 += 2;                      // 效果数
+程序包.writeUInt32LE(8, 位); 位 += 4;                      // 八条指令
+程序包[位++] = 5;                                           // 常量：名字
+程序包[位++] = 2;
+程序包.writeUInt16LE(7, 位); 位 += 2;
+for (const 字 of "out.txt") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包[位++] = 5;                                           // 常量：内容
+程序包[位++] = 2;
+程序包.writeUInt16LE(28, 位); 位 += 2;
+for (const 字 of "Yunooka wrote from a package") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包[位++] = 3;                                           // 调内置 save（两参）
+程序包.writeUInt16LE(4, 位); 位 += 2;
+for (const 字 of "save") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包.writeUInt16LE(2, 位); 位 += 2;
+程序包[位++] = 26;                                          // 丢掉返回值
+程序包[位++] = 5;                                           // 常量：名字，再来一次
+程序包[位++] = 2;
+程序包.writeUInt16LE(7, 位); 位 += 2;
+for (const 字 of "out.txt") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包[位++] = 3;                                           // 调内置 slurp（一参）
+程序包.writeUInt16LE(5, 位); 位 += 2;
+for (const 字 of "slurp") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包.writeUInt16LE(1, 位); 位 += 2;
+程序包[位++] = 3;                                           // 调内置 write（一参）
+程序包.writeUInt16LE(5, 位); 位 += 2;
+for (const 字 of "write") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包.writeUInt16LE(1, 位); 位 += 2;
 程序包[位++] = 28;                                          // 返回
 const 程序字节 = 程序包.subarray(0, 位);
 
