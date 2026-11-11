@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 126
+stage2_sectors equ 127
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -787,6 +787,8 @@ long_entry:
     ; 第六个函数：写一份文件，再读回来打出去。它要排在 dirfull 之前 —— 那一条会把
     ; 根目录占满，之后写什么都进不去。
     call run_save_test
+    ; 第七个函数：数一个目录里有几个名字。
+    call run_list_test
     ; Myon 的第二步：盘上那个只有三条指令的包，靠内置 write 把一段字打到串口。
     call run_myon_test
     ; 目录写满：该拒绝，而且不许吃掉邻居。排在最后，因为它会把根目录占满。
@@ -1690,6 +1692,95 @@ exec:
     call puts64
     call put_nl64
     jmp .none
+
+.op_list:
+    ; 一参：目录路径（可以是空串 —— 那就是根目录）。回来一个串，名字之间一个空格、
+    ; 末尾也一个。
+    ;
+    ; 与宿主自己打的那份同形，于是「包看到的目录」与「宿主看到的目录」能直接对起来。
+    ; 而这一条是包第一次问一个开放的问题：前七个函数都是它知道要什么，而遍历源文件
+    ; 之前得先知道有几份。
+    ;
+    ; 两块缓冲都不新开：路径用 save_name（132 个码元，比 130 的上限多两格），结果用
+    ; slurp_path（520 个码元）。它们不会同时在跑 —— 第二段只剩九百来字节，而四百字节
+    ; 的缓冲换不来什么。
+    ;
+    ; 空目录也交给一个长度为零的串，不是交「空」：调用者拿到的种类一致，它自己决定
+    ; 怎么处理。这与 slurp 读不到时交空串是同一条。
+    cmp r14, 1
+    jne .builtin_unknown
+    call pop_val
+    mov rsi, rdx
+    movzx ecx, word [rsi]           ; 路径码元数
+    mov qword [list_dir], 1025      ; 根目录
+    test rcx, rcx
+    jz .list_ready
+    cmp rcx, 128
+    ja .list_empty
+    lea rdi, [save_name]
+    mov word [rdi], 0x03B1
+    mov word [rdi + 2], 0x003A
+    mov word [rdi + 4], 0x002F
+    xor r8, r8
+.list_pcopy:
+    cmp r8, rcx
+    jae .list_pdone
+    mov ax, [rsi + 2 + r8 * 2]
+    mov [rdi + 6 + r8 * 2], ax
+    inc r8
+    jmp .list_pcopy
+.list_pdone:
+    mov word [rdi + 6 + rcx * 2], 0
+    mov rdi, save_name
+    push rbx                        ; fs_open_path 把字节数交在 rbx 里，而那是 pc
+    call fs_open_path
+    pop rbx
+    test rax, rax
+    jz .list_empty                  ; 这个目录不存在：交一个空串
+    mov [list_dir], r15
+.list_ready:
+    mov rdi, [list_dir]
+    call fs_load
+    mov r9, rsi                     ; 当前条目
+    lea r10, [slurp_path]           ; 串的头（前两字节是长度）
+    xor r8, r8                      ; 已经写进去几个码元
+.list_entry:
+    movzx ecx, word [r9]
+    test ecx, ecx
+    jz .list_done                   ; 名字长度为 0：这一层到头了
+    xor r11, r11
+.list_name:
+    cmp r11, rcx
+    jae .list_space
+    cmp r8, 500                     ; 缓冲满了就收手，绝不写穿
+    jae .list_done
+    mov ax, [r9 + 2 + r11 * 2]
+    mov [r10 + 2 + r8 * 2], ax
+    inc r11
+    inc r8
+    jmp .list_name
+.list_space:
+    cmp r8, 500
+    jae .list_done
+    mov word [r10 + 2 + r8 * 2], 0x0020
+    inc r8
+    mov rax, rcx
+    lea r9, [r9 + 11 + rax * 2]     ; 下一条（同 fs_lookup 的步进）
+    jmp .list_entry
+.list_done:
+    mov word [r10], r8w             ; 长度字段
+    mov rax, 2                      ; 串
+    mov rdx, r10
+    call push_val
+    inc rbx
+    jmp .loop
+.list_empty:
+    mov word [slurp_path], 0
+    mov rax, 2
+    lea rdx, [slurp_path]
+    call push_val
+    inc rbx
+    jmp .loop
 
 .op_save:
     ; 两参：名字（串，不带路径）、内容（串）。回来一个数：1 写成 / 0 没写成。
@@ -2811,6 +2902,59 @@ idt_common:
 ;
 ; 选 ud2 而不是除零：除零的结果依赖浮点环境（x87 与 SSE 的处理不同），而未定义指令
 ; 在任何 CPU 上都只有一个答案。判据要的是一个不会漂的数。
+; ======================================================================
+; 包问「这一层有什么」
+; ======================================================================
+;
+; 前六个函数都是包知道它要什么。这一条是它第一次问一个开放的问题 —— 而编译器要遍历
+; 源文件，遍历之前得先知道有几份。
+;
+; 判据落在长度上：docs 目录里四份（note.txt、sub、myon.hmtn、inner.txt）—— 第四份是
+; save 在它之前写的。名字之间一个空格、末尾也一个，合起来 8 + 1 + 3 + 1 + 9 + 1 + 9 + 1 = 33。
+; 33 这个数在别处没有出现过，而它同时钉住了顺序与分隔符 —— 只数条数的话，四份名字
+; 拼反了也过。
+run_list_test:
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]
+    mov r8, fs_prog_name
+    mov r9, 9
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz .missing
+    mov rdi, r15
+    call fs_load
+    mov r14, rsi
+    mov [pkg_base], r14
+    mov rdi, name_listtest
+    mov r8, 8
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+    mov r15, rax
+    mov r14, rdx
+    mov qword [pkg_base], 0x20000
+    mov rsi, line_prog_list
+    call puts64
+    mov rax, r15
+    mov rdx, r14
+    call print_value
+    call put_nl64
+    ret
+.missing:
+    mov rsi, line_prog_list_bad
+    call puts64
+    ret
+
 ; ======================================================================
 ; 包往文件系统里放东西，再自己读回来
 ; ======================================================================
@@ -12051,9 +12195,13 @@ last_dir_sec: dq 0
 last_dir_pages: dq 0
 ; fs_write_file 写到哪一层：0 是根目录，非零是某一个目录的扇区。
 write_dir: dq 0
+list_dir: dq 0
 ; 包写出来的那一份，用完整路径再查一次。
 fs_save_path: dw 0x03B1, 0x003A, 0x002F, 0x0064, 0x006F, 0x0063, 0x0073, 0x002F, 0x0069, 0x006E, 0x006E, 0x0065, 0x0072, 0x002E, 0x0074, 0x0078, 0x0074, 0
 name_savetest: dw 0x0073, 0x0061, 0x0076, 0x0065, 0x0074, 0x0065, 0x0073, 0x0074
+name_listtest: dw 0x006C, 0x0069, 0x0073, 0x0074, 0x0074, 0x0065, 0x0073, 0x0074
+line_prog_list: db "Yunooka: prog list -> ", 0
+line_prog_list_bad: db "Yunooka: prog list missing", 13, 10, 0
 line_save_survived: db "Yunooka: save survived docs/inner.txt ", 0
 line_save_ok: db "Yunooka: save docs/inner.txt ", 0
 line_save_lost: db "Yunooka: save docs/inner.txt lost", 13, 10, 0
@@ -12085,6 +12233,7 @@ bi_name_runpkg: dw 0x0072, 0x0075, 0x006E, 0x0070, 0x006B, 0x0067
 bi_name_rect: dw 0x0072, 0x0065, 0x0063, 0x0074
 bi_name_slurp: dw 0x0073, 0x006C, 0x0075, 0x0072, 0x0070
 bi_name_save: dw 0x0073, 0x0061, 0x0076, 0x0065
+bi_name_list: dw 0x006C, 0x0069, 0x0073, 0x0074
 builtin_table:
     dq 3
     dq bi_name_len
@@ -12110,6 +12259,9 @@ builtin_table:
     dq 4
     dq bi_name_save
     dq exec.op_save
+    dq 4
+    dq bi_name_list
+    dq exec.op_list
     dq 0
     dq 0
     dq 0

@@ -398,7 +398,7 @@ const 回声串 = "myon here";
 const 程序包 = Buffer.alloc(1024);
 程序包.write("HMYRB", 0, "latin1");
 程序包.writeUInt16LE(1, 5);       // 版本
-程序包.writeUInt16LE(6, 7);       // 六个函数
+程序包.writeUInt16LE(7, 7);       // 七个函数
 let 位 = 9;
 程序包.writeUInt16LE(4, 位); 位 += 2;                      // 名字长度
 for (const 字 of "main") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
@@ -676,6 +676,50 @@ for (const 字 of "slurp") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); �
 for (const 字 of "write") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
 程序包.writeUInt16LE(1, 位); 位 += 2;
 程序包[位++] = 28;                                          // 返回
+
+// 第七个函数：数一个目录里有几个名字，按长度交回来。
+//
+// 前六个函数都是「包知道它要什么」。这一条是包第一次问「这一层有什么」——
+// 编译器要遍历源文件，而遍历之前得先知道有几份。
+//
+// 四条：常量（目录）、list、len、返回。list 交回来的是一个串，名字之间一个空格、
+// 末尾也一个 —— 与宿主自己打的那份同形，这样两边数出来的东西能直接对。
+//
+// 判据用长度而不是内容：23 这个数在别处没有出现过，而它同时证明了顺序与分隔符。
+程序包.writeUInt16LE(8, 位); 位 += 2;                      // 名字长度
+for (const 字 of "listtest") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包.writeUInt16LE(0, 位); 位 += 2;                      // 参数量
+程序包.writeUInt16LE(0, 位); 位 += 2;                      // 槽数
+程序包.writeUInt16LE(0, 位); 位 += 2;                      // 效果数
+程序包.writeUInt32LE(4, 位); 位 += 4;                      // 四条指令
+程序包[位++] = 5;                                           // 常量：目录
+程序包[位++] = 2;
+程序包.writeUInt16LE(4, 位); 位 += 2;
+for (const 字 of "docs") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包[位++] = 3;                                           // 调内置 list（一参）
+程序包.writeUInt16LE(4, 位); 位 += 2;
+for (const 字 of "list") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包.writeUInt16LE(1, 位); 位 += 2;
+程序包[位++] = 3;                                           // 调内置 len（一参）
+程序包.writeUInt16LE(3, 位); 位 += 2;
+for (const 字 of "len") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包.writeUInt16LE(1, 位); 位 += 2;
+程序包[位++] = 28;                                          // 返回
+// 一个函数恰好一个返回字节。
+//
+// 这个坑踩过两次：加新函数时把锚点那句 28 一起复制过去，于是前一个函数的体里多一个
+// 0x1c。扫描器跳完前一个函数的指令数之后落在那多出来的字节上，把它当成下一个函数的
+// 名字长度（0x1c 就是 28）—— 于是「新加的函数找不到」，而症状指向名字查找，不指向包。
+//
+// 两次都是靠把字节摊开才看见的。这一条让它变红得早一步。
+{
+  const 自己 = fs.readFileSync(new URL(import.meta.url), "utf8");
+  const 写了几次 = (自己.match(/\n程序包\[位\+\+\] = 28;/g) || []).length;
+  const 声明几个 = 程序包.readUInt16LE(7);
+  if (写了几次 !== 声明几个)
+    失败("返回字节写了 " + 写了几次 + " 次，而包声明了 " + 声明几个
+      + " 个函数 —— 一个函数恰好一个，多一个就会让后面每个函数都找不到");
+}
 const 程序字节 = 程序包.subarray(0, 位);
 
 // ---- 三·二·二、第二个包：Myon 的回声 ----
