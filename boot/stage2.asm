@@ -5199,19 +5199,27 @@ fs_delete:
     mov rdi, r13
     call fs_load
     mov r9, rsi
+    xor r14, r14
+.dcount:
+    cmp word [r12 + r14 * 2], 0
+    je .dcounted
+    inc r14
+    jmp .dcount
+.dcounted:
 .dfind:
     movzx ecx, word [r9]
     test ecx, ecx
     jz .dmiss
-    movzx eax, word [r12]
-    cmp rax, rcx
+    ; 输入的名字是裸串（以零码元结尾），不是长度前缀 —— 与 fs_write_file 一个约定。
+    ; 上一版读 [r12] 当长度，于是拿 'i'（105）去比 note.txt 的 8，永远不等。
+    cmp r14, rcx
     jne .dnext
     xor rdx, rdx
 .dcmp:
     cmp rdx, rcx
     jae .dfound
     mov ax, [r9 + 2 + rdx * 2]
-    cmp ax, [r12 + 2 + rdx * 2]
+    cmp ax, [r12 + rdx * 2]
     jne .dnext
     inc rdx
     jmp .dcmp
