@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 115
+stage2_sectors equ 116
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -766,14 +766,16 @@ long_entry:
     call run_program
     ; Myon 的第二步：盘上那个只有三条指令的包，靠内置 write 把一段字打到串口。
     call run_myon_test
-    ; 第二个包（docs/myon.hmtn）的测试暂时不在主链上。
+    ; 第二个包（docs/myon.hmtn）跑起来了，而它查不到自己。
     ;
-    ; 它查不到 —— 而盘上那一份确实在：docs 扇区的第三条就是 myon.hmtn（长度 9、起始
-    ; 1048、67 字节），而同一目录里的 note.txt 用同一条 fs_open_path 是通的。差别只在
-    ; 名字长度与位置，而 fs_lookup 的步进与比较看着都对。
+    ; 这一轮把它定位到 fs_lookup 那一层：诊断那一行 `myon2 dbg 0 1026 0` 是绕过
+    ; fs_open_path、直接拿 1026 号扇区去查的结果 —— 它仍然回零，r15 与 rbx 都没被写，
+    ; 也就是说一条候选都没走到命中那一步。同一目录里的 note.txt（第一条）用同一条路
+    ; 是通的，而 myon.hmtn 是第三条。差别只剩位置。
     ;
-    ; 撤下来而不是留着一个永远红的：一条红的判据会有人说点什么，而一条「跑不到」的
-    ; 测试会一直安静。它的代码还在下面（run_myon2_test），下一轮从这里接着查。
+    ; 调用留着：它打出来的两行是下一轮的起点。而不给它判据，是因为一条永远红的判据与
+    ; 一条跑不到的测试一样，最后只会让人习惯跳过那一行。
+    call run_myon2_test
     call run_trap_test
     jmp .hang64
 .heap_bad:
@@ -2979,6 +2981,30 @@ run_myon2_test:
     call puts64
     ret
 .missing:
+    ; 诊断：绕过 fs_open_path，直接在 docs 扇区里找这个名字。
+    ;
+    ; 这一条把两种可能分开：路径解析错（段切错、扇区没接上），还是 fs_lookup 找不到。
+    ; 两者在串口上都表现为「没找到」，而修法完全不同。
+    mov rsi, 1026
+    mov r8, fs_myon_name
+    mov r9, 9
+    call fs_lookup
+    mov [myon_dbg_a], rax
+    mov [myon_dbg_b], r15
+    mov [myon_dbg_c], rbx
+    mov rsi, line_myon2_dbg
+    call puts64
+    mov rax, [myon_dbg_a]
+    call put_num64
+    mov al, ' '
+    call putc64
+    mov rax, [myon_dbg_b]
+    call put_num64
+    mov al, ' '
+    call putc64
+    mov rax, [myon_dbg_c]
+    call put_num64
+    call put_nl64
     mov rsi, line_myon2_missing
     call puts64
     ret
@@ -11243,7 +11269,10 @@ line_byname_missing: db "Yunooka: byname missing after ", 0
 ; 而不是拿一个编译期算出来的偏移 —— 偏移只在种子不变时才对，名字才属于语言。
 name_kuaichang: dw 0x5757, 0x957F
 name_is_digit: dw 0x0069, 0x0073, 0x005F, 0x0064, 0x0069, 0x0067, 0x0069, 0x0074
-fs_myon_name: dw 0x006D
+fs_myon_name: dw 0x006D, 0x0079, 0x006F, 0x006E, 0x002E, 0x0068, 0x006D, 0x0074, 0x006E
+myon_dbg_a: dq 0
+myon_dbg_b: dq 0
+myon_dbg_c: dq 0
 fs_myon_path: dw 0x03B1, 0x003A, 0x002F, 0x0064, 0x006F, 0x0063, 0x0073, 0x002F, 0x006D, 0x0079, 0x006F, 0x006E, 0x002E, 0x0068, 0x006D, 0x0074, 0x006E, 0
 name_echo: dw 0x0065, 0x0063, 0x0068, 0x006F
 
@@ -11344,6 +11373,7 @@ line_myon_bad: db "Yunooka: myon bad magic", 13, 10, 0
 line_myon_nofn: db "Yunooka: myon no echo", 13, 10, 0
 line_myon2_ok: db "Yunooka: event=myon2 ok", 13, 10, 0
 line_myon2_missing: db "Yunooka: no docs/myon.hmtn", 13, 10, 0
+line_myon2_dbg: db "Yunooka: myon2 dbg ", 0
 line_myon2_bad: db "Yunooka: myon2 bad magic", 13, 10, 0
 line_myon2_nofn: db "Yunooka: myon2 no echo", 13, 10, 0
 line_prog_bad: db "Yunooka: prog bad magic", 13, 10, 0
