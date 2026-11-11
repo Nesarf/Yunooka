@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 117
+stage2_sectors equ 116
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -6349,8 +6349,9 @@ run_pt_mul_test:
     lea rdi, [pt_o]
     call pt_show
 
-    mov rsi, line_pt_mul_ok
-    call puts64
+    ; 这里不再打 event=ptmul ok。同一个函数上面已经把四组读数打出去了，而判据读的是
+    ; 那些读数 —— 一个「ok」既不能替换它们，也不能在它们错的时候变红。打了没人读的
+    ; 行与挂了永不触发的判据是同一种病：出事的时候都保持沉默。
     ret
 
 ; ======================================================================
@@ -6794,12 +6795,14 @@ run_pt_dec_test:
     call puts64
     call put_num64
     call put_nl64
-    mov rsi, line_ptd_ok
-    call puts64
+    ; 同上：四组往返读数已经打出去了。
     ret
 .reject:
-    mov rsi, line_ptd_reject
-    call puts64
+    ; 这一支不再打 event=ptdec reject。
+    ;
+    ; 上面 .bad 那一支打的 ptd bad N 已经把「坏输入被拒」说完了，而 run.mjs 读的正是
+    ; 那一行（ptrBad 要求它是 0）。再打一行 reject，是一句没人读的重复宣告 —— 而它
+    ; 还会让 tools/audit.mjs 报「这个 event 没人读」，那正是它该报的。
     ret
 
 ; ======================================================================
@@ -7312,8 +7315,7 @@ run_pt_enc_test:
     call put_hex_bytes
     call put_nl64
 
-    mov rsi, line_pte_ok
-    call puts64
+    ; 同上：五组编码读数已经打出去了，ok 那一行是多余的。
     ret
 
 ; ======================================================================
@@ -11686,19 +11688,15 @@ line_pt_mul1: db "Yunooka: ptm mul-1 ", 0
 line_pt_mul2: db "Yunooka: ptm mul-2 ", 0
 line_pt_mul3: db "Yunooka: ptm mul-3 ", 0
 line_pt_add3b: db "Yunooka: ptm add-3b ", 0
-line_pt_mul_ok: db "Yunooka: event=ptmul ok vectors=4", 13, 10, 0
 line_pte_b: db "Yunooka: pte b ", 0
 line_pte_2b: db "Yunooka: pte 2b ", 0
 line_pte_3b: db "Yunooka: pte 3b ", 0
 line_pte_4b: db "Yunooka: pte 4b ", 0
 line_pte_5b: db "Yunooka: pte 5b ", 0
 line_ptm_mul5: db "Yunooka: ptm mul-5 ", 0
-line_pte_ok: db "Yunooka: event=ptenc ok vectors=5", 13, 10, 0
 line_ptd_before: db "Yunooka: ptd before ", 0
 line_ptd_after: db "Yunooka: ptd after ", 0
 line_ptd_bad: db "Yunooka: ptd bad ", 0
-line_ptd_ok: db "Yunooka: event=ptdec ok vectors=4", 13, 10, 0
-line_ptd_reject: db "Yunooka: event=ptdec reject", 13, 10, 0
 line_sig_res: db "Yunooka: sig ", 0
 line_sig_ok: db " ok=", 0
 line_sig_bad: db " bad=", 0

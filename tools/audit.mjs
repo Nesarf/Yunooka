@@ -84,6 +84,25 @@ for (const 名 of fs.readdirSync(设计目录).filter((f) => f.endsWith(".txt"))
 }
 判("design 是纯文本", 带毒.length === 0, 带毒.length ? "有 markdown 记号：" + 带毒.join("、") : "十七个文件都没有");
 
+// ---- 四、每个 event= 行都有人读 ----
+//
+// 这一条与第一条方向相反。第一条问「判据有没有挂上去」，这一条问「这一行有没有人看」。
+// 两者是同一个病的两面：一条打了没人读的 event 行，与一条挂了但永不触发的判据一样，
+// 都会在出事的时候保持沉默。
+//
+// 只查 event= 开头的行，不查所有串口输出：诊断行（比如 myon2 dbg）是给人看的、不是给
+// 判据看的，而把诊断也纳入要求会把这条检查逼成一个负担。
+const 二段源 = fs.readFileSync(path.join(ROOT, "boot", "stage2.asm"), "utf8");
+const 事件名 = [...new Set(
+  [...二段源.matchAll(/db "Yunooka: event=([A-Za-z0-9._-]+)/g)].map((m) => m[1]),
+)];
+const 无人读 = 事件名.filter((e) => !跑.includes(e));
+判(
+  "每个 event 都有人读",
+  无人读.length === 0,
+  事件名.length + " 个事件，" + (无人读.length ? "没人读的：" + 无人读.join("、") : "每一个都在 run.mjs 里被查过"),
+);
+
 // ---- 报告 ----
 let 坏 = 0;
 for (const r of 结果) {
