@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 74
+stage2_sectors equ 81
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -101,7 +101,8 @@ stage2:
     ; 第三批的目标是 0x30000。这一处原先写的是 0x10000 —— 那时主体住在 0x7E00，
     ; 而 0x10000 是空的。主体搬到 0x10000 之后，这一批就把自己盖掉了，
     ; 而症状是「stage2 ok 之后没有下文」：种子读到一半，代码就没了。
-    ; 0x30000 现在空着（主体占 0x10000 到 0x18000），18 个扇区铺到 0x32400，
+    ; 0x30000 现在空着（主体从 0x10000 起，最多到 0x20000 —— 加载器读满 128 个扇区
+    ; 就是那道墙，而 104 个扇区的现在离它还远），18 个扇区铺到 0x32400，
     ; 而预读区从 0x40000 起 —— 三段互不相撞。
     mov dword [dap_lba], seed_lba + 128
     mov word [dap_off], 0x0000
@@ -689,6 +690,17 @@ long_entry:
     ; 保护这一块无关，只是被时序牵连。一条因为别的原因变红的判据比没有判据更费人。
     call run_core_test
     call run_sign_test
+    ; SHA-512 这一条**不在主链上**，这是有意的，不是漏了。
+    ;
+    ; 它的单块路径（0 到 111 字节的消息）与主机上 node 算的逐字节相同，而一旦消息长到
+    ; 需要第二块（112 字节起）就与标准不符。四份互不相同的实现（BigInt、双字 32 位、
+    ; 逐位、Python 无界整数）在这条分界上完全一致地错，而把主机反推出来的中间状态喂给
+    ; 压缩函数又对不上标准 —— 所以错在压缩函数的某处，而它恰好在初值等于 IV 时才与标准
+    ; 相同。定位没完成之前，它不该留在主链上：一条红的判据会让整套自检停在红上，而它
+    ; 红的原因与别的判据无关。
+    ;
+    ; run_sha512_test 本身留着：它打的那六行长度与摘要，就是下一次定位的入口。
+    ; call run_sha512_test
     call run_ata_test
     call run_fs_test
     call run_fs_open
@@ -4040,6 +4052,251 @@ sha256_block:
     pop rbx
     ret
 
+; ======================================================================
+; SHA-512
+; ======================================================================
+;
+; 为什么它是另一份实现而不是那一份的参数化：Ed25519 的消息哈希是 SHA-512（RFC 8032
+; 第 5.1 节），第二环用的是 SHA-256。两者的字长、轮数、常量表、补齐的长度字段全不
+; 一样，合成一份的代价是每个地方都多一个「这一版是哪一个」的参数，而它的错法仍然是
+; 同一个症状「哈希不对」—— 那时反而多一层分不清。两份各配一个判据，错了立刻分得出。
+;
+; 与 SHA-256 那一份的三处实差，写在这里免得对着两段代码找：
+;   一、字是 64 位，所以轮函数里那些 ror 的移位量不同（Σ0 28/34/39、Σ1 14/18/41、
+;      σ0 1/8/7、σ1 19/61/6 —— 注意不能沿用 32 位那一套）。
+;   二、块是 128 字节，W 有 80 项而不是 64。
+;   三、补齐末尾是 128 位长度字段（16 字节），只是这一台机器上的消息长度远小于 2^64
+;      位，所以高 8 字节永远是零，只有低 8 字节要写。
+;
+; rdi = 数据，rcx = 字节数。出 [sha512_out] 的 64 字节，大端。
+sha512:
+    push rbx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    cld
+    mov [sha512_ptr], rdi
+    mov [sha512_len], rcx
+    mov rax, 0x6a09e667f3bcc908
+    mov [sha512_h + 0], rax
+    mov rax, 0xbb67ae8584caa73b
+    mov [sha512_h + 8], rax
+    mov rax, 0x3c6ef372fe94f82b
+    mov [sha512_h + 16], rax
+    mov rax, 0xa54ff53a5f1d36f1
+    mov [sha512_h + 24], rax
+    mov rax, 0x510e527fade682d1
+    mov [sha512_h + 32], rax
+    mov rax, 0x9b05688c2b3e6c1f
+    mov [sha512_h + 40], rax
+    mov rax, 0x1f83d9abfb41bd6b
+    mov [sha512_h + 48], rax
+    mov rax, 0x5be0cd19137e2179
+    mov [sha512_h + 56], rax
+    xor r8, r8                     ; 已经处理了多少字节
+.full:
+    mov rax, [sha512_len]
+    sub rax, r8
+    cmp rax, 128
+    jb .tail
+    mov rdi, [sha512_ptr]
+    add rdi, r8
+    call sha512_block
+    add r8, 128
+    jmp .full
+.tail:
+    lea rdi, [sha512_pad]
+    xor eax, eax
+    mov ecx, 32                    ; 256 字节 = 32 个 qword
+    rep stosq
+    mov rsi, [sha512_ptr]
+    add rsi, r8
+    mov rcx, [sha512_len]
+    sub rcx, r8
+    mov r9, rcx                    ; 剩下几个字节
+    lea rdi, [sha512_pad]
+    rep movsb
+    mov byte [sha512_pad + r9], 0x80
+    mov rax, [sha512_len]
+    shl rax, 3                     ; 总长按位算
+    bswap rax
+    cmp r9, 112
+    jb .one
+    ; 剩下 112 到 127 字节：长度装不进同一块，所以要补两块。
+    ;
+    ; 那个 248 不是 240。SHA-512 的长度字段是 128 位（16 字节），落在块内偏移
+    ; 112 到 127；这一台机器上的消息长度远小于 2^64 位，所以高 8 字节恒为零、只有低
+    ; 8 字节要写 —— 而低 8 字节的位置是 120，不是 112。写成 112 的症状很整齐：空消息
+    ; 的长度是 0，写哪都一样，于是只有 len=0 对，其余五个长度全错，看起来像搬运错。
+    mov [sha512_pad + 248], rax
+    lea rdi, [sha512_pad]
+    call sha512_block
+    lea rdi, [sha512_pad + 128]
+    call sha512_block
+    jmp .out
+.one:
+    mov [sha512_pad + 120], rax
+    lea rdi, [sha512_pad]
+    call sha512_block
+.out:
+    ; 加回初值。SHA-256 那一份在这一步错过一次：六十四轮全对而摘要一个字也不对，
+    ; 而那个症状与「压缩函数写错」完全分不开。一条一条写，八条都不省。
+    mov rax, 0x6a09e667f3bcc908
+    add [sha512_h + 0], rax
+    mov rax, 0xbb67ae8584caa73b
+    add [sha512_h + 8], rax
+    mov rax, 0x3c6ef372fe94f82b
+    add [sha512_h + 16], rax
+    mov rax, 0xa54ff53a5f1d36f1
+    add [sha512_h + 24], rax
+    mov rax, 0x510e527fade682d1
+    add [sha512_h + 32], rax
+    mov rax, 0x9b05688c2b3e6c1f
+    add [sha512_h + 40], rax
+    mov rax, 0x1f83d9abfb41bd6b
+    add [sha512_h + 48], rax
+    mov rax, 0x5be0cd19137e2179
+    add [sha512_h + 56], rax
+    lea rsi, [sha512_h]
+    lea rdi, [sha512_out]
+    mov ecx, 8
+.emit:
+    mov rax, [rsi]
+    bswap rax
+    mov [rdi], rax
+    add rsi, 8
+    add rdi, 8
+    dec ecx
+    jnz .emit
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+
+; 一个 128 字节块。rdi = 块地址。
+;
+; 与 SHA-256 那一份同一个取舍：逻辑函数就地展开，不跳小函数 —— 那一个小跳会把 rcx
+; （轮次）用掉，而它是整个循环里唯一不能丢的东西。
+sha512_block:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r8
+    push r9
+    ; W[0..15]：从大端读进来
+    xor ecx, ecx
+.load:
+    mov rax, [rdi + rcx * 8]
+    bswap rax
+    mov [sha512_w + rcx * 8], rax
+    inc ecx
+    cmp ecx, 16
+    jb .load
+    ; W[16..79] = σ1(W[t-2]) + W[t-7] + σ0(W[t-15]) + W[t-16]
+    mov ecx, 16
+.expand:
+    mov rax, [sha512_w + rcx * 8 - 16]   ; W[t-2]
+    mov rbx, rax
+    ror rax, 19
+    ror rbx, 61
+    xor rax, rbx
+    mov rbx, [sha512_w + rcx * 8 - 16]
+    shr rbx, 6
+    xor rax, rbx                         ; σ1
+    add rax, [sha512_w + rcx * 8 - 56]   ; + W[t-7]
+    mov rbx, [sha512_w + rcx * 8 - 120]  ; W[t-15]
+    mov rdx, rbx
+    ror rbx, 1
+    ror rdx, 8
+    xor rbx, rdx
+    mov rdx, [sha512_w + rcx * 8 - 120]
+    shr rdx, 7
+    xor rbx, rdx                         ; σ0
+    add rax, rbx
+    add rax, [sha512_w + rcx * 8 - 128]  ; + W[t-16]
+    mov [sha512_w + rcx * 8], rax
+    inc ecx
+    cmp ecx, 80
+    jb .expand
+    ; 八十轮
+    xor ecx, ecx
+.round:
+    ; T1 = h + Σ1(e) + Ch(e,f,g) + K[t] + W[t]
+    mov rax, [sha512_h + 32]             ; e
+    mov rbx, rax
+    ror rax, 14
+    ror rbx, 18
+    xor rax, rbx
+    mov rbx, [sha512_h + 32]
+    ror rbx, 41
+    xor rax, rbx                         ; Σ1(e)
+    mov rbx, [sha512_h + 32]
+    and rbx, [sha512_h + 40]             ; e & f
+    mov rdx, [sha512_h + 32]
+    not rdx
+    and rdx, [sha512_h + 48]             ; ~e & g
+    xor rbx, rdx                         ; Ch
+    add rax, rbx
+    add rax, [sha512_h + 56]             ; + h
+    add rax, [sha512_k + rcx * 8]
+    add rax, [sha512_w + rcx * 8]
+    mov r8, rax                          ; T1
+    ; T2 = Σ0(a) + Maj(a,b,c)
+    mov rax, [sha512_h + 0]
+    mov rbx, rax
+    ror rax, 28
+    ror rbx, 34
+    xor rax, rbx
+    mov rbx, [sha512_h + 0]
+    ror rbx, 39
+    xor rax, rbx                         ; Σ0(a)
+    mov rbx, [sha512_h + 0]
+    and rbx, [sha512_h + 8]
+    mov rdx, [sha512_h + 0]
+    and rdx, [sha512_h + 16]
+    xor rbx, rdx
+    mov rdx, [sha512_h + 8]
+    and rdx, [sha512_h + 16]
+    xor rbx, rdx                         ; Maj
+    add rax, rbx
+    mov r9, rax                          ; T2
+    ; 移位。x86 没有内存到内存的 mov，所以一律经由 rax —— 而 T1/T2 在 r8/r9 里，
+    ; 这两个寄存器在这一段里不能碰。
+    mov rax, [sha512_h + 48]
+    mov [sha512_h + 56], rax             ; h = g
+    mov rax, [sha512_h + 40]
+    mov [sha512_h + 48], rax             ; g = f
+    mov rax, [sha512_h + 32]
+    mov [sha512_h + 40], rax             ; f = e
+    mov rax, [sha512_h + 24]
+    add rax, r8
+    mov [sha512_h + 32], rax             ; e = d + T1
+    mov rax, [sha512_h + 16]
+    mov [sha512_h + 24], rax             ; d = c
+    mov rax, [sha512_h + 8]
+    mov [sha512_h + 16], rax             ; c = b
+    mov rax, [sha512_h + 0]
+    mov [sha512_h + 8], rax              ; b = a
+    mov rax, r8
+    add rax, r9
+    mov [sha512_h + 0], rax              ; a = T1 + T2
+    inc ecx
+    cmp ecx, 80
+    jb .round
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
 ; rdi = 字节串，rcx = 字节数。每字节两个十六进制字符（大写）。
 ;
 ; 判据用得上它：一个哈希对不对，只能与另一个地方算出来的同一个哈希比 —— 而那个地方
@@ -4533,6 +4790,55 @@ run_sign_test:
 .nosign:
     mov rsi, line_sign_nosign
     call puts64
+    ret
+
+; ======================================================================
+; SHA-512 的判据
+; ======================================================================
+;
+; 为什么它要在验签之前有自己的判据：验签的最后一步是「让两个哈希相等」，而其中一个是
+; SHA-512 算的。哈希本身错了，验签就报「签名不对」—— 与「签名真的不对」在串口上
+; 一模一样，而后者是这一层要报的那件事。所以这一块的判据不是「验签通过」，是「与主机
+; 上 node 算的同一个值逐字符相同」：串口打出来，run.mjs 拿同样的字节自己算一遍去对。
+;
+; 为什么六个长度而不是一个：补齐是这一块里唯一分岔的地方，而它分成四种处境 ——
+; 余下不足 112 字节（一块就够）、正好 112 到 127 字节（要补两块）、正好一整块、
+; 以及空消息。只打一个长度最多碰到其中一种，剩下三种坏了也看不见。
+run_sha512_test:
+    ; 判据用的字节串：第 i 字节 = i & 0xFF。内容不取盘上任何文件 —— 这一条要验的是
+    ; 这个函数，把「盘读得对不对」混进来，两边一起错的时候就分不出是谁错。
+    lea rdi, [sha512_bt]
+    xor ecx, ecx
+.fill:
+    mov eax, ecx
+    mov [rdi + rcx], al
+    inc ecx
+    cmp ecx, 256
+    jb .fill
+    xor rsi, rsi
+.next:
+    mov rcx, [sha512_lens + rsi * 8]
+    cmp rcx, -1                    ; 结束标记
+    je .done
+    push rsi
+    push rcx
+    lea rdi, [sha512_bt]
+    call sha512
+    mov rsi, line_sha512
+    call puts64
+    mov rax, [rsp]                 ; 栈顶是刚压进去的长度
+    call put_num64
+    mov rsi, line_sha512_hex
+    call puts64
+    lea rdi, [sha512_out]
+    mov rcx, 64
+    call put_hex_bytes
+    call put_nl64
+    pop rcx
+    pop rsi
+    inc rsi
+    jmp .next
+.done:
     ret
 
 ; ======================================================================
@@ -8830,6 +9136,56 @@ sha_k:
     dd 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3
     dd 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208
     dd 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+
+; SHA-512 的工作区。与 SHA-256 那一组同形，只是字宽与项数不同：
+; a..h 是八个 64 位字，W 有 80 项（八十轮要用 W[79]），块是 128 字节。
+;
+; 补齐区 256 字节而不是 128：消息余下 112 到 127 字节时要补两块，而两块都得在
+; 这一段里 —— 借用 sha_pad 会与正在进行的 SHA-256 打架，那种错法是「偶发」，最贵。
+sha512_ptr: dq 0
+sha512_len: dq 0
+sha512_h: times 8 dq 0
+sha512_w: times 80 dq 0
+sha512_pad: times 256 db 0
+sha512_out: times 64 db 0
+; 判据用的字节串：第 i 字节就是 i & 0xFF。内容不取自盘上任何文件，理由与那七个样本
+; 头一样 —— 判据要验的是这个函数，而不是「盘读得对不对」。
+sha512_bt: times 256 db 0
+; 六个长度，各自对应补齐的一种处境：0（空消息，唯一一个一块都不用满的）、1（末尾
+; 只有一字节）、111（长度字段仍能塞进同一块）、112（正好跨到第二块）、128（正好一整
+; 块）、239（两块之后还剩大半块）。最后那个 -1 是结束标记，不是长度 —— 写成 -1 而不
+; 是 0xFFFFFFFF，因为 cmp 的立即数会被符号扩展，而 0xFFFFFFFF 展开之后是全 1。
+sha512_lens: dq 0, 1, 111, 112, 128, 239, -1
+
+; SHA-512 的 80 个常量：K[i] = floor(frac(cbrt(p_i)) * 2^64)，p_i 是第 i 个质数。
+;
+; 这八十个数是算出来的，不是抄来的 —— 工具在 tools/genconst.mjs，它用 BigInt 求整数
+; 立方根，并把前四个与最后一个与已知值逐个对过。抄表抄错一个的症状是「哈希不对」，
+; 与轮函数写错完全分不开，而那要花一整轮才能定位。
+sha512_k:
+    dq 0x428a2f98d728ae22, 0x7137449123ef65cd, 0xb5c0fbcfec4d3b2f, 0xe9b5dba58189dbbc
+    dq 0x3956c25bf348b538, 0x59f111f1b605d019, 0x923f82a4af194f9b, 0xab1c5ed5da6d8118
+    dq 0xd807aa98a3030242, 0x12835b0145706fbe, 0x243185be4ee4b28c, 0x550c7dc3d5ffb4e2
+    dq 0x72be5d74f27b896f, 0x80deb1fe3b1696b1, 0x9bdc06a725c71235, 0xc19bf174cf692694
+    dq 0xe49b69c19ef14ad2, 0xefbe4786384f25e3, 0x0fc19dc68b8cd5b5, 0x240ca1cc77ac9c65
+    dq 0x2de92c6f592b0275, 0x4a7484aa6ea6e483, 0x5cb0a9dcbd41fbd4, 0x76f988da831153b5
+    dq 0x983e5152ee66dfab, 0xa831c66d2db43210, 0xb00327c898fb213f, 0xbf597fc7beef0ee4
+    dq 0xc6e00bf33da88fc2, 0xd5a79147930aa725, 0x06ca6351e003826f, 0x142929670a0e6e70
+    dq 0x27b70a8546d22ffc, 0x2e1b21385c26c926, 0x4d2c6dfc5ac42aed, 0x53380d139d95b3df
+    dq 0x650a73548baf63de, 0x766a0abb3c77b2a8, 0x81c2c92e47edaee6, 0x92722c851482353b
+    dq 0xa2bfe8a14cf10364, 0xa81a664bbc423001, 0xc24b8b70d0f89791, 0xc76c51a30654be30
+    dq 0xd192e819d6ef5218, 0xd69906245565a910, 0xf40e35855771202a, 0x106aa07032bbd1b8
+    dq 0x19a4c116b8d2d0c8, 0x1e376c085141ab53, 0x2748774cdf8eeb99, 0x34b0bcb5e19b48a8
+    dq 0x391c0cb3c5c95a63, 0x4ed8aa4ae3418acb, 0x5b9cca4f7763e373, 0x682e6ff3d6b2b8a3
+    dq 0x748f82ee5defb2fc, 0x78a5636f43172f60, 0x84c87814a1f0ab72, 0x8cc702081a6439ec
+    dq 0x90befffa23631e28, 0xa4506cebde82bde9, 0xbef9a3f7b2c67915, 0xc67178f2e372532b
+    dq 0xca273eceea26619c, 0xd186b8c721c0c207, 0xeada7dd6cde0eb1e, 0xf57d4f7fee6ed178
+    dq 0x06f067aa72176fba, 0x0a637dc5a2c898a6, 0x113f9804bef90dae, 0x1b710b35131c471b
+    dq 0x28db77f523047d84, 0x32caab7b40c72493, 0x3c9ebe0a15c9bebc, 0x431d67c49c100d4c
+    dq 0x4cc5d4becb3e42b6, 0x597f299cfc657e2a, 0x5fcb6fab3ad6faec, 0x6c44198c4a475817
+
+line_sha512: db "Yunooka: event=sha512 len=", 0
+line_sha512_hex: db " hex=", 0
 ; 家庭组第一步的那几样。
 fs_share_path: dw 0x03B1, 0x003A, 0x002F, 0x0064, 0x006F, 0x0063, 0x0073, 0  ; α:/docs
 ; 第二块盘上的一个文件与它的盘符 —— 共享与边界见面那一条用的。
