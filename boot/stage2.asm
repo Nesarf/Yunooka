@@ -26,7 +26,7 @@
 ;
 ; 现在它在这里只出现一次，其余全部由它推出来。build.mjs 会从这一行读出那个数，
 ; 再与它自己那份上限、boot.asm 那句 mov al、以及种子偏移逐个核对；对不上就建不起来。
-stage2_sectors equ 116
+stage2_sectors equ 117
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -1646,6 +1646,39 @@ exec:
     call put_nl64
     jmp .none
 
+.op_rect:
+    ; 画一个由包指定的填充矩形：五个参数，从栈顶往下是颜色、高、宽、y、x。
+    ;
+    ; 这是 border 的下一格。border 的坐标写死在宿主里，而那只能证明「包能让宿主画」；
+    ; 这一条证明的是「包能决定画在哪里、画多大」—— 而后者才是渲染，前者只是一次演示。
+    ;
+    ; 参数从栈顶往下读，因为压栈的顺序就是从左到右：x、y、w、h、颜色。所以第一个
+    ; pop_val 拿到的是最后压进去的颜色。
+    cmp r14, 5
+    jne .builtin_unknown
+    call pop_val                    ; 颜色
+    movq xmm4, rdx
+    call pop_val                    ; 高
+    movq xmm3, rdx
+    call pop_val                    ; 宽
+    movq xmm2, rdx
+    call pop_val                    ; y
+    movq xmm1, rdx
+    call pop_val                    ; x
+    movq xmm0, rdx
+    cvttsd2si rdi, xmm0
+    cvttsd2si rsi, xmm1
+    cvttsd2si rdx, xmm2
+    cvttsd2si rcx, xmm3
+    cvttsd2si rax, xmm4
+    mov r8b, al
+    call fill_rect
+    xor eax, eax
+    xor edx, edx
+    call push_val
+    inc rbx
+    jmp .loop
+
 .op_call:
     ; 立即数：名字（u16 长度 + 码元）再跟一个 u16 的参数个数。
     movzx r8d, word [rsi]           ; 名字长度
@@ -3035,6 +3068,8 @@ run_myon_test:
     movzx r8d, byte [rdi + 3210]    ; (10,10) 左上角
     movzx r9d, byte [rdi + 3250]    ; (50,10) 上边中间
     movzx r10d, byte [rdi + 19300]  ; (100,60) 右下角
+    ; 再读矩形中心那一点：包自己指定的位置与颜色。
+    movzx r11d, byte [rdi + 30 * 320 + 140]
     mov rsi, line_myon_px
     call puts64
     mov rax, r8
@@ -3046,6 +3081,10 @@ run_myon_test:
     mov al, ' '
     call putc64
     mov rax, r10
+    call put_hex64
+    mov al, ' '
+    call putc64
+    mov rax, r11
     call put_hex64
     call put_nl64
 
@@ -11407,6 +11446,7 @@ bi_name_write: dw 0x0077, 0x0072, 0x0069, 0x0074, 0x0065
 bi_name_readline: dw 0x0072, 0x0065, 0x0061, 0x0064, 0x006C, 0x0069, 0x006E, 0x0065
 bi_name_border: dw 0x0062, 0x006F, 0x0072, 0x0064, 0x0065, 0x0072
 bi_name_runpkg: dw 0x0072, 0x0075, 0x006E, 0x0070, 0x006B, 0x0067
+bi_name_rect: dw 0x0072, 0x0065, 0x0063, 0x0074
 builtin_table:
     dq 3
     dq bi_name_len
@@ -11423,6 +11463,9 @@ builtin_table:
     dq 6
     dq bi_name_runpkg
     dq exec.op_runpkg
+    dq 4
+    dq bi_name_rect
+    dq exec.op_rect
     dq 0
     dq 0
     dq 0

@@ -1194,10 +1194,13 @@ const 回声成 = 回声行 !== null;
 // `echo hello world` 在串口上出现两次：一次是 shell 的回显（`shell> echo hello world`），
 // 一次是包打出来的。只查「有没有这个串」会被前一次满足，而那一次与包无关。所以这里要
 // 的是「`myon here` 之后紧接 `echo hello world`」—— 那个顺序只有包里的两条指令能给出。
+// 四个点：三个来自宿主里写死的 border，第四个来自包自己指定的那个矩形（x=120, y=20,
+// 宽 40, 高 20，色 0x1C）。前三个证明「包能让宿主画」，第四个证明「包能决定画在哪里」——
+// 而后者才是渲染。一个只认 border 的实现过不了第四格。
 const myon写行 = /myon here\r?\necho hello world\r?\n/.test(读到)
   && /^Yunooka: event=myon write ok$/m.test(读到)
-  && /^Yunooka: myon px (?:[0-9A-F]{16} ){2}[0-9A-F]{16}$/m.test(读到)
-  && /^Yunooka: myon px 0{14}2F 0{14}2F 0{14}2F$/m.test(读到);
+  && /^Yunooka: myon px (?:[0-9A-F]{16} ){3}[0-9A-F]{16}$/m.test(读到)
+  && /^Yunooka: myon px 0{14}2F 0{14}2F 0{14}2F 0{14}1C$/m.test(读到);
 const myon写成 = myon写行;
 
 // Myon 的第三个判据：两个独立的包。

@@ -376,7 +376,9 @@ const 数学输入 = Buffer.from(
 // 放不下，症状是构建抛 RangeError）。而多函数本来就是包格式支持的东西，所以这不是
 // 妥协，是把已有的形状用起来。
 const 回声串 = "myon here";
-const 程序包 = Buffer.alloc(256);
+// 512 是一个扇区，也是这个包的上限：多出来的部分会让 Math.ceil(程序字节.length / 512)
+// 变成 2，而盘上为它预留的只有一格。
+const 程序包 = Buffer.alloc(512);
 程序包.write("HMYRB", 0, "latin1");
 程序包.writeUInt16LE(1, 5);       // 版本
 程序包.writeUInt16LE(3, 7);       // 三个函数
@@ -397,7 +399,7 @@ for (const 字 of "echo") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位
 程序包.writeUInt16LE(0, 位); 位 += 2;                      // 参数量
 程序包.writeUInt16LE(0, 位); 位 += 2;                      // 槽数
 程序包.writeUInt16LE(0, 位); 位 += 2;                      // 效果数
-程序包.writeUInt32LE(7, 位); 位 += 4;                      // 七条指令
+程序包.writeUInt32LE(13, 位); 位 += 4;                     // 十三条指令
 程序包[位++] = 5;                                           // 常量
 程序包[位++] = 2;                                           // 种类：串
 程序包.writeUInt16LE(回声串.length, 位); 位 += 2;
@@ -422,6 +424,19 @@ for (const 字 of "border") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); �
 程序包.writeUInt16LE(6, 位); 位 += 2;
 for (const 字 of "runpkg") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
 程序包.writeUInt16LE(0, 位); 位 += 2;                      // 零参
+// 再画一个由这个包自己指定位置的填充矩形：x、y、宽、高、颜色。
+//
+// border 的坐标写死在宿主里，那只能证明「包能让宿主画」；这一条证明的是「包能决定画在
+// 哪里、画多大」—— 而后者才是渲染。五个常量压完再调，判据读回矩形中心那一点。
+for (const [名, 值] of [["x", 120], ["y", 20], ["宽", 40], ["高", 20], ["色", 0x1C]]) {
+  程序包[位++] = 5;
+  程序包[位++] = 1;
+  程序包.writeDoubleLE(值, 位); 位 += 8;
+}
+程序包[位++] = 3;
+程序包.writeUInt16LE(4, 位); 位 += 2;
+for (const 字 of "rect") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包.writeUInt16LE(5, 位); 位 += 2;                      // 五参
 程序包[位++] = 28;                                          // 返回
 
 // 第三个函数：sum，算 40 + 2。
