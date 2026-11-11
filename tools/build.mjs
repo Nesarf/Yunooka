@@ -652,7 +652,7 @@ for (const 字 of "savetest") { 程序包.writeUInt16LE(字.charCodeAt(0), 位);
 程序包.writeUInt16LE(0, 位); 位 += 2;                      // 参数量
 程序包.writeUInt16LE(0, 位); 位 += 2;                      // 槽数
 程序包.writeUInt16LE(0, 位); 位 += 2;                      // 效果数
-程序包.writeUInt32LE(8, 位); 位 += 4;                      // 八条指令
+程序包.writeUInt32LE(12, 位); 位 += 4;                     // 十二条指令
 程序包[位++] = 5;                                           // 常量：名字
 程序包[位++] = 2;
 程序包.writeUInt16LE(14, 位); 位 += 2;
@@ -678,6 +678,24 @@ for (const 字 of "slurp") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); �
 程序包.writeUInt16LE(5, 位); 位 += 2;
 for (const 字 of "write") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
 程序包.writeUInt16LE(1, 位); 位 += 2;
+// 再写一次同一个名字，内容更短。条目已经在，所以这一条走的是「覆盖」那一支。
+//
+// 它证明的不是「又写成功了一次」，而是「目录里没有第二条同名条目、而且量到的长度是新的
+// 那一份」。一个把覆盖当成新建的实现会让目录里出现两条，而 fs_lookup 取第一条 ——
+// 于是写成功了，读到的还是旧的，而串口上看不出区别。
+程序包[位++] = 5;                                           // 常量：名字
+程序包[位++] = 2;
+程序包.writeUInt16LE(14, 位); 位 += 2;
+for (const 字 of "docs/inner.txt") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包[位++] = 5;                                           // 常量：新内容
+程序包[位++] = 2;
+程序包.writeUInt16LE(6, 位); 位 += 2;
+for (const 字 of "second") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包[位++] = 3;                                           // 调内置 save（两参）
+程序包.writeUInt16LE(4, 位); 位 += 2;
+for (const 字 of "save") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+程序包.writeUInt16LE(2, 位); 位 += 2;
+程序包[位++] = 26;                                          // 丢掉返回值
 程序包[位++] = 28;                                          // 返回
 
 // 第七个函数：数一个目录里有几个名字，按长度交回来。

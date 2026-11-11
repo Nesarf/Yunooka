@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 128
+stage2_sectors equ 129
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -5089,9 +5089,32 @@ fs_write_file:
     call puts64
     jmp .fail
 .exists:
-    mov rsi, line_write_exists
+    ; 同名：覆盖。条目不新增，只改它指向哪儿、多大。
+    ;
+    ; 「同名也算成功」是一件事，「不新增第二条」是另一件事 —— 后者才是判据要的。
+    ; 一个把覆盖当成新建的实现会让目录里出现两条同名，而 fs_lookup 取第一条，于是
+    ; 写成功了、读到的还是旧的，而串口上看不出区别。区分它们的只有一个数：长度。
+    ;
+    ; rcx 在 .cmp_end 里已经算好，指着这一条的类型字节；rcx + 1 是扇区、rcx + 5 是字节数。
+    ; 三项要在拷贝之前改 —— rep movsb 会把 rcx 用成计数器。
+    ;
+    ; 旧扇区不回收：这一版的数据分配是一个减法（下一个空扇区永远在最后），没有回收。
+    ; 覆盖几次就浪费掉几个扇区，这是已知的账，不是漏掉的。
+    mov rsi, line_write_over
     call puts64
-    jmp .fail
+    mov byte [rcx], 0              ; 类型：文件
+    mov [rcx + 1], r15d            ; 新扇区
+    mov [rcx + 5], r14d            ; 新字节数
+    mov rdi, r15
+    call fs_load
+    mov rdi, rsi
+    mov rsi, r13
+    mov rcx, r14
+    cld
+    rep movsb
+    dec dword [rbx + 24]
+    mov rax, 1
+    jmp .done
 .not_same:
     movzx eax, word [r9]
     lea r9, [r9 + 11 + rax * 2]
@@ -12546,6 +12569,7 @@ fs_guard_data: db "Yunooka guard test", 10
 fs_guard_len: equ $ - fs_guard_data
 line_write_ro: db "Yunooka: write refused (readonly)", 13, 10, 0
 line_write_exists: db "Yunooka: write refused (exists)", 13, 10, 0
+line_write_over: db "Yunooka: write over", 13, 10, 0
 line_guard_write: db "Yunooka: guard write ok", 13, 10, 0
 line_guard_ro: db "Yunooka: guard readonly set", 13, 10, 0
 line_guard_refused: db "Yunooka: guard rewrite refused", 13, 10, 0
