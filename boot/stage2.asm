@@ -1199,11 +1199,23 @@ scan_instrs:
     ; 一个明确的来源。
     cmp eax, 33
     jbe .shape_ok
+    ; 越界：把 opcode 与它所在的地址一起打出来。
+    ;
+    ; 前几轮一直在推位置，而每一次都要先相信一个不在眼前的计算。这一条直接给地址：opcode
+    ; 落在哪一个字节上，而那个地址可以直接拿到盘上去对。
+    ;
+    ; rsi 已经 inc 过（指向 opcode 之后），所以 opcode 在 rsi - 1。
     mov r15, rax
+    mov [dbg_a], rsi
     mov rsi, line_op_bad
     call puts64
     mov rax, r15
     call put_num64
+    mov al, ' '
+    call putc64
+    mov rax, [dbg_a]
+    dec rax
+    call put_hex64
     call put_nl64
     jmp .done
 .shape_ok:
