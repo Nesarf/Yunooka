@@ -5318,19 +5318,22 @@ run_prog_bump_test:
     ret
 
 ; ======================================================================
-; 一帧重画整个窗口
+; 一帧重画整个窗口，而位置来自全局
 ; ======================================================================
 ;
-; 前面的格子各证明一件事：retitle 能重画标题栏、titlewin 能画骨架加一句话、echo2text 能把
-; 输入的那一行画到屏幕上。而窗口从来没有被整体重画过 —— 三样各画各的，谁也擦不掉谁。
+; 这一格之前有两半各做各的：redraw 能整体重画窗口，可它调的是坐标写死的 win；winat 能按
+; 参数画，可它只被 shiftwin 用过一次。两半合成一条路之后，窗口才真的能边移动边重画。
 ;
-; 判据的三点各问一件不同的事，所以顺序也是内容：
-;   (73, 84)  'O' 顶横的中央。titlewin 画的 MYON 里，这一格是 M 的空位 —— 若 redraw 没画
-;             新标题，它读到的就是标题栏底色 1C；画了才是 0F
-;   (71, 100) 内容区第一个字符 'e'（绘制层折叠成 'E'）的笔画。这一格只会在 readline 拿到
-;             那行字并画出来时是 2F
-;   (74, 154) 重画之前宿主人为涂的一块 2F。字只占 y 100..107，所以它该被底色 0F 盖掉 ——
-;             这一格读的是「擦真的发生了」，而不是「新东西画上去了」
+; 判据四点，先清屏，所以每一点都只可能来自这一次调用：
+;   (113, 64)  新窗口标题 'O' 顶横的中央。窗口在 (100,60)，标题在 (110,64)，所以这一格只在
+;              「位置真的从全局来、而且标题也跟着位置走」时是 0F
+;   (111, 80)  内容区第一个字符 'e' 的笔画。内容画在 (110,80)，所以它在 readline 拿到那行
+;              字、并且坐标同样跟着位置走时是 2F
+;   (150, 120) 重画之前宿主人为涂的一块 2F。字只占 y 80..87，所以它回到 0F 只能是被底色盖掉
+;   (60, 80)   旧窗口的左上角。清屏之后没人往那里画，所以它是 00
+;
+; 第四点的界限要说清：它证明的不是「旧位置被擦」。移动的两步是「擦旧、画新」，而 redraw
+; 现在只做后者；擦旧要等它也知道旧位置在哪，那是另一格的事。
 run_prog_redraw_test:
     mov rdi, 1024
     call fs_load
@@ -5351,23 +5354,26 @@ run_prog_redraw_test:
     mov rsi, line_progredraw
     call puts64
 
-    ; 一、先让窗口里有一份旧内容：titlewin 画骨架与 MYON
-    mov rdi, name_titlewin
-    mov r8, 8
-    xor r15, r15
-    call find_fn_by_name
-    test rax, rax
-    jz .missing
-    mov r12, rsi
-    call .reset_and_run
+    ; 一、清屏：这一格要在新位置上重画，所以旧位置必须先是空的。
+    ;    第四点读到的 00 因此证明的是「没画在旧位置」，而不是「旧位置被擦」—— 移动的两步是
+    ;    「擦旧、画新」，redraw 现在只做后者；前者要等它也知道旧位置在哪。
+    xor dl, dl
+    call clear_screen
 
-    ; 二、在内容区下部人为涂一块 2F：它离字很远，所以只能被「擦」擦掉
-    mov rdi, 70
-    mov rsi, 150
+    ; 二、在「新窗口的内容区里、而字占不到」的地方人为涂一块 2F。字只占 y+20..y+27，
+    ;    也就是 80..87，所以 (150,120) 只能被底色盖掉。
+    mov rdi, 150
+    mov rsi, 120
     mov dl, 0x2F
     call clear_block
 
-    ; 三、选择子归零（画 O），再把整个窗口重画一遍
+    ; 三、位置进全局 10 与 11（100, 60），选择子归零（画 O），然后整窗重画
+    mov qword [global_kinds + 10 * 8], 1
+    mov rax, 0x4059000000000000      ; 100.0
+    mov [global_vals + 10 * 8], rax
+    mov qword [global_kinds + 11 * 8], 1
+    mov rax, 0x404E000000000000      ; 60.0
+    mov [global_vals + 11 * 8], rax
     mov qword [global_kinds + 9 * 8], 1
     mov qword [global_vals + 9 * 8], 0
     mov rdi, name_redraw
@@ -5379,20 +5385,27 @@ run_prog_redraw_test:
     mov r12, rsi
     call .reset_and_run
 
-    mov rdi, 73
-    mov rsi, 84
+    ; 四、四点：标题在新位置、内容在新位置、人为涂的那块被擦、旧位置是空的
+    mov rdi, 113
+    mov rsi, 64
     call read_pixel
     call put_hex64
     mov rsi, line_space
     call puts64
-    mov rdi, 71
-    mov rsi, 100
+    mov rdi, 111
+    mov rsi, 80
     call read_pixel
     call put_hex64
     mov rsi, line_space
     call puts64
-    mov rdi, 74
-    mov rsi, 154
+    mov rdi, 150
+    mov rsi, 120
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 60
+    mov rsi, 80
     call read_pixel
     call put_hex64
     mov qword [pkg_base], 0x70000
