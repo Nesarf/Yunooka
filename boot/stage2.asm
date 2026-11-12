@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 136
+stage2_sectors equ 137
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -802,6 +802,8 @@ long_entry:
     call run_prog_sum_test
     ; 第四个函数：画一个窗口。三层矩形，三种颜色。
     call run_win_test
+    ; 包自己写字：内置 text。
+    call run_prog_text_test
     ; 窗口那一层到现在只有线与框。这一条让它能写字。
     call run_glyph_test
     ; 一个字母到一行字：字模成表，字距由判据量出来。
@@ -2183,6 +2185,33 @@ exec:
     cvttsd2si rax, xmm4
     mov r8b, al
     call fill_rect
+    xor eax, eax
+    xor edx, edx
+    call push_val
+    inc rbx
+    jmp .loop
+
+.op_text:
+    ; 让包自己写字：三个参数，x、y、串。
+    ;
+    ; 这是 rect 的下一格。rect 证明包能决定「画在哪里、画多大」，而这一条证明包能让屏幕
+    ; 说出它想说的话 —— 一个画不出字的界面只能算一块画布。
+    ;
+    ; 颜色固定成 0x2F：参数表已经三项，再加一项就要动包里那一侧的构造。颜色留给下一格，
+    ; 而下一格的理由要等到有「两种颜色」的真实需要。
+    cmp r14, 3
+    jne .builtin_unknown
+    call pop_val                    ; 串
+    push rdx                        ; 后两次 pop_val 会用 rdx，所以串指针先上机器栈
+    call pop_val                    ; y
+    movq xmm1, rdx
+    call pop_val                    ; x
+    movq xmm0, rdx
+    pop rdx                         ; 串指针回来
+    cvttsd2si rdi, xmm0
+    cvttsd2si rsi, xmm1
+    mov r8b, 0x2F
+    call draw_utf16
     xor eax, eax
     xor edx, edx
     call push_val
@@ -3893,6 +3922,87 @@ run_prog_sum_test:
     ret
 .missing:
     mov rsi, line_prog_sum_bad
+    call puts64
+    ret
+
+; ======================================================================
+; 一个包在屏幕上写字
+; ======================================================================
+;
+; 上面几条（border、rect、win）都是「包让宿主画」：坐标或写死、或由包指定，而画出来的
+; 东西是宿主决定的。这一条换了方向 —— 包给出一个串，内容是它自己写的。
+;
+; 一个画不出字的界面只能算一块画布：用户读到的第一句话应当是某个程序说出来的，而不是
+; 宿主替它说。
+;
+; 包里那个函数叫 textline，五条指令：两个坐标常量、一个串常量（OK）、调内置 text、返回。
+; x 是 40、y 是 120。
+;
+; 判据读三个点：
+;   (40,120) 是 O 顶边最左列，0x3C 的 bit7 是 0，该暗
+;   (42,120) 是它右边第二位，bit5 是 1，该亮
+;   (50,120) 是 K 起点（48）右边第二位，0x66 的 bit5 是 1，该亮
+; 后两点在同一个 y 上、两个不同的字上，所以「字距是八」也一并被问到 —— 若包传来的串
+; 被读成零长，或者绘制时忘了推进 x，第三点会落在 O 的末尾而不是 K 上。
+run_prog_text_test:
+    ; 先把这两格抹掉：别的测试在同一片屏幕上画过东西，而「该暗」那一点要求背景是零。
+    mov rdi, 40
+    mov rsi, 120
+    xor dl, dl
+    call clear_block
+    mov rdi, 48
+    mov rsi, 120
+    xor dl, dl
+    call clear_block
+
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]
+    mov r8, fs_prog_name
+    mov r9, 9
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz .missing
+    mov rdi, r15
+    call fs_load
+    mov r14, rsi
+    mov [pkg_base], r14
+    mov rdi, name_textline
+    mov r8, 8
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+    mov qword [pkg_base], 0x70000
+    mov rsi, line_progtext
+    call puts64
+    mov rdi, 40
+    mov rsi, 120
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 42
+    mov rsi, 120
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 50
+    mov rsi, 120
+    call read_pixel
+    call put_hex64
+    jmp put_nl64
+.missing:
+    mov rsi, line_progtext_bad
     call puts64
     ret
 
@@ -11661,27 +11771,31 @@ draw_glyph:
 ; 那是排版的事，等有排版再说 —— 现在只有一个数，判据能量它。
 ;
 ; 全部寄存器都保存：调用者是 exec，它用 r12 指指令流、r13 数指令数。
-; 画一个字符。rdi = x，rsi = y，al = 字符，r8b = 颜色。
+; 画一个字符。rdi = x，rsi = y，ax = 码元，r8b = 颜色。
 ; 认不出的字符什么也不画 —— 「画不出来」与「画错了」在判据里要分得开。
+;
+; 入参是 16 位码元而不是 8 位字节：包里的串是 UTF-16（u16 长度 + 码元），而固件里那
+; 几条测试用的是 8 位串。让这一层吃码元，两条路就共用同一份绘制 —— 字符集、字距、
+; 未知字符的处理三样都只有一份。
 ;
 ; 这一段是从 draw_text 里抽出来的：多行文本要按字符画（换行处得重新起头），而「把一行
 ; 串从头画到尾」只是它的一个上层。数字与字母各有一张表，入口先分派再看表 —— 一张连续表
 ; 要从 0x30 铺到 0x5A，中间那七个标点得占着位置填空白，而空白在判据里与「这个字符不
 ; 存在」分不开。
 ;
-; 开头那句 movzx 不能省：入参只有 al，rax 的高位是调用者留下的，而下面的 sub rax 会用
+; 开头那句 movzx 不能省：入参只有 ax，rax 的高位是调用者留下的，而下面的 sub rax 会用
 ; 到整只寄存器。
 draw_one:
     push rax
     push r10
-    movzx eax, al
-    cmp al, '0'
+    movzx eax, ax
+    cmp ax, '0'
     jb .out
-    cmp al, '9'
+    cmp ax, '9'
     jbe .digit
-    cmp al, 'A'
+    cmp ax, 'A'
     jb .out
-    cmp al, 'Z'
+    cmp ax, 'Z'
     ja .out
     sub rax, 'A'
     shl rax, 3
@@ -11767,6 +11881,54 @@ draw_lines:
     mov r11, r9                    ; 回到行首
     add r10, 10                    ; 行距：字高八，空两行
     inc rdx
+    jmp .loop
+.done:
+    pop r11
+    pop r10
+    pop r9
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rax
+    ret
+
+; 把包里那种串铺到屏幕上：rdx = 指针（u16 长度 + UTF-16 码元），rdi = x，rsi = y，
+; r8b = 颜色。
+;
+; 与 draw_text 的差别只有「字符从哪里来」：那个吃以 0 结尾的 8 位串（固件自己的测试用），
+; 这个吃包里的带长度前缀的 UTF-16。画的部分是同一个 draw_one，所以字符集、字距、未知字符
+; 的处理三样都只有一份。
+;
+; 不处理换行：包里要换行就再调一次 text。版面是包的事，而这一层只负责「从这里开始画」。
+draw_utf16:
+    push rax
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r9
+    push r10
+    push r11
+    mov r9, rdi                    ; 当前 x
+    mov r10, rsi                   ; y（整个串一行，所以是个常数）
+    mov r11, rdx                   ; 串指针
+    movzx ecx, word [r11]          ; 码元数
+    add r11, 2
+.loop:
+    test ecx, ecx
+    jz .done
+    movzx eax, word [r11]
+    mov rdi, r9
+    mov rsi, r10
+    push rcx                       ; draw_one 会碰 rax 与 r10，而 rcx/r11 是这一段的状态
+    push r11
+    call draw_one
+    pop r11
+    pop rcx
+    add r9, 8
+    add r11, 2
+    dec ecx
     jmp .loop
 .done:
     pop r11
@@ -13286,6 +13448,7 @@ bi_name_readline: dw 0x0072, 0x0065, 0x0061, 0x0064, 0x006C, 0x0069, 0x006E, 0x0
 bi_name_border: dw 0x0062, 0x006F, 0x0072, 0x0064, 0x0065, 0x0072
 bi_name_runpkg: dw 0x0072, 0x0075, 0x006E, 0x0070, 0x006B, 0x0067
 bi_name_rect: dw 0x0072, 0x0065, 0x0063, 0x0074
+bi_name_text: dw 0x0074, 0x0065, 0x0078, 0x0074
 bi_name_slurp: dw 0x0073, 0x006C, 0x0075, 0x0072, 0x0070
 bi_name_save: dw 0x0073, 0x0061, 0x0076, 0x0065
 bi_name_list: dw 0x006C, 0x0069, 0x0073, 0x0074
@@ -13309,6 +13472,9 @@ builtin_table:
     dq 4
     dq bi_name_rect
     dq exec.op_rect
+    dq 4
+    dq bi_name_text
+    dq exec.op_text
     dq 5
     dq bi_name_slurp
     dq exec.op_slurp
@@ -13385,6 +13551,9 @@ fs_prog_name: dw 0x0070, 0x0072, 0x006F, 0x0067, 0x002E, 0x0068, 0x006D, 0x0074,
 name_main: dw 0x006D, 0x0061, 0x0069, 0x006E
 name_sum: dw 0x0073, 0x0075, 0x006D
 name_win: dw 0x0077, 0x0069, 0x006E
+name_textline: dw 0x0074, 0x0065, 0x0078, 0x0074, 0x006C, 0x0069, 0x006E, 0x0065
+line_progtext: db "Yunooka: progtext ", 0
+line_progtext_bad: db "Yunooka: progtext missing", 0
 name_filesize: dw 0x0066, 0x0069, 0x006C, 0x0065, 0x0073, 0x0069, 0x007A, 0x0065
 line_size: db "Yunooka: prog size -> ", 0
 line_size_bad: db "Yunooka: prog size missing", 13, 10, 0

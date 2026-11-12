@@ -403,7 +403,7 @@ const 回声串 = "myon here";
 const 程序包 = Buffer.alloc(1280);
 程序包.write("HMYRB", 0, "latin1");
 程序包.writeUInt16LE(1, 5);       // 版本
-程序包.writeUInt16LE(8, 7);       // 八个函数
+程序包.writeUInt16LE(9, 7);       // 九个函数
 let 位 = 9;
 程序包.writeUInt16LE(4, 位); 位 += 2;                      // 名字长度
 for (const 字 of "main") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
@@ -771,6 +771,37 @@ for (const 字 of "list") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位
 for (const 字 of "len") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
 程序包.writeUInt16LE(1, 位); 位 += 2;
 程序包[位++] = 28;                                          // 返回
+// 第九个函数：让包自己在屏幕上写字。
+//
+// 这是 rect 的下一格。rect 证明包能决定「画在哪里、画多大」，而这一条证明包能让屏幕说出
+// 它想说的话 —— 一个画不出字的界面只能算一块画布。
+//
+// 五条指令：两个坐标常量、一个串常量、调内置 text（三参）、返回。串是 UTF-16，与包里
+// 那一侧的形状一致；固件收到的是「u16 长度 + 码元」的指针，与 write 拿到的是同一种。
+{
+  程序包.writeUInt16LE(8, 位); 位 += 2;                      // 名字长度
+  for (const 字 of "textline") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+  程序包.writeUInt16LE(0, 位); 位 += 2;                      // 参数量
+  程序包.writeUInt16LE(0, 位); 位 += 2;                      // 槽数
+  程序包.writeUInt16LE(0, 位); 位 += 2;                      // 效果数
+  程序包.writeUInt32LE(5, 位); 位 += 4;                      // 五条指令
+  for (const 坐标 of [40, 120]) {                            // x、y
+    程序包[位++] = 5;
+    程序包[位++] = 1;
+    程序包.writeDoubleLE(坐标, 位); 位 += 8;
+  }
+  const 要写的字 = "OK";
+  程序包[位++] = 5;                                          // 常量：要写的字
+  程序包[位++] = 2;
+  程序包.writeUInt16LE(要写的字.length, 位); 位 += 2;
+  for (const 字 of 要写的字) { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+  程序包[位++] = 3;                                          // 调内置 text（三参）
+  程序包.writeUInt16LE(4, 位); 位 += 2;
+  for (const 字 of "text") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+  程序包.writeUInt16LE(3, 位); 位 += 2;
+程序包[位++] = 28;                                          // 返回
+}
+
 const 程序字节 = 程序包.subarray(0, 位);
 
 // ---- 三·二·二、第二个包：Myon 的回声 ----
