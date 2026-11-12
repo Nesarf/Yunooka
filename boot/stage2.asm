@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 146
+stage2_sectors equ 147
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -822,6 +822,8 @@ long_entry:
     call run_prog_drag_test
     ; 一帧：擦旧位置、改坐标、画新位置。
     call run_prog_frame_test
+    ; 重绘：同一个函数，两帧画出不同的字。
+    call run_prog_retitle_test
     ; 窗口那一层到现在只有线与框。这一条让它能写字。
     call run_glyph_test
     ; 一个字母到一行字：字模成表，字距由判据量出来。
@@ -4900,6 +4902,115 @@ run_prog_frame_test:
     jmp exec
 .missing:
     mov rsi, line_progframe_bad
+    call puts64
+    ret
+
+; ======================================================================
+; 同一个函数，两帧不同的字
+; ======================================================================
+;
+; 上一格证明的是「一帧可以擦、可以改、可以画」，但那三步是宿主依次调三个函数做出来的，
+; 屏幕上画的仍然是同一块方块换个地方。这一格要的是内容本身会变：同一个 retitle 调两次，
+; 画出来的字不一样，而它的指令一个字节都没动。
+;
+; 选择子是全局 9，由宿主在两次调用之间改。这不越权：宿主在这里扮的是「用户按了一下」，
+; 而窗口怎么重绘是包自己的事 —— 包做的事没变，只是它读到的状态变了。全局 9 而不是全局 3，
+; 是因为全局 3 早被 globalset 那一格写成了 7，而串口的判据是按顺序跑的：一条判据若依赖
+; 另一条判据留下的状态，它红了也说不清为什么红。
+;
+; 四个读数是按内容挑的，不是按方便挑的：
+;   (73, 84) 落在 'O' 顶横的中央，'X' 在那里是空的
+;   (73, 87) 落在 'X' 中心交叉处，'O' 在那里是空洞
+; 于是同一个函数的两帧在两点上正好互换，读数 0F 1C 1C 0F 的顺序就是「先 O 后 X」。
+run_prog_retitle_test:
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]
+    mov r8, fs_prog_name
+    mov r9, 9
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz .missing
+    mov rdi, r15
+    call fs_load
+    mov r14, rsi
+    mov [pkg_base], r14
+
+    mov rsi, line_progretitle
+    call puts64
+
+    ; 一、先把窗口骨架画出来：标题栏是 0x1C，字才有地方落
+    mov rdi, name_win
+    mov r8, 3
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    call .reset_and_run
+
+    ; 二、选择子归零，调一次：应当画出 O
+    mov qword [global_kinds + 9 * 8], 1
+    mov qword [global_vals + 9 * 8], 0
+    mov rdi, name_retitle
+    mov r8, 7
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    call .reset_and_run
+    mov rdi, 73
+    mov rsi, 84
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 73
+    mov rsi, 87
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+
+    ; 三、选择子改成一，再调同一个函数：应当换成 X
+    ;
+    ; 这里必须存 1.0 的位模式，不是整数 1。全局那一格存的是 double 的位模式：写整数 1 进去，
+    ; 解释器按 double 读出来是 4.9e-324（最小次正规数），于是「大于等于 1」仍然是假，第二帧
+    ; 会继续画 O —— 屏幕上看起来像「重绘没生效」，其实是那个数根本不是我写的那个数。
+    mov rax, 0x3FF0000000000000
+    mov [global_vals + 9 * 8], rax
+    mov rdi, name_retitle
+    mov r8, 7
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    call .reset_and_run
+    mov rdi, 73
+    mov rsi, 84
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 73
+    mov rsi, 87
+    call read_pixel
+    call put_hex64
+    mov qword [pkg_base], 0x70000
+    jmp put_nl64
+.reset_and_run:
+    ; 每次 exec 前把解释器的状态归零：栈顶、帧号、pc。三样都是上一个函数留下的。
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    jmp exec
+.missing:
+    mov rsi, line_progretitle_bad
     call puts64
     ret
 
@@ -14566,6 +14677,9 @@ name_right60: dw 0x0072, 0x0069, 0x0067, 0x0068, 0x0074, 0x0036, 0x0030
 name_erase: dw 0x0065, 0x0072, 0x0061, 0x0073, 0x0065
 line_progframe: db "Yunooka: progfrm ", 0
 line_progframe_bad: db "Yunooka: progfrm missing", 0
+name_retitle: dw 0x0072, 0x0065, 0x0074, 0x0069, 0x0074, 0x006C, 0x0065
+line_progretitle: db "Yunooka: progretitle ", 0
+line_progretitle_bad: db "Yunooka: progretitle missing", 0
 line_progdrag: db "Yunooka: progdrg ", 0
 line_progdrag_bad: db "Yunooka: progdrg missing", 0
 line_progglobal: db "Yunooka: progglobal ", 0
