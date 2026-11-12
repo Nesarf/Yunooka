@@ -400,10 +400,10 @@ const 回声串 = "myon here";
 // Math.ceil(程序字节.length / 512)，所以它自己会变成 2。
 // 1280：第八个函数把包顶过了 1024。它自己占九十来字节，而路径那个常量又不能省 ——
 // 这一版的包没有变量，常量是唯一能重复取用的东西。
-const 程序包 = Buffer.alloc(1280);
+const 程序包 = Buffer.alloc(1600);
 程序包.write("HMYRB", 0, "latin1");
 程序包.writeUInt16LE(1, 5);       // 版本
-程序包.writeUInt16LE(10, 7);      // 十个函数
+程序包.writeUInt16LE(11, 7);      // 十一个函数
 let 位 = 9;
 程序包.writeUInt16LE(4, 位); 位 += 2;                      // 名字长度
 for (const 字 of "main") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
@@ -835,6 +835,51 @@ for (const 字 of "len") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 
   程序包[位++] = 5;                                          // 常量：颜色
   程序包[位++] = 1;
   程序包.writeDoubleLE(0x1C, 位); 位 += 8;
+  程序包[位++] = 3;                                          // 调内置 text（四参）
+  程序包.writeUInt16LE(4, 位); 位 += 2;
+  for (const 字 of "text") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+  程序包.writeUInt16LE(4, 位); 位 += 2;
+程序包[位++] = 28;                                          // 返回
+}
+
+// 第十一个函数：画一个带标题的窗口。
+//
+// 这是把已有的两样合起来：win 画三层矩形（底色、标题栏、内容区），text 写字。合起来的
+// 结果是屏幕上第一个「窗口」而不是一块画布 —— 一个框加上它自己说的话。
+//
+// 七条指令：调包里的 win（零参）、两个坐标常量（70、84）、一个串常量（MYON）、一个颜色
+// 常量（0x0F，与内容区同色）、调内置 text（四参）、返回。
+//
+// win 是包里自己的一个函数（三层矩形），不是内置 —— 所以那一句是 opcode 4（调用），
+// 不是 3（内置）。第一版写成 3，于是它去内置表里找一个叫 win 的处理者，找不到，串口上
+// 只留一行 unknown builtin 与 exec ran out at 0 7；窗口因此没画，标题也没画。
+//
+// 标题的 y 是 84：标题栏从 81 到 92，字高八，所以 84 到 91 都在栏内。这个数不是随手挑的
+// —— 它落在 81 + 3 上，上下各留三像素。
+{
+  程序包.writeUInt16LE(8, 位); 位 += 2;                      // 名字长度（titlewin 是八个码元）
+  for (const 字 of "titlewin") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+  程序包.writeUInt16LE(0, 位); 位 += 2;                      // 参数量
+  程序包.writeUInt16LE(0, 位); 位 += 2;                      // 槽数
+  程序包.writeUInt16LE(0, 位); 位 += 2;                      // 效果数
+  程序包.writeUInt32LE(7, 位); 位 += 4;                      // 七条指令
+  程序包[位++] = 4;                                          // 调用包里自己的 win（零参）
+  程序包.writeUInt16LE(3, 位); 位 += 2;
+  for (const 字 of "win") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+  程序包.writeUInt16LE(0, 位); 位 += 2;
+  for (const 坐标 of [70, 84]) {                             // 标题的 x、y
+    程序包[位++] = 5;
+    程序包[位++] = 1;
+    程序包.writeDoubleLE(坐标, 位); 位 += 8;
+  }
+  const 标题 = "MYON";
+  程序包[位++] = 5;                                          // 常量：标题
+  程序包[位++] = 2;
+  程序包.writeUInt16LE(标题.length, 位); 位 += 2;
+  for (const 字 of 标题) { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+  程序包[位++] = 5;                                          // 常量：颜色
+  程序包[位++] = 1;
+  程序包.writeDoubleLE(0x0F, 位); 位 += 8;
   程序包[位++] = 3;                                          // 调内置 text（四参）
   程序包.writeUInt16LE(4, 位); 位 += 2;
   for (const 字 of "text") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }

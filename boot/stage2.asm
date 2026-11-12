@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 138
+stage2_sectors equ 139
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -806,6 +806,8 @@ long_entry:
     call run_prog_text_test
     ; 包把宿主递进来的那一行画到屏幕上：界面对话的前一半。
     call run_prog_echo_test
+    ; 窗口与文字合起来：一个框加上它自己说的话。
+    call run_prog_title_test
     ; 窗口那一层到现在只有线与框。这一条让它能写字。
     call run_glyph_test
     ; 一个字母到一行字：字模成表，字距由判据量出来。
@@ -4110,6 +4112,75 @@ run_prog_echo_test:
     jmp put_nl64
 .missing:
     mov rsi, line_progecho_bad
+    call puts64
+    ret
+
+; ======================================================================
+; 一个包画一个带标题的窗口
+; ======================================================================
+;
+; 这是把已有的两样合起来：win 画三层矩形（底色 0x1F、标题栏 0x1C、内容区 0x0F），
+; text 写字。合起来的结果是屏幕上第一个「窗口」而不是一块画布 —— 一个框加上它自己说的话。
+;
+; 包里那个函数叫 titlewin，七条指令：调 win、两个坐标常量（70、84）、一个串常量（MYON）、
+; 一个颜色常量（0x0F）、调 text、返回。标题的 y 是 84：标题栏从 81 到 92，字高八，所以
+; 84 到 91 都在栏内，上下各留三像素。
+;
+; 判据读三个点：
+;   (70,84) 是 M 顶边最左列，0x63 的 bit7 是 0，该露出标题栏底色 0x1C
+;   (71,84) 是它右边一位，bit6 是 1，该是字色 0x0F
+;   (80,84) 是第二个字符（Y）顶边的 bit5，起点 70 + 8 = 78，78 + 2 = 80，该是 0x0F
+; 第一点与后两点合起来说的是同一件事的两面：字画上去了，而且它周围的底色没被吃掉 ——
+; 只读后两点的话，一个把整条标题栏刷成字色的实现照样能过。
+run_prog_title_test:
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]
+    mov r8, fs_prog_name
+    mov r9, 9
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz .missing
+    mov rdi, r15
+    call fs_load
+    mov r14, rsi
+    mov [pkg_base], r14
+    mov rdi, name_titlewin
+    mov r8, 8
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+    mov qword [pkg_base], 0x70000
+    mov rsi, line_progtitle
+    call puts64
+    mov rdi, 70
+    mov rsi, 84
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 71
+    mov rsi, 84
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 80
+    mov rsi, 84
+    call read_pixel
+    call put_hex64
+    jmp put_nl64
+.missing:
+    mov rsi, line_progtitle_bad
     call puts64
     ret
 
@@ -13729,6 +13800,9 @@ name_sum: dw 0x0073, 0x0075, 0x006D
 name_win: dw 0x0077, 0x0069, 0x006E
 name_textline: dw 0x0074, 0x0065, 0x0078, 0x0074, 0x006C, 0x0069, 0x006E, 0x0065
 name_echo2text: dw 0x0065, 0x0063, 0x0068, 0x006F, 0x0032, 0x0074, 0x0065, 0x0078, 0x0074
+name_titlewin: dw 0x0074, 0x0069, 0x0074, 0x006C, 0x0065, 0x0077, 0x0069, 0x006E
+line_progtitle: db "Yunooka: progtitle ", 0
+line_progtitle_bad: db "Yunooka: progtitle missing", 0
 line_progecho: db "Yunooka: progecho ", 0
 line_progecho_bad: db "Yunooka: progecho missing", 0
 line_progtext: db "Yunooka: progtext ", 0
