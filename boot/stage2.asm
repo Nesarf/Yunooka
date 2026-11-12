@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 134
+stage2_sectors equ 135
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -806,6 +806,8 @@ long_entry:
     call run_glyph_test
     ; 一个字母到一行字：字模成表，字距由判据量出来。
     call run_text_test
+    ; 数字到字母：字体表的第二张。
+    call run_upper_test
     ; 第五个函数：读一个文件，返回它的字节数。
     call run_filesize_test
     ; 第六个函数：写一份文件，再读回来打出去。它要排在 dirfull 之前 —— 那一条会把
@@ -10278,6 +10280,58 @@ run_text_test:
     call put_hex64
     jmp put_nl64
 
+; 字母表：写两个大写字母，读四个点。
+;
+; 挑 H 与 O 是因为它们顶边的形状不同 —— H 是 0x66（亮位在中间偏两端），O 是 0x3C
+; （亮位在正中）。而四个点都落在「亮位与空位的交界」上，不是亮的中间：
+;   (10,20) 是 H 顶边最左列，0x66 的 bit7 是 0，该暗
+;   (11,20) 是它右边一位，bit6 是 1，该亮
+;   (18,20) 是 O 顶边最左列，0x3C 的 bit7 是 0，该暗
+;   (20,20) 是 O 起点右边第二位，bit5 是 1，该亮
+; 期望 00 2F 2F 00。若字母表按错的基址算（比如代码按 0x30 起而表按 0x41 排），这四个点
+; 会一起落到别的字上，读出来的不会是这个形状。
+run_upper_test:
+    mov rdi, 10
+    mov rsi, 20
+    xor dl, dl
+    call clear_block
+    mov rdi, 18
+    mov rsi, 20
+    xor dl, dl
+    call clear_block
+
+    mov rdi, 10
+    mov rsi, 20
+    lea rdx, [str_HO]
+    mov r8b, 0x2F
+    call draw_text
+
+    mov rsi, line_upper
+    call puts64
+    mov rdi, 10
+    mov rsi, 20
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 11
+    mov rsi, 20
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 18
+    mov rsi, 20
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 20
+    mov rsi, 20
+    call read_pixel
+    call put_hex64
+    jmp put_nl64
+
 run_line_test:
     mov r12, 0
     mov r13, 0
@@ -11545,8 +11599,9 @@ draw_glyph:
 
 ; 把一行字铺到帧缓冲。入参：rdi = x，rsi = y，rdx = 以 0 结尾的字符串，r8b = 颜色。
 ;
-; 这一版只声明支持数字 0 到 9。别的字符被**跳过**而不是画成一个方块 —— 因为「画不出来」
-; 与「画错了」在屏幕上长得一样，而在判据里必须分得开。要扩字符集就是加字模，机制不动。
+; 这一版支持数字 0 到 9 与大写字母 A 到 Z，各一张表。别的字符被**跳过**而不是画成一个
+; 方块 —— 因为「画不出来」与「画错了」在屏幕上长得一样，而在判据里必须分得开。要扩字符集
+; 就是加字模，机制不动。
 ;
 ; 字距是八像素：字模本身八宽，所以相邻两个字符之间没有空隙。加空隙要改这个增量，而
 ; 那是排版的事，等有排版再说 —— 现在只有一个数，判据能量它。
@@ -11563,19 +11618,31 @@ draw_text:
     push r10
     push r11
     mov r9, rdi                    ; 当前这一格的 x
-    lea r11, [font_digits]
 .loop:
     movzx rax, byte [rdx]
     test rax, rax
     jz .done
+    ; 数字与字母各有一张表，所以入口先分派再看表 —— 一张连续表要从 0x30 铺到 0x5A，
+    ; 中间那七个标点得占着位置填空白，而空白在判据里与「这个字符不存在」分不开。
     cmp rax, '0'
     jb .next
     cmp rax, '9'
+    jbe .digit
+    cmp rax, 'A'
+    jb .next
+    cmp rax, 'Z'
     ja .next
+    sub rax, 'A'
+    shl rax, 3
+    lea r10, [font_letters]
+    add r10, rax
+    jmp .draw
+.digit:
     sub rax, '0'
     shl rax, 3                     ; 每个字模八字节，所以是乘八
-    mov r10, r11
+    lea r10, [font_digits]
     add r10, rax
+.draw:
     mov rdi, r9
     push rdx                       ; draw_glyph 自己会保存 rdx，但这里还是存一份：
     mov rdx, r10                   ; 调用之后还要用它推进字符串
@@ -14043,7 +14110,45 @@ font_digits:
     db 0x7E, 0x06, 0x0C, 0x18, 0x30, 0x30, 0x30, 0x30   ; 7
     db 0x3C, 0x66, 0x66, 0x3C, 0x66, 0x66, 0x66, 0x3C   ; 8
     db 0x3C, 0x66, 0x66, 0x3E, 0x06, 0x0C, 0x18, 0x30   ; 9
+; 大写字母 A 到 Z 的 8x8 字模。行 0 到 6 是字形，行 7 留空 —— 所以字与字之间在竖直方向
+; 也有一行空隙，而水平方向没有（字距就是字宽）。
+;
+; 这张表与上面那张 digit 表分开，不合成一张从 0x30 到 0x5A 的连续表：合成的话中间那
+; 七个标点（: ; < = > ? @）要占位置填空白，而空白字模在判据里与「这个字符不存在」长得
+; 一样。两张表各自的入口在 draw_text 里，多一个分支换掉七格假数据。
+;
+; font_H 那一份（单字铺绘那一格用的）与这里的 H 不同，是有意的：那一格验的是「把一份
+; 八字节位图铺到屏幕上」这个机制，样本长什么样不重要；而这里的 H 是字体的一部分。
+font_letters:
+    db 0x18, 0x3C, 0x66, 0x66, 0x7E, 0x66, 0x66, 0x00   ; A
+    db 0x7C, 0x66, 0x66, 0x7C, 0x66, 0x66, 0x7C, 0x00   ; B
+    db 0x3C, 0x66, 0x60, 0x60, 0x60, 0x66, 0x3C, 0x00   ; C
+    db 0x78, 0x6C, 0x66, 0x66, 0x66, 0x6C, 0x78, 0x00   ; D
+    db 0x7E, 0x60, 0x60, 0x7C, 0x60, 0x60, 0x7E, 0x00   ; E
+    db 0x7E, 0x60, 0x60, 0x7C, 0x60, 0x60, 0x60, 0x00   ; F
+    db 0x3C, 0x66, 0x60, 0x6E, 0x66, 0x66, 0x3C, 0x00   ; G
+    db 0x66, 0x66, 0x66, 0x7E, 0x66, 0x66, 0x66, 0x00   ; H
+    db 0x3C, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00   ; I
+    db 0x1E, 0x0C, 0x0C, 0x0C, 0x0C, 0x6C, 0x38, 0x00   ; J
+    db 0x66, 0x6C, 0x78, 0x70, 0x78, 0x6C, 0x66, 0x00   ; K
+    db 0x60, 0x60, 0x60, 0x60, 0x60, 0x60, 0x7E, 0x00   ; L
+    db 0x63, 0x77, 0x7F, 0x6B, 0x63, 0x63, 0x63, 0x00   ; M
+    db 0x66, 0x76, 0x7E, 0x7E, 0x6E, 0x66, 0x66, 0x00   ; N
+    db 0x3C, 0x66, 0x66, 0x66, 0x66, 0x66, 0x3C, 0x00   ; O
+    db 0x7C, 0x66, 0x66, 0x7C, 0x60, 0x60, 0x60, 0x00   ; P
+    db 0x3C, 0x66, 0x66, 0x66, 0x6E, 0x3C, 0x0E, 0x00   ; Q
+    db 0x7C, 0x66, 0x66, 0x7C, 0x78, 0x6C, 0x66, 0x00   ; R
+    db 0x3C, 0x66, 0x60, 0x3C, 0x06, 0x66, 0x3C, 0x00   ; S
+    db 0x7E, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x00   ; T
+    db 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x3C, 0x00   ; U
+    db 0x66, 0x66, 0x66, 0x66, 0x66, 0x3C, 0x18, 0x00   ; V
+    db 0x63, 0x63, 0x63, 0x6B, 0x7F, 0x77, 0x63, 0x00   ; W
+    db 0x66, 0x66, 0x3C, 0x18, 0x3C, 0x66, 0x66, 0x00   ; X
+    db 0x66, 0x66, 0x66, 0x3C, 0x18, 0x18, 0x18, 0x00   ; Y
+    db 0x7E, 0x06, 0x0C, 0x18, 0x30, 0x60, 0x7E, 0x00   ; Z
 line_text:  db "Yunooka: text ", 0
+line_upper: db "Yunooka: upper ", 0
+str_HO:     db "HO", 0
 str_01:     db "01", 0
 line_glyph: db "Yunooka: glyph ", 0
 line_clear: db "Yunooka: clear ", 0
