@@ -793,7 +793,7 @@ for (const 字 of "len") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 
     程序包[位++] = 1;
     程序包.writeDoubleLE(坐标, 位); 位 += 8;
   }
-  const 要写的字 = "OK";
+  const 要写的字 = "O\nK";
   程序包[位++] = 5;                                          // 常量：要写的字
   程序包[位++] = 2;
   程序包.writeUInt16LE(要写的字.length, 位); 位 += 2;

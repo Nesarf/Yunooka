@@ -3943,25 +3943,33 @@ run_prog_sum_test:
 ; 宿主替它说。
 ;
 ; 包里那个函数叫 textline，六条指令：三个常量（x 是 40、y 是 120、颜色是 0x1C）、一个串
-; 常量（OK）、调内置 text、返回。
+; 常量（O、换行、K）、调内置 text、返回。
+;
+; 串里那个换行（0x0A）是这一格的重点：它让包写出一段话，而不是一行。固件的 draw_utf16
+; 认了 0x0A，行距十像素 —— 与 draw_lines 同一套约定。
 ;
 ; 判据读三个点：
-;   (40,120) 是 O 顶边最左列，0x3C 的 bit7 是 0，该暗
-;   (42,120) 是它右边第二位，bit5 是 1，该亮
-;   (50,120) 是 K 起点（48）右边第二位，0x66 的 bit5 是 1，该亮
-; 后两点在同一个 y 上、两个不同的字上，所以「字距是八」也一并被问到 —— 若包传来的串
-; 被读成零长，或者绘制时忘了推进 x，第三点会落在 O 的末尾而不是 K 上。
+;   (42,120) 是 O 顶边中段，0x3C 的 bit5 是 1，该亮
+;   (42,130) 是 K 顶边中段，0x66 的 bit5 是 1，该亮 —— 它落在 120 + 10 上，所以换行真的
+;     发生了；若换行没实现，0x0A 会被当成未知字符跳过，K 会画在 40 + 8 = 48 上，这一点
+;     就是零
+;   (42,140) 是第三行该在的位置，没有第三行，该暗 —— 它防的是「每一行都在同一个 y 上
+;     累加」这种错法
 ;
 ; 颜色期望 0x1C 而不是 0x2F：只要与本侧曾经写死的那个值不同，「这个像素是谁给的」就能
 ; 从串口上分开。
 run_prog_text_test:
-    ; 先把这两格抹掉：别的测试在同一片屏幕上画过东西，而「该暗」那一点要求背景是零。
+    ; 先把这三格抹掉：别的测试在同一片屏幕上画过东西，而「该暗」那一点要求背景是零。
     mov rdi, 40
     mov rsi, 120
     xor dl, dl
     call clear_block
-    mov rdi, 48
-    mov rsi, 120
+    mov rdi, 40
+    mov rsi, 130
+    xor dl, dl
+    call clear_block
+    mov rdi, 40
+    mov rsi, 140
     xor dl, dl
     call clear_block
 
@@ -3994,20 +4002,20 @@ run_prog_text_test:
     mov qword [pkg_base], 0x70000
     mov rsi, line_progtext
     call puts64
-    mov rdi, 40
-    mov rsi, 120
-    call read_pixel
-    call put_hex64
-    mov rsi, line_space
-    call puts64
     mov rdi, 42
     mov rsi, 120
     call read_pixel
     call put_hex64
     mov rsi, line_space
     call puts64
-    mov rdi, 50
-    mov rsi, 120
+    mov rdi, 42
+    mov rsi, 130
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 42
+    mov rsi, 140
     call read_pixel
     call put_hex64
     jmp put_nl64
@@ -11910,9 +11918,15 @@ draw_lines:
 ; 这个吃包里的带长度前缀的 UTF-16。画的部分是同一个 draw_one，所以字符集、字距、未知字符
 ; 的处理三样都只有一份。
 ;
-; 不处理换行：包里要换行就再调一次 text。版面是包的事，而这一层只负责「从这里开始画」。
+; 换行认 0x0A，行距十像素 —— 与 draw_lines 同一套约定，因为这两条路最后都落到 draw_one，
+; 而「一段话长什么样」不该因为串的来源不同而不同。
+;
+; 三个状态量：rbx 是行首 x（换行时回到这里），r9 是当前 x，r10 是当前 y。用 rbx 而不是
+; 再找一个不参与传参的寄存器，是因为 draw_one 一路下去不会碰它（draw_glyph 自己会保存
+; rbx）。r11 是串指针，rcx 是剩余码元数。
 draw_utf16:
     push rax
+    push rbx
     push rcx
     push rdx
     push rsi
@@ -11920,8 +11934,9 @@ draw_utf16:
     push r9
     push r10
     push r11
+    mov rbx, rdi                   ; 行首 x
     mov r9, rdi                    ; 当前 x
-    mov r10, rsi                   ; y（整个串一行，所以是个常数）
+    mov r10, rsi                   ; 当前 y
     mov r11, rdx                   ; 串指针
     movzx ecx, word [r11]          ; 码元数
     add r11, 2
@@ -11929,14 +11944,22 @@ draw_utf16:
     test ecx, ecx
     jz .done
     movzx eax, word [r11]
+    cmp ax, 10
+    je .newline
     mov rdi, r9
     mov rsi, r10
-    push rcx                       ; draw_one 会碰 rax 与 r10，而 rcx/r11 是这一段的状态
+    push rcx                       ; draw_one 会碰 rax 与 r10（保存过），而 rcx/r11 是状态
     push r11
     call draw_one
     pop r11
     pop rcx
     add r9, 8
+    add r11, 2
+    dec ecx
+    jmp .loop
+.newline:
+    mov r9, rbx                    ; 回到行首
+    add r10, 10                    ; 行距：字高八，空两行
     add r11, 2
     dec ecx
     jmp .loop
@@ -11948,6 +11971,7 @@ draw_utf16:
     pop rsi
     pop rdx
     pop rcx
+    pop rbx
     pop rax
     ret
 
