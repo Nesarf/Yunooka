@@ -812,6 +812,8 @@ long_entry:
     call run_upper_test
     ; 一行到一段：换行与行距。
     call run_lines_test
+    ; 小写：字体只有大写 26 个，折叠发生在绘制层。
+    call run_lower_test
     ; 第五个函数：读一个文件，返回它的字节数。
     call run_filesize_test
     ; 第六个函数：写一份文件，再读回来打出去。它要排在 dirfull 之前 —— 那一条会把
@@ -10514,6 +10516,50 @@ run_lines_test:
     call put_hex64
     jmp put_nl64
 
+; 小写：字体只有大写，所以这一条验的是「折叠发生在绘制层」。
+;
+; 判据写 "ab"，读三个点：
+;   (10,40) 是 A 顶边最左列，0x18 的 bit7 是 0，该暗
+;   (13,40) 是 A 顶边的 bit4，该亮 —— 而它只有在 a 被折成 A 之后才会亮：没折叠的话
+;     这个字符被当成未知字符跳过，整格是空的
+;   (19,40) 是第二个字符（b 折成 B）顶边的 bit6，B 的顶边是 0x7C，该亮
+; 所以两点「亮」各自守着一个小写字母，而它们之间隔着八像素 —— 字距也顺带被问到。
+run_lower_test:
+    mov rdi, 10
+    mov rsi, 40
+    xor dl, dl
+    call clear_block
+    mov rdi, 18
+    mov rsi, 40
+    xor dl, dl
+    call clear_block
+
+    mov rdi, 10
+    mov rsi, 40
+    lea rdx, [str_ab]
+    mov r8b, 0x2F
+    call draw_text
+
+    mov rsi, line_lower
+    call puts64
+    mov rdi, 10
+    mov rsi, 40
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 13
+    mov rsi, 40
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 19
+    mov rsi, 40
+    call read_pixel
+    call put_hex64
+    jmp put_nl64
+
 run_line_test:
     mov r12, 0
     mov r13, 0
@@ -11807,6 +11853,15 @@ draw_one:
     push rax
     push r10
     movzx eax, ax
+    ; 小写折成大写：这一版字体只有大写 26 个。折在这一层是它该做的事 —— 一个只有大写的
+    ; 字体把 a 画成 A；若留给每个调用者自己转，就变成每处调用都要记得转，而漏掉的那一处
+    ; 只会画出一片空白，不会报错。
+    cmp ax, 'a'
+    jb .case_done
+    cmp ax, 'z'
+    ja .case_done
+    sub ax, 0x20
+.case_done:
     cmp ax, '0'
     jb .out
     cmp ax, '9'
@@ -14468,6 +14523,8 @@ line_text:  db "Yunooka: text ", 0
 line_upper: db "Yunooka: upper ", 0
 str_HO:     db "HO", 0
 line_lines: db "Yunooka: lines ", 0
+line_lower: db "Yunooka: lower ", 0
+str_ab:     db "ab", 0
 str_h0:     db "H", 10, "0", 0
 str_01:     db "01", 0
 line_glyph: db "Yunooka: glyph ", 0
