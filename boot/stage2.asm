@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 150
+stage2_sectors equ 151
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -830,6 +830,8 @@ long_entry:
     call run_prog_bump_test
     ; 重画：擦窗口、按全局选标题、把输入的那一行画进内容区。
     call run_prog_redraw_test
+    ; 移位：窗口的位置来自全局，而不是包里的常量。
+    call run_prog_shift_test
     ; 窗口那一层到现在只有线与框。这一条让它能写字。
     call run_glyph_test
     ; 一个字母到一行字：字模成表，字距由判据量出来。
@@ -5316,6 +5318,90 @@ run_prog_redraw_test:
     jmp exec
 .missing:
     mov rsi, line_progredraw_bad
+    call puts64
+    ret
+
+; ======================================================================
+; 窗口跟着全局走
+; ======================================================================
+;
+; 在此之前，窗口的位置是包里的常量：win 的三层写死在 (60,80)。而「窗口」若不能移动，它就
+; 只是一幅画。这一格把位置搬进全局 10 与 11，再由一个零参的 shiftwin 取出来交给 winat。
+;
+; 为什么要一个零参外壳：宿主调用包函数时不能压参数 —— 它直接 exec，没有「调用者」那一层，
+; 实参是从运算栈搬进槽的，而宿主的栈是空的。所以「参数从哪来」只能由函数自己去取，全局
+; 就是那个来源。winat 本身接受两个参数，供包内的调用者用。
+;
+; 判据三点，先清屏再画，所以每一点都只可能来自这一次调用：
+;   (100, 60)  新窗口的左上角，应当是底色 1F
+;   (110, 70)  新窗口的标题栏，应当是 1C
+;   (60, 80)   旧窗口的左上角 —— 清屏之后若没人往那里画，它就是 00
+; 第三点是这一格的关键。它必须落在「旧窗口有、而新窗口没有」的地方：第一次挑的是 (160,86)，
+; 那是旧窗口标题栏的中央，可它同时也在新窗口的内容区里（两个位置互相重叠），于是正确实现的
+; 读数也是 0F，判据红在一个选错的点上。新窗口从 x=100 起，旧窗口左上角在 x=60，隔着四十列。
+run_prog_shift_test:
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]
+    mov r8, fs_prog_name
+    mov r9, 9
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz .missing
+    mov rdi, r15
+    call fs_load
+    mov r14, rsi
+    mov [pkg_base], r14
+
+    mov rsi, line_progshift
+    call puts64
+
+    ; 一、清屏：这一格的三点都只该来自这一次调用
+    xor dl, dl
+    call clear_screen
+
+    ; 二、位置进全局，然后画
+    mov qword [global_kinds + 10 * 8], 1
+    mov rax, 0x4059000000000000      ; 100.0
+    mov [global_vals + 10 * 8], rax
+    mov qword [global_kinds + 11 * 8], 1
+    mov rax, 0x404E000000000000      ; 60.0
+    mov [global_vals + 11 * 8], rax
+    mov rdi, name_shiftwin
+    mov r8, 8
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+    mov qword [pkg_base], 0x70000
+
+    mov rdi, 100
+    mov rsi, 60
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 110
+    mov rsi, 70
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 60
+    mov rsi, 80
+    call read_pixel
+    call put_hex64
+    jmp put_nl64
+.missing:
+    mov rsi, line_progshift_bad
     call puts64
     ret
 
@@ -14981,6 +15067,9 @@ name_titlewin: dw 0x0074, 0x0069, 0x0074, 0x006C, 0x0065, 0x0077, 0x0069, 0x006E
 name_redraw: dw 0x0072, 0x0065, 0x0064, 0x0072, 0x0061, 0x0077
 line_progredraw: db "Yunooka: progredraw ", 0
 line_progredraw_bad: db "Yunooka: progredraw missing", 0
+name_shiftwin: dw 0x0073, 0x0068, 0x0069, 0x0066, 0x0074, 0x0077, 0x0069, 0x006E
+line_progshift: db "Yunooka: progshift ", 0
+line_progshift_bad: db "Yunooka: progshift missing", 0
 name_clipped: dw 0x0063, 0x006C, 0x0069, 0x0070, 0x0070, 0x0065, 0x0064
 name_showfile: dw 0x0073, 0x0068, 0x006F, 0x0077, 0x0066, 0x0069, 0x006C, 0x0065
 name_slotwrite: dw 0x0073, 0x006C, 0x006F, 0x0074, 0x0077, 0x0072, 0x0069, 0x0074, 0x0065
