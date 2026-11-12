@@ -1260,6 +1260,29 @@ for (const 字 of "len") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 
   程序包[位++] = 28;
 }
 
+// 第二十三个函数：桥。
+//
+// 两条指令：调内置 runpkg（零参）、返回。它自己什么都不做 —— 全部的活在内层那个包里，
+// 而这一格要证明的正是「值能过桥」：docs/myon.hmtn 的 echo 现在返回 7，runpkg 不再把
+// 它丢掉。
+//
+// 为什么这一条与已有的「Myon 两包」判据不是同一条：那一条只证明「桥能让内层跑起来」，
+// 三次串口输出就够了。而一个「把内层返回值永远换成空」的 runpkg 照样能过它 —— 内层是
+// 用 write 说话的，话说完，返回值没人看。这一条看的恰好是没人看的那一半。
+{
+  程序包.writeUInt16LE(6, 位); 位 += 2;                      // bridge 是六个码元
+  for (const 字 of "bridge") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+  程序包.writeUInt16LE(0, 位); 位 += 2;                      // 参数量
+  程序包.writeUInt16LE(0, 位); 位 += 2;                      // 槽数
+  程序包.writeUInt16LE(0, 位); 位 += 2;                      // 效果数
+  程序包.writeUInt32LE(2, 位); 位 += 4;                      // 两条指令
+  程序包[位++] = 3;                                          // 调内置 runpkg（零参）
+  程序包.writeUInt16LE(6, 位); 位 += 2;
+  for (const 字 of "runpkg") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+  程序包.writeUInt16LE(0, 位); 位 += 2;
+  程序包[位++] = 28;                                         // 返回它：值就是这么过桥的
+}
+
 const 程序字节 = 程序包.subarray(0, 位);
 
 // ---- 三·二·二、第二个包：Myon 的回声 ----
@@ -1283,7 +1306,10 @@ for (const 字 of "echo") { 回声包.writeUInt16LE(字.charCodeAt(0), 回位); 
 回声包.writeUInt16LE(0, 回位); 回位 += 2;
 回声包.writeUInt16LE(0, 回位); 回位 += 2;
 回声包.writeUInt16LE(0, 回位); 回位 += 2;
-回声包.writeUInt32LE(3, 回位); 回位 += 4;
+// 四条而不是三条：这一份的 echo 现在要带回一个值。它仍然是「打一行字」的那个 echo，
+// 只是打完再说一句 7 —— 因为桥接要证明的下一件事是「值能过桥」，而一个返回空的函数
+// 在桥的两端看起来都与「桥根本没接过」一样。
+回声包.writeUInt32LE(4, 回位); 回位 += 4;
 回声包[回位++] = 5;
 回声包[回位++] = 2;
 回声包.writeUInt16LE(回声串.length, 回位); 回位 += 2;
@@ -1292,6 +1318,7 @@ for (const 字 of 回声串) { 回声包.writeUInt16LE(字.charCodeAt(0), 回位
 回声包.writeUInt16LE(5, 回位); 回位 += 2;
 for (const 字 of "write") { 回声包.writeUInt16LE(字.charCodeAt(0), 回位); 回位 += 2; }
 回声包.writeUInt16LE(1, 回位); 回位 += 2;
+回声包[回位++] = 5; 回声包[回位++] = 1; 回声包.writeDoubleLE(7.0, 回位); 回位 += 8;
 回声包[回位++] = 28;
 const 回声字节 = 回声包.subarray(0, 回位);
 

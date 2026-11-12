@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 147
+stage2_sectors equ 148
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -824,6 +824,8 @@ long_entry:
     call run_prog_frame_test
     ; 重绘：同一个函数，两帧画出不同的字。
     call run_prog_retitle_test
+    ; 过桥：内层包返回的值被原样带回来。
+    call run_prog_bridge_test
     ; 窗口那一层到现在只有线与框。这一条让它能写字。
     call run_glyph_test
     ; 一个字母到一行字：字模成表，字距由判据量出来。
@@ -1775,7 +1777,7 @@ exec:
     mov rdi, fs_myon_path
     call fs_open_path
     test rax, rax
-    jz .rp_done
+    jz .rp_fail
     mov rax, [last_addr]
     mov [pkg_base], rax
     mov rdi, name_echo
@@ -1783,13 +1785,28 @@ exec:
     xor r15, r15
     call find_fn_by_name
     test rax, rax
-    jz .rp_done
+    jz .rp_fail
     mov r12, rsi
     mov qword [stack_top], 32
     mov qword [frame_sp], 0
     xor rbx, rbx
     call exec
+    ; 内层的返回值就摆在 exec 停下时的 rax 与 rdx 里 —— 帧 0 的返回直接就是那句 ret，值不经过
+    ; 别的任何地方。这里把它存到内存而不是留在寄存器里：下面那串 pop 要把 r12 到 r15 与 rbx
+    ; 全部还原，一个通用寄存器都不空。
+    push rax
+    push rdx
+    jmp .rp_done
+.rp_fail:
+    ; 桥没接上时给空。空与「内层恰好返回空」在读数上是同一件事，而这是对的 —— 两者都表示
+    ; 没有值过桥。给别的东西（比如上一个值）才会让红变成一种说不清的样子。
+    xor eax, eax
+    xor edx, edx
+    push rax
+    push rdx
 .rp_done:
+    pop qword [rp_val]
+    pop qword [rp_kind]
     pop qword [frame_sp]
     pop qword [stack_top]
     pop qword [pkg_base]
@@ -1798,8 +1815,14 @@ exec:
     pop r13
     pop r12
     pop rbx
-    xor eax, eax
-    xor edx, edx
+    ; 指令偏移表是全局的，而内层 exec 已经把它换成了内层函数的那一份。上面恢复的 r12 与 r13
+    ; 只是字节流与条数 —— 表还是别人的。不重算的话，下一条指令会按内层的偏移去外层的字节里
+    ; 取，于是 exec 跳进一串乱字节，而症状是「桥回来之后崩在一个毫不相干的指令上」。
+    ;
+    ; 这是一个在桥接落地那天就存在的缺口，只是当时唯一从桥上回来就收尾的调用者让它没有露头。
+    call scan_instrs
+    mov rax, [rp_kind]
+    mov rdx, [rp_val]
     call push_val
     inc rbx
     jmp .loop
@@ -5011,6 +5034,59 @@ run_prog_retitle_test:
     jmp exec
 .missing:
     mov rsi, line_progretitle_bad
+    call puts64
+    ret
+
+; ======================================================================
+; 值过桥
+; ======================================================================
+;
+; 已有的「Myon 两包」判据只证明桥能让内层跑起来 —— 内层是用 write 说话的，话说完就完，
+; 返回值没人看。所以一个「把内层返回值永远换成空」的 runpkg 照样过它。这一条看的是另一
+; 半：内层的 echo 现在返回 7，外层的 bridge 原样把它带回来，宿主读到 7。
+;
+; 三端都要对得上才叫桥 —— 内层返回什么、外层拿到什么、宿主读到什么。少一端，「桥没接上」
+; 与「桥接上了而值被丢掉」在读数上就是一样的。
+run_prog_bridge_test:
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]
+    mov r8, fs_prog_name
+    mov r9, 9
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz .missing
+    mov rdi, r15
+    call fs_load
+    mov r14, rsi
+    mov [pkg_base], r14
+    mov rdi, name_bridge
+    mov r8, 6
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+    ; exec 停下时 rax 与 rdx 就是 bridge 的返回值，而它是 runpkg 带回来的那一份。
+    ; 先搬到两个不会被下面的调用用掉的寄存器，再打印。
+    mov r15, rax
+    mov r14, rdx
+    mov qword [pkg_base], 0x70000
+    mov rsi, line_progbridge
+    call puts64
+    mov rax, r15
+    mov rdx, r14
+    call print_value
+    jmp put_nl64
+.missing:
+    mov rsi, line_progbridge_bad
     call puts64
     ret
 
@@ -14410,6 +14486,10 @@ line_unknown_kind: db "?", 13, 10, 0
 align 8
 stack_kind: dq 0
 stack_val: dq 0
+; 桥的返回值暂存。它与上面那两格不是一回事：那两格是「只有一格的栈」，而这两格只是内层
+; exec 停下时的一个快照 —— 取走就作废，下一次桥接会重新写。
+rp_kind: dq 0
+rp_val: dq 0
 
 ; 解释器的那几样：值栈、帧、以及每条指令的字节偏移。
 ;
@@ -14680,6 +14760,9 @@ line_progframe_bad: db "Yunooka: progfrm missing", 0
 name_retitle: dw 0x0072, 0x0065, 0x0074, 0x0069, 0x0074, 0x006C, 0x0065
 line_progretitle: db "Yunooka: progretitle ", 0
 line_progretitle_bad: db "Yunooka: progretitle missing", 0
+name_bridge: dw 0x0062, 0x0072, 0x0069, 0x0064, 0x0067, 0x0065
+line_progbridge: db "Yunooka: progbridge ", 0
+line_progbridge_bad: db "Yunooka: progbridge missing", 0
 line_progdrag: db "Yunooka: progdrg ", 0
 line_progdrag_bad: db "Yunooka: progdrg missing", 0
 line_progglobal: db "Yunooka: progglobal ", 0
