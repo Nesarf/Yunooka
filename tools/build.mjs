@@ -403,7 +403,7 @@ const 回声串 = "myon here";
 const 程序包 = Buffer.alloc(1600);
 程序包.write("HMYRB", 0, "latin1");
 程序包.writeUInt16LE(1, 5);       // 版本
-程序包.writeUInt16LE(11, 7);      // 十一个函数
+程序包.writeUInt16LE(12, 7);      // 十二个函数
 let 位 = 9;
 程序包.writeUInt16LE(4, 位); 位 += 2;                      // 名字长度
 for (const 字 of "main") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
@@ -883,6 +883,58 @@ for (const 字 of "len") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 
   程序包[位++] = 3;                                          // 调内置 text（四参）
   程序包.writeUInt16LE(4, 位); 位 += 2;
   for (const 字 of "text") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+  程序包.writeUInt16LE(4, 位); 位 += 2;
+程序包[位++] = 28;                                          // 返回
+}
+
+// 第十二个函数：在窗口里写字，而字要越界。
+//
+// 十六格指令：四个常量设裁剪（60、80、260、170）、调 clip、四个常量给 text（240、84、
+// LONG、0x0F）、调 text、四个零常量关裁剪、调 clip、返回。
+//
+// 字从 240 起写四个字符，所以占 240 到 271，而裁剪的右边界是 260 —— 第三个字符的后半与
+// 第四个字符整个落在外面。判据要读的正是那个「本该有字，却被裁掉」的位置。
+{
+  程序包.writeUInt16LE(7, 位); 位 += 2;                      // 名字长度（clipped 是七个码元）
+  for (const 字 of "clipped") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+  程序包.writeUInt16LE(0, 位); 位 += 2;                      // 参数量
+  程序包.writeUInt16LE(0, 位); 位 += 2;                      // 槽数
+  程序包.writeUInt16LE(0, 位); 位 += 2;                      // 效果数
+  程序包.writeUInt32LE(16, 位); 位 += 4;                     // 十六条指令
+  for (const 值 of [60, 80, 260, 170]) {                     // 裁剪矩形
+    程序包[位++] = 5;
+    程序包[位++] = 1;
+    程序包.writeDoubleLE(值, 位); 位 += 8;
+  }
+  程序包[位++] = 3;                                          // 调内置 clip（四参）
+  程序包.writeUInt16LE(4, 位); 位 += 2;
+  for (const 字 of "clip") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+  程序包.writeUInt16LE(4, 位); 位 += 2;
+  for (const 值 of [240, 84]) {                              // 字的 x、y
+    程序包[位++] = 5;
+    程序包[位++] = 1;
+    程序包.writeDoubleLE(值, 位); 位 += 8;
+  }
+  const 越界标题 = "LONG";
+  程序包[位++] = 5;                                          // 常量：字
+  程序包[位++] = 2;
+  程序包.writeUInt16LE(越界标题.length, 位); 位 += 2;
+  for (const 字 of 越界标题) { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+  程序包[位++] = 5;                                          // 常量：颜色
+  程序包[位++] = 1;
+  程序包.writeDoubleLE(0x0F, 位); 位 += 8;
+  程序包[位++] = 3;                                          // 调内置 text（四参）
+  程序包.writeUInt16LE(4, 位); 位 += 2;
+  for (const 字 of "text") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+  程序包.writeUInt16LE(4, 位); 位 += 2;
+  for (const 值 of [0, 0, 0, 0]) {                           // 关掉裁剪
+    程序包[位++] = 5;
+    程序包[位++] = 1;
+    程序包.writeDoubleLE(值, 位); 位 += 8;
+  }
+  程序包[位++] = 3;
+  程序包.writeUInt16LE(4, 位); 位 += 2;
+  for (const 字 of "clip") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
   程序包.writeUInt16LE(4, 位); 位 += 2;
 程序包[位++] = 28;                                          // 返回
 }

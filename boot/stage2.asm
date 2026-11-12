@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 139
+stage2_sectors equ 140
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -207,7 +207,7 @@ stage2:
     mov dword [dap_lba], 1024
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x4000
-    mov word [dap_count], 30       ; preread-sectors: 预读几个扇区，这个数由 build 核对
+    mov word [dap_count], 32       ; preread-sectors: 预读几个扇区，这个数由 build 核对
     call read_batch
     jnc .fs_ready
     mov si, line_fs_preread
@@ -808,6 +808,8 @@ long_entry:
     call run_prog_echo_test
     ; 窗口与文字合起来：一个框加上它自己说的话。
     call run_prog_title_test
+    ; 裁剪：字画到窗口外面该消失。
+    call run_prog_clip_test
     ; 窗口那一层到现在只有线与框。这一条让它能写字。
     call run_glyph_test
     ; 一个字母到一行字：字模成表，字距由判据量出来。
@@ -2225,6 +2227,47 @@ exec:
     cvttsd2si rax, xmm2
     mov r8b, al
     call draw_utf16
+    xor eax, eax
+    xor edx, edx
+    call push_val
+    inc rbx
+    jmp .loop
+
+.op_clip:
+    ; 设定裁剪矩形：四个参数 x0、y0、x1、y1，左闭右开。
+    ;
+    ; 四参全零表示关闭。一个「关闭」的内置比再来一个 unclip 省一个名字，而 (0,0,0,0)
+    ; 这个矩形本身没有意义（宽高都是零），所以不会有人真想用它。
+    ;
+    ; 只裁文字。矩形与线不裁，因为它们现有的判据都画在窗口里面 —— 而「需要被裁的矩形」
+    ; 要到拖动窗口那天才出现，那时再给它一份同样的检查，位置在这一段的注释里。
+    cmp r14, 4
+    jne .builtin_unknown
+    call pop_val                    ; y1
+    movq xmm0, rdx
+    cvttsd2si rax, xmm0
+    mov [clip_y1], rax
+    call pop_val                    ; x1
+    movq xmm0, rdx
+    cvttsd2si rax, xmm0
+    mov [clip_x1], rax
+    call pop_val                    ; y0
+    movq xmm0, rdx
+    cvttsd2si rax, xmm0
+    mov [clip_y0], rax
+    call pop_val                    ; x0
+    movq xmm0, rdx
+    cvttsd2si rax, xmm0
+    mov [clip_x0], rax
+    mov qword [clip_on], 1
+    mov rax, [clip_x0]
+    or rax, [clip_y0]
+    or rax, [clip_x1]
+    or rax, [clip_y1]
+    test rax, rax
+    jnz .clip_set
+    mov qword [clip_on], 0
+.clip_set:
     xor eax, eax
     xor edx, edx
     call push_val
@@ -4181,6 +4224,74 @@ run_prog_title_test:
     jmp put_nl64
 .missing:
     mov rsi, line_progtitle_bad
+    call puts64
+    ret
+
+; ======================================================================
+; 裁剪：字画到窗口外面该消失
+; ======================================================================
+;
+; 上一格把窗口与文字合起来了，但内容会溢出去：画到窗口外的字照画不误，两个窗口挨着就
+; 互相脏。这一格补的是那条界线。
+;
+; 包里那个函数叫 clipped，十六格指令：设裁剪（60、80、260、170）、调 clip、把 LONG 写
+; 在 (240, 84)、关裁剪、返回。四个字符占 240 到 271，而裁剪的右边界是 260 —— 第三个字符
+; 的后半与第四个字符整个落在外面。
+;
+; 判据读两个点：
+;   (241,84) 是 L 顶边的 bit6，该是字色 0x0F —— 它在裁剪里
+;   (261,84) 是 N 顶边的 bit2。那里本来会被画上 0x0F，而裁剪该让它保住底色
+; 第二点前面先被写成 0x05 —— 只有这样「没被覆盖」才是有内容的断言：屏幕那一格本来是
+; 零，而零与「裁掉了」在串口上分不开。
+run_prog_clip_test:
+    ; 先在被裁的那一格上写 0x05，让它有个不该被动的内容。
+    mov rdi, 261
+    mov rsi, 84
+    mov dl, 0x05
+    call clear_block
+
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]
+    mov r8, fs_prog_name
+    mov r9, 9
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz .missing
+    mov rdi, r15
+    call fs_load
+    mov r14, rsi
+    mov [pkg_base], r14
+    mov rdi, name_clipped
+    mov r8, 7
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+    mov qword [pkg_base], 0x70000
+    mov rsi, line_progclip
+    call puts64
+    mov rdi, 241
+    mov rsi, 84
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 261
+    mov rsi, 84
+    call read_pixel
+    call put_hex64
+    jmp put_nl64
+.missing:
+    mov rsi, line_progclip_bad
     call puts64
     ret
 
@@ -11957,6 +12068,26 @@ draw_glyph:
     shl rax, cl                    ; 把第 (7-列) 位顶到最高位
     test rax, 0x80
     jz .skip
+    ; 裁剪：只在矩形内写。规则是「左闭右开」—— x 落在 [clip_x0, clip_x1) 才算在里面。
+    ; 右开是为了让相邻两块窗口共用一条边而不重叠：前一块的 x1 就是后一块的 x0。
+    ;
+    ; 裁剪关着的时候这一段的代价只是两条 cmp，而它挡住的是「一个窗口的字画到隔壁窗口
+    ; 身上」—— 那种错在屏幕上看得出，在串口上看不出。
+    cmp qword [clip_on], 0
+    je .write_ok
+    mov rax, rdi
+    add rax, r11                   ; 屏幕 x
+    cmp rax, [clip_x0]
+    jb .skip
+    cmp rax, [clip_x1]
+    jae .skip
+    mov rcx, rsi
+    add rcx, r9                    ; 屏幕 y
+    cmp rcx, [clip_y0]
+    jb .skip
+    cmp rcx, [clip_y1]
+    jae .skip
+.write_ok:
     mov rax, r9
     add rax, rsi                   ; y + 行
     imul rax, rax, 320
@@ -13696,6 +13827,12 @@ bi_name_border: dw 0x0062, 0x006F, 0x0072, 0x0064, 0x0065, 0x0072
 bi_name_runpkg: dw 0x0072, 0x0075, 0x006E, 0x0070, 0x006B, 0x0067
 bi_name_rect: dw 0x0072, 0x0065, 0x0063, 0x0074
 bi_name_text: dw 0x0074, 0x0065, 0x0078, 0x0074
+bi_name_clip: dw 0x0063, 0x006C, 0x0069, 0x0070
+clip_on: dq 0
+clip_x0: dq 0
+clip_y0: dq 0
+clip_x1: dq 0
+clip_y1: dq 0
 bi_name_slurp: dw 0x0073, 0x006C, 0x0075, 0x0072, 0x0070
 bi_name_save: dw 0x0073, 0x0061, 0x0076, 0x0065
 bi_name_list: dw 0x006C, 0x0069, 0x0073, 0x0074
@@ -13722,6 +13859,9 @@ builtin_table:
     dq 4
     dq bi_name_text
     dq exec.op_text
+    dq 4
+    dq bi_name_clip
+    dq exec.op_clip
     dq 5
     dq bi_name_slurp
     dq exec.op_slurp
@@ -13801,6 +13941,9 @@ name_win: dw 0x0077, 0x0069, 0x006E
 name_textline: dw 0x0074, 0x0065, 0x0078, 0x0074, 0x006C, 0x0069, 0x006E, 0x0065
 name_echo2text: dw 0x0065, 0x0063, 0x0068, 0x006F, 0x0032, 0x0074, 0x0065, 0x0078, 0x0074
 name_titlewin: dw 0x0074, 0x0069, 0x0074, 0x006C, 0x0065, 0x0077, 0x0069, 0x006E
+name_clipped: dw 0x0063, 0x006C, 0x0069, 0x0070, 0x0070, 0x0065, 0x0064
+line_progclip: db "Yunooka: progclip ", 0
+line_progclip_bad: db "Yunooka: progclip missing", 0
 line_progtitle: db "Yunooka: progtitle ", 0
 line_progtitle_bad: db "Yunooka: progtitle missing", 0
 line_progecho: db "Yunooka: progecho ", 0
