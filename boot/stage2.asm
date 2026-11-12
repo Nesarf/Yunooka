@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 142
+stage2_sectors equ 144
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -816,6 +816,8 @@ long_entry:
     call run_prog_set_test
     ; 循环：包里第一次转起来。
     call run_prog_loop_test
+    ; 全局：包里第一样比一次调用更长寿的东西。
+    call run_prog_global_test
     ; 窗口那一层到现在只有线与框。这一条让它能写字。
     call run_glyph_test
     ; 一个字母到一行字：字模成表，字距由判据量出来。
@@ -1265,7 +1267,7 @@ scan_instrs:
     ; 上限是硬编码的，所以「加一条 opcode」是三处而不是两处：形状表加一项、分派链加两行，
     ; 还有这里这个数。漏掉第三处的症状最难看 —— 它不报错，只是提前停下，而 instr_offsets
     ; 里剩下那几格是上一个函数留下的旧偏移，于是这个函数跑到别人的代码上去。
-    cmp eax, 34
+    cmp eax, 36
     jbe .shape_ok
     ; 越界：把 opcode 与它所在的地址一起打出来。
     ;
@@ -1349,6 +1351,10 @@ exec:
     je .op_get
     cmp r14, 34                     ; 存（本侧追加的号，不在 HMYR 的 34 条里）
     je .op_set
+    cmp r14, 35                     ; 全域取
+    je .op_getglobal
+    cmp r14, 36                     ; 全域存
+    je .op_setglobal
     cmp r14, 26                     ; 弃
     je .op_drop
     cmp r14, 7                      ; 等
@@ -1419,6 +1425,30 @@ exec:
     pop rcx
     mov [stack_kinds + rcx * 8], rax
     mov [stack_vals + rcx * 8], rdx
+    inc rbx
+    jmp .loop
+.op_getglobal:
+    ; 全域取：立即数是一个 u16 编号，取的是那一格的名字，不是帧里的槽。
+    ;
+    ; 它与「取」的差别只有一处，而那一处就是全部：槽在帧里，函数一返回就没了；全局在
+    ; 帧外，所以它能跨调用活下来。拖动要用它，而它是包里第一样「比一次调用更长寿」的东西。
+    ;
+    ; 编号从 0 数到 15。上限不做检查：越界读到的会是自己那两张表后面的内存，而那不是
+    ; 「安全的错」，是「读到别人的东西」。这一版不出界就够了 —— 包是我们自己写的。
+    movzx ecx, word [rsi]
+    mov rax, [global_kinds + rcx * 8]
+    mov rdx, [global_vals + rcx * 8]
+    call push_val
+    inc rbx
+    jmp .loop
+.op_setglobal:
+    ; 全域存：与全域取共用同一格，所以写进去的一定读得出来。
+    movzx ecx, word [rsi]
+    push rcx
+    call pop_val                    ; rax = 种类，rdx = 内容
+    pop rcx
+    mov [global_kinds + rcx * 8], rax
+    mov [global_vals + rcx * 8], rdx
     inc rbx
     jmp .loop
 .op_drop:
@@ -4559,6 +4589,76 @@ run_prog_loop_test:
     jmp put_nl64
 .missing:
     mov rsi, line_progloop_bad
+    call puts64
+    ret
+
+; ======================================================================
+; 全局：包里第一样比一次调用更长寿的东西
+; ======================================================================
+;
+; 槽随帧生死，全局不随。这个差别在同一个函数里看不出来 —— 槽也能写完再读，上一格已经
+; 证过。所以这一格的判据必须跨两次 exec：先跑 globalset 把 7 写进第 3 号，再跑 globalget
+; 把它读回来。若「全局」其实落在了槽里，第二次读到的是空，因为那时已经是另一帧、另一次
+; exec 了。
+;
+; 两次 exec 之间不做任何清扫。这不是疏忽：全局的意思正是「不清扫也还在」，而清扫一下
+; 再读，判据就变成「它在清扫之后被留住」而不是「它跨调用活着」。
+run_prog_global_test:
+    ; 第一次：写。
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]
+    mov r8, fs_prog_name
+    mov r9, 9
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz .missing
+    mov rdi, r15
+    call fs_load
+    mov r14, rsi
+    mov [pkg_base], r14
+    mov rdi, name_globalset
+    mov r8, 9
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+    ; 这里不能把 pkg_base 拨回 0x70000：第二次 find_fn_by_name 还要在同一个包里找
+    ; globalget。拨回去就变成在种子里找它，而种子没有这个函数 —— 症状是 missing，
+    ; 一个与「全局没生效」毫无关系的报法。
+
+    ; 第二次：读。
+    mov rdi, name_globalget
+    mov r8, 9
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+    mov r15, rax
+    mov r14, rdx
+    mov qword [pkg_base], 0x70000
+    mov rsi, line_progglobal
+    call puts64
+    mov rax, r15
+    mov rdx, r14
+    call print_value
+    call put_nl64
+    ret
+.missing:
+    mov rsi, line_progglobal_bad
     call puts64
     ret
 
@@ -13934,6 +14034,7 @@ imm_shape:
     db 0, 1, 0, 6, 6, 7, 0, 0, 3, 0, 3, 0, 0, 2, 2, 2, 2, 2, 0, 1
     db 0, 0, 0, 0, 0, 0, 0, 5, 0, 4, 0, 1, 6, 3
     db 1                     ; 34：本侧自己的「存」，HMYR 的表里没有这一条
+    db 1, 1                  ; 35 全域取、36 全域存：本侧自己的，HMYR 里也没有
 
 line_letters: db "Yunooka: letters -> ", 0
 line_op_bad: db "Yunooka: scan op ", 0
@@ -14101,6 +14202,9 @@ clip_x0: dq 0
 clip_y0: dq 0
 clip_x1: dq 0
 clip_y1: dq 0
+; 全域区：十六格，帧外的名字。它与值栈上的槽是两回事 —— 槽随帧生死，这几格不随。
+global_kinds: times 16 dq 0
+global_vals:  times 16 dq 0
 bi_name_slurp: dw 0x0073, 0x006C, 0x0075, 0x0072, 0x0070
 bi_name_save: dw 0x0073, 0x0061, 0x0076, 0x0065
 bi_name_list: dw 0x006C, 0x0069, 0x0073, 0x0074
@@ -14213,6 +14317,10 @@ name_clipped: dw 0x0063, 0x006C, 0x0069, 0x0070, 0x0070, 0x0065, 0x0064
 name_showfile: dw 0x0073, 0x0068, 0x006F, 0x0077, 0x0066, 0x0069, 0x006C, 0x0065
 name_slotwrite: dw 0x0073, 0x006C, 0x006F, 0x0074, 0x0077, 0x0072, 0x0069, 0x0074, 0x0065
 name_loopthree: dw 0x006C, 0x006F, 0x006F, 0x0070, 0x0074, 0x0068, 0x0072, 0x0065, 0x0065
+name_globalset: dw 0x0067, 0x006C, 0x006F, 0x0062, 0x0061, 0x006C, 0x0073, 0x0065, 0x0074
+name_globalget: dw 0x0067, 0x006C, 0x006F, 0x0062, 0x0061, 0x006C, 0x0067, 0x0065, 0x0074
+line_progglobal: db "Yunooka: progglobal ", 0
+line_progglobal_bad: db "Yunooka: progglobal missing", 0
 line_progloop: db "Yunooka: progloop ", 0
 line_progloop_bad: db "Yunooka: progloop missing", 0
 line_progset: db "Yunooka: progset ", 0

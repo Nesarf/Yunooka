@@ -403,7 +403,7 @@ const 回声串 = "myon here";
 const 程序包 = Buffer.alloc(2048);
 程序包.write("HMYRB", 0, "latin1");
 程序包.writeUInt16LE(1, 5);       // 版本
-程序包.writeUInt16LE(15, 7);      // 十五个函数
+程序包.writeUInt16LE(17, 7);      // 十七个函数
 let 位 = 9;
 程序包.writeUInt16LE(4, 位); 位 += 2;                      // 名字长度
 for (const 字 of "main") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
@@ -1063,6 +1063,43 @@ for (const 字 of "len") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 
                                                              // 跳 4
   取槽(0);                                                   // 返回值：i
 程序包[位++] = 28;                                          // 返回
+}
+
+// 第十六、十七个函数：全局的两半，分成两个函数写。
+//
+// 为什么必须在两个函数里：全局与槽的差别只有一处 —— 槽随帧生死，全局不随。而在同一个
+// 函数里写完再读，那个差别看不出来（槽也能写再读，上一格已经证过）。所以判据必须跨两次
+// 调用：第一次 globalset 写，第二次 globalget 读。若「全局」其实落在了槽里，第二次读到的
+// 会是空 —— 因为那时已经是另一帧、甚至是另一次 exec 了。
+//
+// 编号用 3 而不是 0：让判据里的数字不至于与「零」「空」混在一起。
+{
+  程序包.writeUInt16LE(9, 位); 位 += 2;                      // globalset 是九个码元
+  for (const 字 of "globalset") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+  程序包.writeUInt16LE(0, 位); 位 += 2;                      // 参数量
+  程序包.writeUInt16LE(0, 位); 位 += 2;                      // 槽数
+  程序包.writeUInt16LE(0, 位); 位 += 2;                      // 效果数
+  程序包.writeUInt32LE(4, 位); 位 += 4;                      // 四条指令
+  程序包[位++] = 5;                                          // 常量 7
+  程序包[位++] = 1;
+  程序包.writeDoubleLE(7.0, 位); 位 += 8;
+  程序包[位++] = 36;                                         // 全域存：编号 3
+  程序包.writeUInt16LE(3, 位); 位 += 2;
+  程序包[位++] = 5;                                          // 再常量 7（上一条把它弹走了）
+  程序包[位++] = 1;
+  程序包.writeDoubleLE(7.0, 位); 位 += 8;
+程序包[位++] = 28;                                          // 返回 7
+}
+{
+  程序包.writeUInt16LE(9, 位); 位 += 2;                      // globalget 是九个码元
+  for (const 字 of "globalget") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+  程序包.writeUInt16LE(0, 位); 位 += 2;                      // 参数量
+  程序包.writeUInt16LE(0, 位); 位 += 2;                      // 槽数
+  程序包.writeUInt16LE(0, 位); 位 += 2;                      // 效果数
+  程序包.writeUInt32LE(2, 位); 位 += 4;                      // 两条指令
+  程序包[位++] = 35;                                         // 全域取：编号 3
+  程序包.writeUInt16LE(3, 位); 位 += 2;
+程序包[位++] = 28;                                          // 返回它
 }
 
 const 程序字节 = 程序包.subarray(0, 位);
