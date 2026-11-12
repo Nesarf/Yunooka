@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 149
+stage2_sectors equ 150
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -207,7 +207,7 @@ stage2:
     mov dword [dap_lba], 1024
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x4000
-    mov word [dap_count], 34       ; preread-sectors: 预读几个扇区，这个数由 build 核对
+    mov word [dap_count], 36       ; preread-sectors: 预读几个扇区，这个数由 build 核对
     call read_batch
     jnc .fs_ready
     mov si, line_fs_preread
@@ -828,6 +828,8 @@ long_entry:
     call run_prog_bridge_test
     ; 送值：外层把 7 递进桥里，内层加一，带回来 8。
     call run_prog_bump_test
+    ; 重画：擦窗口、按全局选标题、把输入的那一行画进内容区。
+    call run_prog_redraw_test
     ; 窗口那一层到现在只有线与框。这一条让它能写字。
     call run_glyph_test
     ; 一个字母到一行字：字模成表，字距由判据量出来。
@@ -5224,6 +5226,96 @@ run_prog_bump_test:
     jmp put_nl64
 .missing:
     mov rsi, line_progbump_bad
+    call puts64
+    ret
+
+; ======================================================================
+; 一帧重画整个窗口
+; ======================================================================
+;
+; 前面的格子各证明一件事：retitle 能重画标题栏、titlewin 能画骨架加一句话、echo2text 能把
+; 输入的那一行画到屏幕上。而窗口从来没有被整体重画过 —— 三样各画各的，谁也擦不掉谁。
+;
+; 判据的三点各问一件不同的事，所以顺序也是内容：
+;   (73, 84)  'O' 顶横的中央。titlewin 画的 MYON 里，这一格是 M 的空位 —— 若 redraw 没画
+;             新标题，它读到的就是标题栏底色 1C；画了才是 0F
+;   (71, 100) 内容区第一个字符 'e'（绘制层折叠成 'E'）的笔画。这一格只会在 readline 拿到
+;             那行字并画出来时是 2F
+;   (74, 154) 重画之前宿主人为涂的一块 2F。字只占 y 100..107，所以它该被底色 0F 盖掉 ——
+;             这一格读的是「擦真的发生了」，而不是「新东西画上去了」
+run_prog_redraw_test:
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]
+    mov r8, fs_prog_name
+    mov r9, 9
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz .missing
+    mov rdi, r15
+    call fs_load
+    mov r14, rsi
+    mov [pkg_base], r14
+
+    mov rsi, line_progredraw
+    call puts64
+
+    ; 一、先让窗口里有一份旧内容：titlewin 画骨架与 MYON
+    mov rdi, name_titlewin
+    mov r8, 8
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    call .reset_and_run
+
+    ; 二、在内容区下部人为涂一块 2F：它离字很远，所以只能被「擦」擦掉
+    mov rdi, 70
+    mov rsi, 150
+    mov dl, 0x2F
+    call clear_block
+
+    ; 三、选择子归零（画 O），再把整个窗口重画一遍
+    mov qword [global_kinds + 9 * 8], 1
+    mov qword [global_vals + 9 * 8], 0
+    mov rdi, name_redraw
+    mov r8, 6
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    call .reset_and_run
+
+    mov rdi, 73
+    mov rsi, 84
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 71
+    mov rsi, 100
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 74
+    mov rsi, 154
+    call read_pixel
+    call put_hex64
+    mov qword [pkg_base], 0x70000
+    jmp put_nl64
+.reset_and_run:
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    jmp exec
+.missing:
+    mov rsi, line_progredraw_bad
     call puts64
     ret
 
@@ -14886,6 +14978,9 @@ name_win: dw 0x0077, 0x0069, 0x006E
 name_textline: dw 0x0074, 0x0065, 0x0078, 0x0074, 0x006C, 0x0069, 0x006E, 0x0065
 name_echo2text: dw 0x0065, 0x0063, 0x0068, 0x006F, 0x0032, 0x0074, 0x0065, 0x0078, 0x0074
 name_titlewin: dw 0x0074, 0x0069, 0x0074, 0x006C, 0x0065, 0x0077, 0x0069, 0x006E
+name_redraw: dw 0x0072, 0x0065, 0x0064, 0x0072, 0x0061, 0x0077
+line_progredraw: db "Yunooka: progredraw ", 0
+line_progredraw_bad: db "Yunooka: progredraw missing", 0
 name_clipped: dw 0x0063, 0x006C, 0x0069, 0x0070, 0x0070, 0x0065, 0x0064
 name_showfile: dw 0x0073, 0x0068, 0x006F, 0x0077, 0x0066, 0x0069, 0x006C, 0x0065
 name_slotwrite: dw 0x0073, 0x006C, 0x006F, 0x0074, 0x0077, 0x0072, 0x0069, 0x0074, 0x0065
