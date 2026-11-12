@@ -403,7 +403,7 @@ const 回声串 = "myon here";
 const 程序包 = Buffer.alloc(3072);
 程序包.write("HMYRB", 0, "latin1");
 程序包.writeUInt16LE(1, 5);       // 版本
-程序包.writeUInt16LE(20, 7);      // 二十个函数
+程序包.writeUInt16LE(21, 7);      // 二十一个函数
 let 位 = 9;
 程序包.writeUInt16LE(4, 位); 位 += 2;                      // 名字长度
 for (const 字 of "main") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
@@ -1157,6 +1157,34 @@ for (const 字 of "len") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 
   程序包[位++] = 5; 程序包[位++] = 1; 程序包.writeDoubleLE(60.0, 位); 位 += 8;
   程序包[位++] = 0;                                          // 加
   程序包[位++] = 36; 程序包.writeUInt16LE(5, 位); 位 += 2;   // 写回全局 5
+程序包[位++] = 28;
+}
+
+// 第二十一个函数：橡皮。
+//
+// 与 mark 逐条一样，只有最后一个常量不同 —— 颜色 0 而不是 0x2F。所以它没有引入任何新
+// 机制：rect 本来就是「填充一个矩形」，而把一块地方涂成背景色就是擦除。加一个 fill 内置
+// 会让「擦」变成一个独立动词，而这一层还不需要那个区别。
+//
+// 它存在的理由在调用顺序上，不在它自己身上：擦旧位置、改坐标、画新位置 —— 三步连起来才是
+// 「一帧」。缺了中间那一步，拖动就变成「在屏幕上撒方块」。
+{
+  程序包.writeUInt16LE(5, 位); 位 += 2;                      // erase 是五个码元
+  for (const 字 of "erase") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+  程序包.writeUInt16LE(0, 位); 位 += 2;
+  程序包.writeUInt16LE(0, 位); 位 += 2;
+  程序包.writeUInt16LE(0, 位); 位 += 2;
+  程序包.writeUInt32LE(8, 位); 位 += 4;                      // 八条：与 mark 同形
+  程序包[位++] = 35; 程序包.writeUInt16LE(5, 位); 位 += 2;   // 全局 5（x）
+  程序包[位++] = 35; 程序包.writeUInt16LE(6, 位); 位 += 2;   // 全局 6（y）
+  程序包[位++] = 5; 程序包[位++] = 1; 程序包.writeDoubleLE(8.0, 位); 位 += 8;
+  程序包[位++] = 5; 程序包[位++] = 1; 程序包.writeDoubleLE(8.0, 位); 位 += 8;
+  程序包[位++] = 5; 程序包[位++] = 1; 程序包.writeDoubleLE(0.0, 位); 位 += 8;
+  程序包[位++] = 3;
+  程序包.writeUInt16LE(4, 位); 位 += 2;
+  for (const 字 of "rect") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+  程序包.writeUInt16LE(5, 位); 位 += 2;
+  程序包[位++] = 26;
 程序包[位++] = 28;
 }
 

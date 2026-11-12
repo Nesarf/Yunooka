@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 145
+stage2_sectors equ 146
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -820,6 +820,8 @@ long_entry:
     call run_prog_global_test
     ; 拖动：同一个函数画在两个地方。
     call run_prog_drag_test
+    ; 一帧：擦旧位置、改坐标、画新位置。
+    call run_prog_frame_test
     ; 窗口那一层到现在只有线与框。这一条让它能写字。
     call run_glyph_test
     ; 一个字母到一行字：字模成表，字距由判据量出来。
@@ -4774,6 +4776,130 @@ run_prog_drag_test:
     jmp put_nl64
 .missing:
     mov rsi, line_progdrag_bad
+    call puts64
+    ret
+
+; ======================================================================
+; 一帧：擦旧位置、改坐标、画新位置
+; ======================================================================
+;
+; 上一格证明「同一个 mark 能画在两个地方」，但旧的那个留在屏幕上 —— 拖过去就是一路撒方块。
+; 这一格补的是顺序：擦、改、画，三步连起来才是一帧。
+;
+; 包里那个 erase 与 mark 逐条一样，只有最后那个颜色常量不同（0 而不是 0x2F）。所以橡皮
+; 没有引入任何新机制 —— rect 本来就是填充矩形，涂成背景色就是擦除。
+;
+; 判据读四个点，顺序本身就是这一格的内容：
+;   mark 之后读旧位置        该是 0x2F
+;   erase 之后读同一处       该是 0x00      —— 擦真的发生了
+;   right60 + mark 之后读新位置  该是 0x2F
+;   再看旧位置                仍是 0x00     —— 擦掉的东西没有被谁画回去
+run_prog_frame_test:
+    mov rdi, 40
+    mov rsi, 180
+    xor dl, dl
+    call clear_block
+    mov rdi, 100
+    mov rsi, 180
+    xor dl, dl
+    call clear_block
+
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]
+    mov r8, fs_prog_name
+    mov r9, 9
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz .missing
+    mov rdi, r15
+    call fs_load
+    mov r14, rsi
+    mov [pkg_base], r14
+
+    mov rsi, line_progframe
+    call puts64
+
+    ; 一、设位置并画
+    mov rdi, name_resetpos
+    mov r8, 8
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    call .reset_and_run
+    mov rdi, name_mark
+    mov r8, 4
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    call .reset_and_run
+    mov rdi, 44
+    mov rsi, 184
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+
+    ; 二、擦
+    mov rdi, name_erase
+    mov r8, 5
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    call .reset_and_run
+    mov rdi, 44
+    mov rsi, 184
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+
+    ; 三、改位置再画
+    mov rdi, name_right60
+    mov r8, 7
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    call .reset_and_run
+    mov rdi, name_mark
+    mov r8, 4
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    call .reset_and_run
+    mov rdi, 104
+    mov rsi, 184
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 44
+    mov rsi, 184
+    call read_pixel
+    call put_hex64
+    mov qword [pkg_base], 0x70000
+    jmp put_nl64
+.reset_and_run:
+    ; 每次 exec 前把解释器的状态归零：栈顶、帧号、pc。三样都是上一个函数留下的。
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    jmp exec
+.missing:
+    mov rsi, line_progframe_bad
     call puts64
     ret
 
@@ -14437,6 +14563,9 @@ name_globalget: dw 0x0067, 0x006C, 0x006F, 0x0062, 0x0061, 0x006C, 0x0067, 0x006
 name_resetpos: dw 0x0072, 0x0065, 0x0073, 0x0065, 0x0074, 0x0070, 0x006F, 0x0073
 name_mark: dw 0x006D, 0x0061, 0x0072, 0x006B
 name_right60: dw 0x0072, 0x0069, 0x0067, 0x0068, 0x0074, 0x0036, 0x0030
+name_erase: dw 0x0065, 0x0072, 0x0061, 0x0073, 0x0065
+line_progframe: db "Yunooka: progfrm ", 0
+line_progframe_bad: db "Yunooka: progfrm missing", 0
 line_progdrag: db "Yunooka: progdrg ", 0
 line_progdrag_bad: db "Yunooka: progdrg missing", 0
 line_progglobal: db "Yunooka: progglobal ", 0
