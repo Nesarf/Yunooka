@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 154
+stage2_sectors equ 155
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -836,6 +836,8 @@ long_entry:
     call run_prog_sum2_test
     ; 顺序：减法不交换，于是「谁落进哪个槽」第一次有判据。
     call run_prog_sub_test
+    ; 落点：内层拿到的两个值是坐标，它在上面画字。
+    call run_prog_draw_test
     ; 窗口那一层到现在只有线与框。这一条让它能写字。
     call run_glyph_test
     ; 一个字母到一行字：字模成表，字距由判据量出来。
@@ -2069,6 +2071,84 @@ exec:
     push rax
     push rdx
 .rp3_done:
+    pop qword [rp_val]
+    pop qword [rp_kind]
+    pop qword [frame_sp]
+    pop qword [stack_top]
+    pop qword [pkg_base]
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    call scan_instrs
+    mov rax, [rp_kind]
+    mov rdx, [rp_val]
+    call push_val
+    inc rbx
+    jmp .loop
+
+.op_runpkg4:
+    ; 位置桥。与 runpkg3 逐条一样，只把内层函数换成 drawat。
+    ;
+    ; 前三个桥送进去的值都被内层拿去算数，这一格第一次让它变成坐标 —— 槽 0 与槽 1 就是 x 与
+    ; y，内层直接在上面写字。于是「桥」这件事从「能把数送过去」变成「能让对方在你指定的位置
+    ; 做事」，而后者才是两个组件真的接上。
+    call pop_val                    ; 第二个实参（栈顶）
+    mov [rp_b], rdx
+    mov [rp_kb], rax
+    call pop_val                    ; 第一个实参
+    mov [rp_val], rdx
+    mov [rp_kind], rax
+
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    push qword [pkg_base]
+    push qword [stack_top]
+    push qword [frame_sp]
+
+    mov rdi, 1026
+    call fs_load
+    mov rdi, 1026
+    call ata_read
+
+    mov rdi, fs_myon_path
+    call fs_open_path
+    test rax, rax
+    jz .rp4_fail
+    mov rax, [last_addr]
+    mov [pkg_base], rax
+    mov rdi, name_drawat
+    mov r8, 6
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .rp4_fail
+    mov r12, rsi
+    mov rax, [rp_kind]
+    mov rdx, [rp_val]
+    mov [stack_kinds], rax
+    mov [stack_vals], rdx
+    mov rax, [rp_kb]
+    mov rdx, [rp_b]
+    mov [stack_kinds + 8], rax
+    mov [stack_vals + 8], rdx
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+    push rax
+    push rdx
+    jmp .rp4_done
+.rp4_fail:
+    xor eax, eax
+    xor edx, edx
+    push rax
+    push rdx
+.rp4_done:
     pop qword [rp_val]
     pop qword [rp_kind]
     pop qword [frame_sp]
@@ -5715,6 +5795,102 @@ run_prog_sub_test:
     jmp put_nl64
 .missing:
     mov rsi, line_progsub_bad
+    call puts64
+    ret
+
+; ======================================================================
+; 位置过桥：内层拿到的不是数，是坐标
+; ======================================================================
+;
+; 前三个桥送进去的值都被内层拿去算数。这一格让它们变成坐标：内层的 drawat 读槽 0 与槽 1，
+; 直接在上面画一个 'A'。
+;
+; 判据三点，第二点比第一点重要：'A' 的顶行是 0x18，只在中间两格亮，所以 (x+3, y) 有字而
+; (x, y) 是空的。两点挨着，一次调用就同时证明「画了」与「画在哪儿」。
+;
+; 第三点是调两次的理由：位置从全局 12 与 13 来，第二次给另一组坐标。若内层把坐标写死，
+; 两次会落在同一处，第三点就空了。
+run_prog_draw_test:
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]
+    mov r8, fs_prog_name
+    mov r9, 9
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz .missing
+    mov rdi, r15
+    call fs_load
+    mov r14, rsi
+    mov [pkg_base], r14
+
+    mov rsi, line_progdraw
+    call puts64
+
+    xor dl, dl
+    call clear_screen
+
+    ; 一、第一次：(100, 120)
+    mov qword [global_kinds + 12 * 8], 1
+    mov rax, 0x4059000000000000      ; 100.0
+    mov [global_vals + 12 * 8], rax
+    mov qword [global_kinds + 13 * 8], 1
+    mov rax, 0x405E000000000000      ; 120.0
+    mov [global_vals + 13 * 8], rax
+    mov rdi, name_bridge4
+    mov r8, 7
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    call .reset_and_run
+
+    mov rdi, 103
+    mov rsi, 120
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 100
+    mov rsi, 120
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+
+    ; 二、第二次：(180, 160)
+    mov qword [global_kinds + 12 * 8], 1
+    mov rax, 0x4066800000000000      ; 180.0
+    mov [global_vals + 12 * 8], rax
+    mov qword [global_kinds + 13 * 8], 1
+    mov rax, 0x4064000000000000      ; 160.0
+    mov [global_vals + 13 * 8], rax
+    mov rdi, name_bridge4
+    mov r8, 7
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    call .reset_and_run
+
+    mov rdi, 183
+    mov rsi, 160
+    call read_pixel
+    call put_hex64
+    mov qword [pkg_base], 0x70000
+    jmp put_nl64
+.reset_and_run:
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    jmp exec
+.missing:
+    mov rsi, line_progdraw_bad
     call puts64
     ret
 
@@ -15261,6 +15437,7 @@ bi_name_runpkg: dw 0x0072, 0x0075, 0x006E, 0x0070, 0x006B, 0x0067
 bi_name_runpkg1: dw 0x0072, 0x0075, 0x006E, 0x0070, 0x006B, 0x0067, 0x0031
 bi_name_runpkg2: dw 0x0072, 0x0075, 0x006E, 0x0070, 0x006B, 0x0067, 0x0032
 bi_name_runpkg3: dw 0x0072, 0x0075, 0x006E, 0x0070, 0x006B, 0x0067, 0x0033
+bi_name_runpkg4: dw 0x0072, 0x0075, 0x006E, 0x0070, 0x006B, 0x0067, 0x0034
 bi_name_rect: dw 0x0072, 0x0065, 0x0063, 0x0074
 bi_name_text: dw 0x0074, 0x0065, 0x0078, 0x0074
 bi_name_clip: dw 0x0063, 0x006C, 0x0069, 0x0070
@@ -15301,6 +15478,9 @@ builtin_table:
     dq 7
     dq bi_name_runpkg3
     dq exec.op_runpkg3
+    dq 7
+    dq bi_name_runpkg4
+    dq exec.op_runpkg4
     dq 4
     dq bi_name_rect
     dq exec.op_rect
@@ -15425,6 +15605,10 @@ name_bridge3: dw 0x0062, 0x0072, 0x0069, 0x0064, 0x0067, 0x0065, 0x0033
 name_sub2: dw 0x0073, 0x0075, 0x0062, 0x0032
 line_progsub: db "Yunooka: progsub ", 0
 line_progsub_bad: db "Yunooka: progsub missing", 0
+name_bridge4: dw 0x0062, 0x0072, 0x0069, 0x0064, 0x0067, 0x0065, 0x0034
+name_drawat: dw 0x0064, 0x0072, 0x0061, 0x0077, 0x0061, 0x0074
+line_progdraw: db "Yunooka: progdraw ", 0
+line_progdraw_bad: db "Yunooka: progdraw missing", 0
 line_progdrag: db "Yunooka: progdrg ", 0
 line_progdrag_bad: db "Yunooka: progdrg missing", 0
 line_progglobal: db "Yunooka: progglobal ", 0
