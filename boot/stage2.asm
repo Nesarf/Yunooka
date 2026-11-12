@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 148
+stage2_sectors equ 149
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -826,6 +826,8 @@ long_entry:
     call run_prog_retitle_test
     ; 过桥：内层包返回的值被原样带回来。
     call run_prog_bridge_test
+    ; 送值：外层把 7 递进桥里，内层加一，带回来 8。
+    call run_prog_bump_test
     ; 窗口那一层到现在只有线与框。这一条让它能写字。
     call run_glyph_test
     ; 一个字母到一行字：字模成表，字距由判据量出来。
@@ -1820,6 +1822,88 @@ exec:
     ; 取，于是 exec 跳进一串乱字节，而症状是「桥回来之后崩在一个毫不相干的指令上」。
     ;
     ; 这是一个在桥接落地那天就存在的缺口，只是当时唯一从桥上回来就收尾的调用者让它没有露头。
+    call scan_instrs
+    mov rax, [rp_kind]
+    mov rdx, [rp_val]
+    call push_val
+    inc rbx
+    jmp .loop
+
+.op_runpkg1:
+    ; 带参数的桥。与 runpkg 同一条路，差别只有三处：先弹一个参数、跑内层的 bump 而不是
+    ; echo、把参数写进内层帧的第一个槽。
+    ;
+    ; 三处差异各对应一件要证明的事：值能送进去、内层真的用了它、结果能带回来。少一处，
+    ; 这一格就退化成上一格 —— 证明的是「桥能跑」，而不是「桥能传东西」。
+    ;
+    ; 为什么另起一个内置而不是给 runpkg 加参数：runpkg 已经有两个调用者（shell 那条链与
+    ; prog.hmtn 的 echo），改它的参数表会把两处一起动过，而这一格要说的是新的一句话。
+    call pop_val                    ; rax = 种类，rdx = 内容
+    mov [rp_kind], rax
+    mov [rp_val], rdx
+
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    push qword [pkg_base]
+    push qword [stack_top]
+    push qword [frame_sp]
+
+    mov rdi, 1026
+    call fs_load
+    mov rdi, 1026
+    call ata_read
+
+    mov rdi, fs_myon_path
+    call fs_open_path
+    test rax, rax
+    jz .rp1_fail
+    mov rax, [last_addr]
+    mov [pkg_base], rax
+    mov rdi, name_bump
+    mov r8, 4
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .rp1_fail
+    mov r12, rsi
+    ; 参数进内层的第一格。槽就是值栈最前面那八格，而 exec 从不清理槽区 —— 写在这里，
+    ; 内层第一条「读槽 0」就读得到。
+    mov rax, [rp_kind]
+    mov rdx, [rp_val]
+    ; 验红：这两行一旦拿掉，判据读到的是 4。
+    ;
+    ; 4 而不是 1 —— 槽区不清理，上一格跑 loopthree 时留在槽 0 的 3 还在那里，加一得 4。
+    ; 这比「空的槽」更值得记：残留可以是任何一个旧值，所以这一格的判据必须挑一个不会被
+    ; 残留碰到的数（7），而不是挑 0 —— 0 加一与「没送到」加一，在读数上是一样的 1。
+    mov [stack_kinds], rax
+    mov [stack_vals], rdx
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+    push rax
+    push rdx
+    jmp .rp1_done
+.rp1_fail:
+    xor eax, eax
+    xor edx, edx
+    push rax
+    push rdx
+.rp1_done:
+    pop qword [rp_val]
+    pop qword [rp_kind]
+    pop qword [frame_sp]
+    pop qword [stack_top]
+    pop qword [pkg_base]
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ; 与 runpkg 同一个理由：指令偏移表被内层换掉了，恢复字节流之后必须重算。
     call scan_instrs
     mov rax, [rp_kind]
     mov rdx, [rp_val]
@@ -5087,6 +5171,59 @@ run_prog_bridge_test:
     jmp put_nl64
 .missing:
     mov rsi, line_progbridge_bad
+    call puts64
+    ret
+
+; ======================================================================
+; 值送进桥
+; ======================================================================
+;
+; 上一格证明值能带回来，这一格证明它能送过去 —— 而且内层真的用了它。
+;
+; 判据是 8，而不是 7 或 1，因为这三个数各自排除一种可能：
+;   1  参数根本没到，槽 0 是空，空加一得 1
+;   7  参数到了，而内层没加一（或者加一那一步没跑到）
+;   8  只有一个来路：7 过去了、内层读到它、加一、再带回来
+;
+; 所以这一个读数比「能过桥」细得多 —— 它同时钉住方向、位置与算术三件事。
+run_prog_bump_test:
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]
+    mov r8, fs_prog_name
+    mov r9, 9
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz .missing
+    mov rdi, r15
+    call fs_load
+    mov r14, rsi
+    mov [pkg_base], r14
+    mov rdi, name_bridge1
+    mov r8, 7
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+    mov r15, rax
+    mov r14, rdx
+    mov qword [pkg_base], 0x70000
+    mov rsi, line_progbump
+    call puts64
+    mov rax, r15
+    mov rdx, r14
+    call print_value
+    jmp put_nl64
+.missing:
+    mov rsi, line_progbump_bad
     call puts64
     ret
 
@@ -14626,6 +14763,7 @@ bi_name_write: dw 0x0077, 0x0072, 0x0069, 0x0074, 0x0065
 bi_name_readline: dw 0x0072, 0x0065, 0x0061, 0x0064, 0x006C, 0x0069, 0x006E, 0x0065
 bi_name_border: dw 0x0062, 0x006F, 0x0072, 0x0064, 0x0065, 0x0072
 bi_name_runpkg: dw 0x0072, 0x0075, 0x006E, 0x0070, 0x006B, 0x0067
+bi_name_runpkg1: dw 0x0072, 0x0075, 0x006E, 0x0070, 0x006B, 0x0067, 0x0031
 bi_name_rect: dw 0x0072, 0x0065, 0x0063, 0x0074
 bi_name_text: dw 0x0074, 0x0065, 0x0078, 0x0074
 bi_name_clip: dw 0x0063, 0x006C, 0x0069, 0x0070
@@ -14657,6 +14795,9 @@ builtin_table:
     dq 6
     dq bi_name_runpkg
     dq exec.op_runpkg
+    dq 7
+    dq bi_name_runpkg1
+    dq exec.op_runpkg1
     dq 4
     dq bi_name_rect
     dq exec.op_rect
@@ -14763,6 +14904,10 @@ line_progretitle_bad: db "Yunooka: progretitle missing", 0
 name_bridge: dw 0x0062, 0x0072, 0x0069, 0x0064, 0x0067, 0x0065
 line_progbridge: db "Yunooka: progbridge ", 0
 line_progbridge_bad: db "Yunooka: progbridge missing", 0
+name_bridge1: dw 0x0062, 0x0072, 0x0069, 0x0064, 0x0067, 0x0065, 0x0031
+name_bump: dw 0x0062, 0x0075, 0x006D, 0x0070
+line_progbump: db "Yunooka: progbump ", 0
+line_progbump_bad: db "Yunooka: progbump missing", 0
 line_progdrag: db "Yunooka: progdrg ", 0
 line_progdrag_bad: db "Yunooka: progdrg missing", 0
 line_progglobal: db "Yunooka: progglobal ", 0
