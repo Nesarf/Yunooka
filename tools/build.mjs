@@ -400,10 +400,10 @@ const 回声串 = "myon here";
 // Math.ceil(程序字节.length / 512)，所以它自己会变成 2。
 // 1280：第八个函数把包顶过了 1024。它自己占九十来字节，而路径那个常量又不能省 ——
 // 这一版的包没有变量，常量是唯一能重复取用的东西。
-const 程序包 = Buffer.alloc(2048);
+const 程序包 = Buffer.alloc(3072);
 程序包.write("HMYRB", 0, "latin1");
 程序包.writeUInt16LE(1, 5);       // 版本
-程序包.writeUInt16LE(17, 7);      // 十七个函数
+程序包.writeUInt16LE(20, 7);      // 二十个函数
 let 位 = 9;
 程序包.writeUInt16LE(4, 位); 位 += 2;                      // 名字长度
 for (const 字 of "main") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
@@ -1100,6 +1100,64 @@ for (const 字 of "len") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 
   程序包[位++] = 35;                                         // 全域取：编号 3
   程序包.writeUInt16LE(3, 位); 位 += 2;
 程序包[位++] = 28;                                          // 返回它
+}
+
+// 第十八到二十个函数：拖动。三样都是包里的事 —— 设位置、照位置画、改位置。
+//
+// 全局 5 是 x、全局 6 是 y。三个函数分开写，因为它们各自要被单独调用一次：
+//   resetpos  把位置设回 (40, 180)
+//   mark      照全局的位置画一个 8x8 的方块
+//   right60   把 x 加六十
+//
+// 判据的形状就是「同一个 mark 画在两个地方」：先 resetpos + mark，读第一处；再 right60 +
+// mark，读第二处。若 mark 忽略全局、把坐标写死，第二次读到的就是零。
+//
+// 这就是「界面」与「一幅画」的分界：前者同一个东西在两帧之间会变，而变的是它的状态，
+// 不是画它的那串指令。
+{
+  程序包.writeUInt16LE(8, 位); 位 += 2;                      // resetpos 是八个码元
+  for (const 字 of "resetpos") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+  程序包.writeUInt16LE(0, 位); 位 += 2;                      // 参数量
+  程序包.writeUInt16LE(0, 位); 位 += 2;                      // 槽数
+  程序包.writeUInt16LE(0, 位); 位 += 2;                      // 效果数
+  程序包.writeUInt32LE(5, 位); 位 += 4;                      // 五条指令
+  程序包[位++] = 5; 程序包[位++] = 1; 程序包.writeDoubleLE(40.0, 位); 位 += 8;
+  程序包[位++] = 36; 程序包.writeUInt16LE(5, 位); 位 += 2;   // 全局 5 = 40
+  程序包[位++] = 5; 程序包[位++] = 1; 程序包.writeDoubleLE(180.0, 位); 位 += 8;
+  程序包[位++] = 36; 程序包.writeUInt16LE(6, 位); 位 += 2;   // 全局 6 = 180
+程序包[位++] = 28;
+}
+{
+  程序包.writeUInt16LE(4, 位); 位 += 2;                      // mark 是四个码元
+  for (const 字 of "mark") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+  程序包.writeUInt16LE(0, 位); 位 += 2;
+  程序包.writeUInt16LE(0, 位); 位 += 2;
+  程序包.writeUInt16LE(0, 位); 位 += 2;
+  程序包.writeUInt32LE(8, 位); 位 += 4;                      // 八条：两个全域取、三个常量、rect、弃、返回
+  程序包[位++] = 35; 程序包.writeUInt16LE(5, 位); 位 += 2;   // 全局 5（x）
+  程序包[位++] = 35; 程序包.writeUInt16LE(6, 位); 位 += 2;   // 全局 6（y）
+  程序包[位++] = 5; 程序包[位++] = 1; 程序包.writeDoubleLE(8.0, 位); 位 += 8;
+  程序包[位++] = 5; 程序包[位++] = 1; 程序包.writeDoubleLE(8.0, 位); 位 += 8;
+  程序包[位++] = 5; 程序包[位++] = 1; 程序包.writeDoubleLE(0x2F, 位); 位 += 8;
+  程序包[位++] = 3;
+  程序包.writeUInt16LE(4, 位); 位 += 2;
+  for (const 字 of "rect") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+  程序包.writeUInt16LE(5, 位); 位 += 2;
+  程序包[位++] = 26;                                         // 弃掉返回值
+程序包[位++] = 28;
+}
+{
+  程序包.writeUInt16LE(7, 位); 位 += 2;                      // right60 是七个码元
+  for (const 字 of "right60") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+  程序包.writeUInt16LE(0, 位); 位 += 2;
+  程序包.writeUInt16LE(0, 位); 位 += 2;
+  程序包.writeUInt16LE(0, 位); 位 += 2;
+  程序包.writeUInt32LE(5, 位); 位 += 4;                      // 五条指令
+  程序包[位++] = 35; 程序包.writeUInt16LE(5, 位); 位 += 2;   // 全局 5
+  程序包[位++] = 5; 程序包[位++] = 1; 程序包.writeDoubleLE(60.0, 位); 位 += 8;
+  程序包[位++] = 0;                                          // 加
+  程序包[位++] = 36; 程序包.writeUInt16LE(5, 位); 位 += 2;   // 写回全局 5
+程序包[位++] = 28;
 }
 
 const 程序字节 = 程序包.subarray(0, 位);

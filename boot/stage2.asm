@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 144
+stage2_sectors equ 145
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -207,7 +207,7 @@ stage2:
     mov dword [dap_lba], 1024
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x4000
-    mov word [dap_count], 32       ; preread-sectors: 预读几个扇区，这个数由 build 核对
+    mov word [dap_count], 34       ; preread-sectors: 预读几个扇区，这个数由 build 核对
     call read_batch
     jnc .fs_ready
     mov si, line_fs_preread
@@ -818,6 +818,8 @@ long_entry:
     call run_prog_loop_test
     ; 全局：包里第一样比一次调用更长寿的东西。
     call run_prog_global_test
+    ; 拖动：同一个函数画在两个地方。
+    call run_prog_drag_test
     ; 窗口那一层到现在只有线与框。这一条让它能写字。
     call run_glyph_test
     ; 一个字母到一行字：字模成表，字距由判据量出来。
@@ -4659,6 +4661,119 @@ run_prog_global_test:
     ret
 .missing:
     mov rsi, line_progglobal_bad
+    call puts64
+    ret
+
+; ======================================================================
+; 拖动：同一个函数画在两个地方
+; ======================================================================
+;
+; 全局有了之后，窗口位置就能跨调用活下来。这一格是那件事的第一个用处：包里三个函数分工
+; —— resetpos 把位置设回 (40,180)、mark 照全局的位置画一个方块、right60 把 x 加六十。
+;
+; 判据的形状是「同一个 mark 画在两处」：resetpos + mark 之后读第一处，right60 + mark 之后
+; 读第二处。若 mark 忽略全局、把坐标写死，第二次读到的就是零。
+;
+; 这就是「界面」与「一幅画」的分界：前者同一个东西在两帧之间会变，而变的是它的状态，而
+; 不是画它的那串指令。
+;
+; 三次 find_fn_by_name 都在同一个包里，所以 pkg_base 从头到尾不拨 —— 上一格刚踩过这个坑。
+run_prog_drag_test:
+    ; 两块要读的地方先抹成零。
+    mov rdi, 40
+    mov rsi, 180
+    xor dl, dl
+    call clear_block
+    mov rdi, 100
+    mov rsi, 180
+    xor dl, dl
+    call clear_block
+
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]
+    mov r8, fs_prog_name
+    mov r9, 9
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz .missing
+    mov rdi, r15
+    call fs_load
+    mov r14, rsi
+    mov [pkg_base], r14
+
+    ; 一、设位置
+    mov rdi, name_resetpos
+    mov r8, 8
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+
+    ; 二、画第一处
+    mov rdi, name_mark
+    mov r8, 4
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+
+    mov rsi, line_progdrag
+    call puts64
+    mov rdi, 44
+    mov rsi, 184
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+
+    ; 三、改位置
+    mov rdi, name_right60
+    mov r8, 7
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+
+    ; 四、画第二处
+    mov rdi, name_mark
+    mov r8, 4
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+
+    mov rdi, 104
+    mov rsi, 184
+    call read_pixel
+    call put_hex64
+    mov qword [pkg_base], 0x70000
+    jmp put_nl64
+.missing:
+    mov rsi, line_progdrag_bad
     call puts64
     ret
 
@@ -14319,6 +14434,11 @@ name_slotwrite: dw 0x0073, 0x006C, 0x006F, 0x0074, 0x0077, 0x0072, 0x0069, 0x007
 name_loopthree: dw 0x006C, 0x006F, 0x006F, 0x0070, 0x0074, 0x0068, 0x0072, 0x0065, 0x0065
 name_globalset: dw 0x0067, 0x006C, 0x006F, 0x0062, 0x0061, 0x006C, 0x0073, 0x0065, 0x0074
 name_globalget: dw 0x0067, 0x006C, 0x006F, 0x0062, 0x0061, 0x006C, 0x0067, 0x0065, 0x0074
+name_resetpos: dw 0x0072, 0x0065, 0x0073, 0x0065, 0x0074, 0x0070, 0x006F, 0x0073
+name_mark: dw 0x006D, 0x0061, 0x0072, 0x006B
+name_right60: dw 0x0072, 0x0069, 0x0067, 0x0068, 0x0074, 0x0036, 0x0030
+line_progdrag: db "Yunooka: progdrg ", 0
+line_progdrag_bad: db "Yunooka: progdrg missing", 0
 line_progglobal: db "Yunooka: progglobal ", 0
 line_progglobal_bad: db "Yunooka: progglobal missing", 0
 line_progloop: db "Yunooka: progloop ", 0
