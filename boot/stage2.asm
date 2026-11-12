@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 135
+stage2_sectors equ 136
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -808,6 +808,8 @@ long_entry:
     call run_text_test
     ; 数字到字母：字体表的第二张。
     call run_upper_test
+    ; 一行到一段：换行与行距。
+    call run_lines_test
     ; 第五个函数：读一个文件，返回它的字节数。
     call run_filesize_test
     ; 第六个函数：写一份文件，再读回来打出去。它要排在 dirfull 之前 —— 那一条会把
@@ -10332,6 +10334,58 @@ run_upper_test:
     call put_hex64
     jmp put_nl64
 
+; 多行文本：换行与行距。
+;
+; 判据读四个点：
+;   (10,20) 是 H 顶边最左列，该暗
+;   (11,20) 是它右边一位，该亮
+;   (12,30) 是第二行 0 顶边的中段，该亮 —— 它落在 (10, 20 + 10) 上，证明换行真的发生了
+;   (12,37) 是第二行那个 0 的最后一行（行 7 也是 0x3C），该亮 —— 而它只在行距为十时
+;     才落在这个字里面：行距改成八，第二行在 y=28，y=37 已经在字外面，读出来是零
+; 所以前三点验「换行发生了」，第四点验「行距是十而不是八」。只读第二行顶部的话，
+; 行距八与十都会被读到字，那一点就白算了。
+run_lines_test:
+    mov rdi, 10
+    mov rsi, 20
+    xor dl, dl
+    call clear_block
+    mov rdi, 10
+    mov rsi, 30
+    xor dl, dl
+    call clear_block
+
+    mov rdi, 10
+    mov rsi, 20
+    lea rdx, [str_h0]
+    mov r8b, 0x2F
+    call draw_lines
+
+    mov rsi, line_lines
+    call puts64
+    mov rdi, 10
+    mov rsi, 20
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 11
+    mov rsi, 20
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 12
+    mov rsi, 30
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 12
+    mov rsi, 37
+    call read_pixel
+    call put_hex64
+    jmp put_nl64
+
 run_line_test:
     mov r12, 0
     mov r13, 0
@@ -11607,31 +11661,28 @@ draw_glyph:
 ; 那是排版的事，等有排版再说 —— 现在只有一个数，判据能量它。
 ;
 ; 全部寄存器都保存：调用者是 exec，它用 r12 指指令流、r13 数指令数。
-draw_text:
+; 画一个字符。rdi = x，rsi = y，al = 字符，r8b = 颜色。
+; 认不出的字符什么也不画 —— 「画不出来」与「画错了」在判据里要分得开。
+;
+; 这一段是从 draw_text 里抽出来的：多行文本要按字符画（换行处得重新起头），而「把一行
+; 串从头画到尾」只是它的一个上层。数字与字母各有一张表，入口先分派再看表 —— 一张连续表
+; 要从 0x30 铺到 0x5A，中间那七个标点得占着位置填空白，而空白在判据里与「这个字符不
+; 存在」分不开。
+;
+; 开头那句 movzx 不能省：入参只有 al，rax 的高位是调用者留下的，而下面的 sub rax 会用
+; 到整只寄存器。
+draw_one:
     push rax
-    push rbx
-    push rcx
-    push rdx
-    push rsi
-    push rdi
-    push r9
     push r10
-    push r11
-    mov r9, rdi                    ; 当前这一格的 x
-.loop:
-    movzx rax, byte [rdx]
-    test rax, rax
-    jz .done
-    ; 数字与字母各有一张表，所以入口先分派再看表 —— 一张连续表要从 0x30 铺到 0x5A，
-    ; 中间那七个标点得占着位置填空白，而空白在判据里与「这个字符不存在」分不开。
-    cmp rax, '0'
-    jb .next
-    cmp rax, '9'
+    movzx eax, al
+    cmp al, '0'
+    jb .out
+    cmp al, '9'
     jbe .digit
-    cmp rax, 'A'
-    jb .next
-    cmp rax, 'Z'
-    ja .next
+    cmp al, 'A'
+    jb .out
+    cmp al, 'Z'
+    ja .out
     sub rax, 'A'
     shl rax, 3
     lea r10, [font_letters]
@@ -11639,17 +11690,82 @@ draw_text:
     jmp .draw
 .digit:
     sub rax, '0'
-    shl rax, 3                     ; 每个字模八字节，所以是乘八
+    shl rax, 3
     lea r10, [font_digits]
     add r10, rax
 .draw:
-    mov rdi, r9
-    push rdx                       ; draw_glyph 自己会保存 rdx，但这里还是存一份：
-    mov rdx, r10                   ; 调用之后还要用它推进字符串
+    mov rdx, r10
     call draw_glyph
+.out:
+    pop r10
+    pop rax
+    ret
+
+draw_text:
+    push rax
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r9
+    mov r9, rdi                    ; 当前这一格的 x
+.loop:
+    movzx rax, byte [rdx]
+    test rax, rax
+    jz .done
+    mov rdi, r9
+    push rdx                       ; rdx 在下面被当作字符传下去，所以先存串指针
+    call draw_one
     pop rdx
     add r9, 8                      ; 字距：与字模宽度相同，所以无空隙
-.next:
+    inc rdx
+    jmp .loop
+.done:
+    pop r9
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rax
+    ret
+
+; 把一段话铺到屏幕上。rdi = x，rsi = y，rdx = 以 0 结尾的串，r8b = 颜色。
+; 换行用 0x0A，行距十像素（字高八加两行空）。
+;
+; 为什么换行不并进 draw_text：它的入参只有一个 x，它不知道「下一行从哪里重新起头」——
+; 那是调用者的事。分成两层之后 draw_text 保持「一行」的语义，draw_lines 管换行与行距。
+;
+; 行首 x 存在 r9 里、当前 x 在 r11 里、当前 y 在 r10 里。三个都要跨调用活着，所以都用
+; 不参与传参的寄存器；r10 在 draw_one 内部被保存过，r9 与 r11 两边都不碰。
+draw_lines:
+    push rax
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r9
+    push r10
+    push r11
+    mov r9, rdi                    ; 每一行重新起头的 x
+    mov r10, rsi                   ; 当前 y
+    mov r11, rdi                   ; 当前 x
+.loop:
+    movzx rax, byte [rdx]
+    test rax, rax
+    jz .done
+    cmp rax, 10
+    je .newline
+    mov rdi, r11
+    mov rsi, r10
+    push rdx
+    call draw_one
+    pop rdx
+    add r11, 8
+    inc rdx
+    jmp .loop
+.newline:
+    mov r11, r9                    ; 回到行首
+    add r10, 10                    ; 行距：字高八，空两行
     inc rdx
     jmp .loop
 .done:
@@ -11660,7 +11776,6 @@ draw_text:
     pop rsi
     pop rdx
     pop rcx
-    pop rbx
     pop rax
     ret
 
@@ -14149,6 +14264,8 @@ font_letters:
 line_text:  db "Yunooka: text ", 0
 line_upper: db "Yunooka: upper ", 0
 str_HO:     db "HO", 0
+line_lines: db "Yunooka: lines ", 0
+str_h0:     db "H", 10, "0", 0
 str_01:     db "01", 0
 line_glyph: db "Yunooka: glyph ", 0
 line_clear: db "Yunooka: clear ", 0
