@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 151
+stage2_sectors equ 152
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -207,7 +207,7 @@ stage2:
     mov dword [dap_lba], 1024
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x4000
-    mov word [dap_count], 36       ; preread-sectors: 预读几个扇区，这个数由 build 核对
+    mov word [dap_count], 38       ; preread-sectors: 预读几个扇区，这个数由 build 核对
     call read_batch
     jnc .fs_ready
     mov si, line_fs_preread
@@ -832,6 +832,8 @@ long_entry:
     call run_prog_redraw_test
     ; 移位：窗口的位置来自全局，而不是包里的常量。
     call run_prog_shift_test
+    ; 两值：两个值一起过桥，内层把它们加起来。
+    call run_prog_sum2_test
     ; 窗口那一层到现在只有线与框。这一条让它能写字。
     call run_glyph_test
     ; 一个字母到一行字：字模成表，字距由判据量出来。
@@ -1908,6 +1910,90 @@ exec:
     pop r12
     pop rbx
     ; 与 runpkg 同一个理由：指令偏移表被内层换掉了，恢复字节流之后必须重算。
+    call scan_instrs
+    mov rax, [rp_kind]
+    mov rdx, [rp_val]
+    call push_val
+    inc rbx
+    jmp .loop
+
+.op_runpkg2:
+    ; 两个值的桥。与 runpkg1 只差两处：弹两个实参、调内层的 sum2。
+    ;
+    ; 顺序是这一条唯一的难点。栈顶是最后那个实参，所以先弹出来的是第二个值；而槽 0 必须是
+    ; 第一个实参。于是先弹的那个要先放下（rp_b 与 rp_kb），等第一个也弹出来、写进槽 0 之后，
+    ; 再把它写进槽 1。
+    ;
+    ; 加法交换，所以这一格测不出顺序错 —— 它测的是「两个值都到了」。而「两个都到了」与
+    ; 「只到了一个」分得开：后者会把残留加到那一个数上，读数不会是 43。
+    call pop_val                    ; 第二个实参（栈顶）
+    mov [rp_b], rdx
+    mov [rp_kb], rax
+    call pop_val                    ; 第一个实参
+    mov [rp_val], rdx
+    mov [rp_kind], rax
+
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    push qword [pkg_base]
+    push qword [stack_top]
+    push qword [frame_sp]
+
+    mov rdi, 1026
+    call fs_load
+    mov rdi, 1026
+    call ata_read
+
+    mov rdi, fs_myon_path
+    call fs_open_path
+    test rax, rax
+    jz .rp2_fail
+    mov rax, [last_addr]
+    mov [pkg_base], rax
+    mov rdi, name_sum2
+    mov r8, 4
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .rp2_fail
+    mov r12, rsi
+    ; 两个实参各就各位：槽 0 是第一个、槽 1 是第二个
+    mov rax, [rp_kind]
+    mov rdx, [rp_val]
+    mov [stack_kinds], rax
+    mov [stack_vals], rdx
+    ; 验红那一次只写槽 0：读数变成 90，也就是「第一个实参 30 加槽 1 里的残留 60」。
+    ; 两个值缺一不可 —— 而 90 恰好说明第一个确实到了它该到的那一格。
+    mov rax, [rp_kb]
+    mov rdx, [rp_b]
+    mov [stack_kinds + 8], rax
+    mov [stack_vals + 8], rdx
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+    push rax
+    push rdx
+    jmp .rp2_done
+.rp2_fail:
+    xor eax, eax
+    xor edx, edx
+    push rax
+    push rdx
+.rp2_done:
+    pop qword [rp_val]
+    pop qword [rp_kind]
+    pop qword [frame_sp]
+    pop qword [stack_top]
+    pop qword [pkg_base]
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
     call scan_instrs
     mov rax, [rp_kind]
     mov rdx, [rp_val]
@@ -5402,6 +5488,56 @@ run_prog_shift_test:
     jmp put_nl64
 .missing:
     mov rsi, line_progshift_bad
+    call puts64
+    ret
+
+; ======================================================================
+; 两个值一起过桥
+; ======================================================================
+;
+; 上一格把位置从常量搬进全局，winat 于是有了两个参数 —— 但那是包内的调用，桥还只会送一个
+; 值。这一格让两个值一起过桥：外层压 30 与 13，内层的 sum2 把它们加起来，带回 43。
+;
+; 判据 43 排除的东西比前几格多：只送到 30 会读到「30 加残留」，只送到 13 会读到「13 加
+; 残留」，两个都没送到读到的是残留自己 —— 三种都不会凑巧是 43。
+run_prog_sum2_test:
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]
+    mov r8, fs_prog_name
+    mov r9, 9
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz .missing
+    mov rdi, r15
+    call fs_load
+    mov r14, rsi
+    mov [pkg_base], r14
+    mov rdi, name_bridge2
+    mov r8, 7
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+    mov r15, rax
+    mov r14, rdx
+    mov qword [pkg_base], 0x70000
+    mov rsi, line_progsum
+    call puts64
+    mov rax, r15
+    mov rdx, r14
+    call print_value
+    jmp put_nl64
+.missing:
+    mov rsi, line_progsum_bad
     call puts64
     ret
 
@@ -14805,6 +14941,10 @@ stack_val: dq 0
 ; exec 停下时的一个快照 —— 取走就作废，下一次桥接会重新写。
 rp_kind: dq 0
 rp_val: dq 0
+; 两个参数的桥还要多存一对：栈顶是第二个实参，先弹出来的那个得先放下，等第一个弹出来才能
+; 按「槽 0 是第一个实参」写回去。这一对就是那半步的落脚处。
+rp_kb: dq 0
+rp_b: dq 0
 
 ; 解释器的那几样：值栈、帧、以及每条指令的字节偏移。
 ;
@@ -14942,6 +15082,7 @@ bi_name_readline: dw 0x0072, 0x0065, 0x0061, 0x0064, 0x006C, 0x0069, 0x006E, 0x0
 bi_name_border: dw 0x0062, 0x006F, 0x0072, 0x0064, 0x0065, 0x0072
 bi_name_runpkg: dw 0x0072, 0x0075, 0x006E, 0x0070, 0x006B, 0x0067
 bi_name_runpkg1: dw 0x0072, 0x0075, 0x006E, 0x0070, 0x006B, 0x0067, 0x0031
+bi_name_runpkg2: dw 0x0072, 0x0075, 0x006E, 0x0070, 0x006B, 0x0067, 0x0032
 bi_name_rect: dw 0x0072, 0x0065, 0x0063, 0x0074
 bi_name_text: dw 0x0074, 0x0065, 0x0078, 0x0074
 bi_name_clip: dw 0x0063, 0x006C, 0x0069, 0x0070
@@ -14976,6 +15117,9 @@ builtin_table:
     dq 7
     dq bi_name_runpkg1
     dq exec.op_runpkg1
+    dq 7
+    dq bi_name_runpkg2
+    dq exec.op_runpkg2
     dq 4
     dq bi_name_rect
     dq exec.op_rect
@@ -15092,6 +15236,10 @@ name_bridge1: dw 0x0062, 0x0072, 0x0069, 0x0064, 0x0067, 0x0065, 0x0031
 name_bump: dw 0x0062, 0x0075, 0x006D, 0x0070
 line_progbump: db "Yunooka: progbump ", 0
 line_progbump_bad: db "Yunooka: progbump missing", 0
+name_bridge2: dw 0x0062, 0x0072, 0x0069, 0x0064, 0x0067, 0x0065, 0x0032
+name_sum2: dw 0x0073, 0x0075, 0x006D, 0x0032
+line_progsum: db "Yunooka: progsum ", 0
+line_progsum_bad: db "Yunooka: progsum missing", 0
 line_progdrag: db "Yunooka: progdrg ", 0
 line_progdrag_bad: db "Yunooka: progdrg missing", 0
 line_progglobal: db "Yunooka: progglobal ", 0
