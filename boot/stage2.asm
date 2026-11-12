@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 141
+stage2_sectors equ 142
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -814,6 +814,8 @@ long_entry:
     call run_prog_file_test
     ; 写槽：包里第一次能改自己的状态。
     call run_prog_set_test
+    ; 循环：包里第一次转起来。
+    call run_prog_loop_test
     ; 窗口那一层到现在只有线与框。这一条让它能写字。
     call run_glyph_test
     ; 一个字母到一行字：字模成表，字距由判据量出来。
@@ -4453,6 +4455,110 @@ run_prog_set_test:
     ret
 .missing:
     mov rsi, line_progset_bad
+    call puts64
+    ret
+
+; ======================================================================
+; 循环：包里第一次转起来
+; ======================================================================
+;
+; 上一格给了包「写槽」，这一格把那件事用起来。二十六条指令，形状是任何一门语言的第一个
+; 循环：槽 0 数次数、槽 1 记当前的 x；每轮画一个 8x8 的方块、x 加二十、计数加一；条件
+; 是「计数 >= 三」就跳出去。
+;
+; 三样零件都已在：写槽（34）、真跳（16）、大等（9）。所以这一格没有改一行固件 —— 它是
+; 前面几格攒出来的第一件「程序」，而不是又一条指令。
+;
+; 没有乘法：x 用槽累加而不是 i 乘二十。这一版的算术只有加、除、等与大等四条，而加乘
+; 是为了一个能被累加替代的算式。
+;
+; 判据读四个点：(44,174)、(64,174)、(84,174) 是三个方块的中心，该是 0x2F；(104,174) 是
+; 第四个方块本该在的位置，该是零 —— 那一点防的是「条件坏了，一直画下去」。
+;
+; y 用 174 而不是 154：150 那一行是输入回显画的字，两者会叠在一起，而「没有第四个方块」
+; 那个点必须落在干净的位置上。所以先把 104 那一格抹成零。
+run_prog_loop_test:
+    ; 四个格子先抹成零，包括三个方块要占的位置 —— 它们底下原本有别的东西（实测有一格是
+    ; 0x28）。若不抹，判据就变成「方块盖住了那格」而不是「方块画在了那格」，而一个恰好
+    ; 是 0x2F 的旧像素会让「少画一个方块」这件事假绿。
+    mov rdi, 40
+    mov rsi, 170
+    xor dl, dl
+    call clear_block
+    mov rdi, 60
+    mov rsi, 170
+    xor dl, dl
+    call clear_block
+    mov rdi, 80
+    mov rsi, 170
+    xor dl, dl
+    call clear_block
+    mov rdi, 104
+    mov rsi, 174
+    xor dl, dl
+    call clear_block
+
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]
+    mov r8, fs_prog_name
+    mov r9, 9
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz .missing
+    mov rdi, r15
+    call fs_load
+    mov r14, rsi
+    mov [pkg_base], r14
+    mov rdi, name_loopthree
+    mov r8, 9
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+    mov r15, rax
+    mov r14, rdx
+    mov qword [pkg_base], 0x70000
+    mov rsi, line_progloop
+    call puts64
+    mov rax, r15
+    mov rdx, r14
+    call print_value
+    mov rsi, line_space
+    call puts64
+    mov rdi, 44
+    mov rsi, 174
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 64
+    mov rsi, 174
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 84
+    mov rsi, 174
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 104
+    mov rsi, 174
+    call read_pixel
+    call put_hex64
+    jmp put_nl64
+.missing:
+    mov rsi, line_progloop_bad
     call puts64
     ret
 
@@ -14106,6 +14212,9 @@ name_titlewin: dw 0x0074, 0x0069, 0x0074, 0x006C, 0x0065, 0x0077, 0x0069, 0x006E
 name_clipped: dw 0x0063, 0x006C, 0x0069, 0x0070, 0x0070, 0x0065, 0x0064
 name_showfile: dw 0x0073, 0x0068, 0x006F, 0x0077, 0x0066, 0x0069, 0x006C, 0x0065
 name_slotwrite: dw 0x0073, 0x006C, 0x006F, 0x0074, 0x0077, 0x0072, 0x0069, 0x0074, 0x0065
+name_loopthree: dw 0x006C, 0x006F, 0x006F, 0x0070, 0x0074, 0x0068, 0x0072, 0x0065, 0x0065
+line_progloop: db "Yunooka: progloop ", 0
+line_progloop_bad: db "Yunooka: progloop missing", 0
 line_progset: db "Yunooka: progset ", 0
 line_progset_bad: db "Yunooka: progset missing", 0
 line_progfile: db "Yunooka: progfile ", 0
