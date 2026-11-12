@@ -403,7 +403,7 @@ const 回声串 = "myon here";
 const 程序包 = Buffer.alloc(1280);
 程序包.write("HMYRB", 0, "latin1");
 程序包.writeUInt16LE(1, 5);       // 版本
-程序包.writeUInt16LE(9, 7);       // 九个函数
+程序包.writeUInt16LE(10, 7);      // 十个函数
 let 位 = 9;
 程序包.writeUInt16LE(4, 位); 位 += 2;                      // 名字长度
 for (const 字 of "main") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
@@ -798,6 +798,40 @@ for (const 字 of "len") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 
   程序包[位++] = 2;
   程序包.writeUInt16LE(要写的字.length, 位); 位 += 2;
   for (const 字 of 要写的字) { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+  程序包[位++] = 5;                                          // 常量：颜色
+  程序包[位++] = 1;
+  程序包.writeDoubleLE(0x1C, 位); 位 += 8;
+  程序包[位++] = 3;                                          // 调内置 text（四参）
+  程序包.writeUInt16LE(4, 位); 位 += 2;
+  for (const 字 of "text") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+  程序包.writeUInt16LE(4, 位); 位 += 2;
+程序包[位++] = 28;                                          // 返回
+}
+
+// 第十个函数：把宿主递进来的那一行画到屏幕上。
+//
+// 这是「界面对话」的前一半。上面的 textline 画的是一份常量，而这一条画的是运行时从外面
+// 进来的东西 —— 一个只能显示自己写死内容的界面，与一块牌子没有区别。
+//
+// 六条指令：两个坐标常量、调内置 readline（零参，返回值就是那一行的串）、一个颜色常量、
+// 调内置 text（四参）、返回。顺序有讲究：readline 必须在颜色之前压栈，因为固件从栈顶往下
+// 读，而 text 要的顺序是 x、y、串、颜色。
+{
+  程序包.writeUInt16LE(9, 位); 位 += 2;                      // 名字长度（echo2text 是九个码元）
+  for (const 字 of "echo2text") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+  程序包.writeUInt16LE(0, 位); 位 += 2;                      // 参数量
+  程序包.writeUInt16LE(0, 位); 位 += 2;                      // 槽数
+  程序包.writeUInt16LE(0, 位); 位 += 2;                      // 效果数
+  程序包.writeUInt32LE(6, 位); 位 += 4;                      // 六条指令
+  for (const 坐标 of [40, 150]) {                            // x、y
+    程序包[位++] = 5;
+    程序包[位++] = 1;
+    程序包.writeDoubleLE(坐标, 位); 位 += 8;
+  }
+  程序包[位++] = 3;                                          // 调内置 readline（零参）
+  程序包.writeUInt16LE(8, 位); 位 += 2;
+  for (const 字 of "readline") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+  程序包.writeUInt16LE(0, 位); 位 += 2;
   程序包[位++] = 5;                                          // 常量：颜色
   程序包[位++] = 1;
   程序包.writeDoubleLE(0x1C, 位); 位 += 8;

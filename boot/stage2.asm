@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 137
+stage2_sectors equ 138
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -804,6 +804,8 @@ long_entry:
     call run_win_test
     ; 包自己写字：内置 text。
     call run_prog_text_test
+    ; 包把宿主递进来的那一行画到屏幕上：界面对话的前一半。
+    call run_prog_echo_test
     ; 窗口那一层到现在只有线与框。这一条让它能写字。
     call run_glyph_test
     ; 一个字母到一行字：字模成表，字距由判据量出来。
@@ -4023,6 +4025,91 @@ run_prog_text_test:
     jmp put_nl64
 .missing:
     mov rsi, line_progtext_bad
+    call puts64
+    ret
+
+; ======================================================================
+; 一个包把宿主递进来的那一行画到屏幕上
+; ======================================================================
+;
+; 上一格画的是包里的常量；这一格画的是运行时从外面进来的东西。这是「界面对话」的前一半
+; —— 一个只能显示自己写死内容的界面，与一块牌子没有区别。
+;
+; 包里那个函数叫 echo2text，六条指令：两个坐标常量（40、150）、调内置 readline、一个颜色
+; 常量（0x1C）、调内置 text、返回。
+;
+; 那一行是信箱盘里的 "echo hello world"：全小写，而字体只有大写 —— 所以这一条同时验着
+; 上一格做的折叠。字体若没有折叠，屏幕上会是空白，而 readline 那边一切正常。
+;
+; 判据读三个点：
+;   (40,150) 是 E 顶边最左列，0x7E 的 bit7 是 0，该暗
+;   (41,150) 是它右边一位，bit6 是 1，该亮
+;   (129,150) 是第十一个字符（w 折成 W）顶边的 bit6：索引 11 从 40 + 11 * 8 = 128 起，
+;     W 的顶边 0x63 的 bit6 落在 128 + 1 = 129。这一点验的是「整串被铺下来了」——
+;     只读开头两点的话，一个画完第一个字就停的实现照样能过。
+run_prog_echo_test:
+    ; 先抹掉三格：屏幕上前面的测试画过东西，而「该暗」那一点要求背景是零。
+    mov rdi, 40
+    mov rsi, 150
+    xor dl, dl
+    call clear_block
+    mov rdi, 48
+    mov rsi, 150
+    xor dl, dl
+    call clear_block
+    mov rdi, 128
+    mov rsi, 150
+    xor dl, dl
+    call clear_block
+
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]
+    mov r8, fs_prog_name
+    mov r9, 9
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz .missing
+    mov rdi, r15
+    call fs_load
+    mov r14, rsi
+    mov [pkg_base], r14
+    mov rdi, name_echo2text
+    mov r8, 9
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+    mov qword [pkg_base], 0x70000
+    mov rsi, line_progecho
+    call puts64
+    mov rdi, 40
+    mov rsi, 150
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 41
+    mov rsi, 150
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 129
+    mov rsi, 150
+    call read_pixel
+    call put_hex64
+    jmp put_nl64
+.missing:
+    mov rsi, line_progecho_bad
     call puts64
     ret
 
@@ -13641,6 +13728,9 @@ name_main: dw 0x006D, 0x0061, 0x0069, 0x006E
 name_sum: dw 0x0073, 0x0075, 0x006D
 name_win: dw 0x0077, 0x0069, 0x006E
 name_textline: dw 0x0074, 0x0065, 0x0078, 0x0074, 0x006C, 0x0069, 0x006E, 0x0065
+name_echo2text: dw 0x0065, 0x0063, 0x0068, 0x006F, 0x0032, 0x0074, 0x0065, 0x0078, 0x0074
+line_progecho: db "Yunooka: progecho ", 0
+line_progecho_bad: db "Yunooka: progecho missing", 0
 line_progtext: db "Yunooka: progtext ", 0
 line_progtext_bad: db "Yunooka: progtext missing", 0
 name_filesize: dw 0x0066, 0x0069, 0x006C, 0x0065, 0x0073, 0x0069, 0x007A, 0x0065
