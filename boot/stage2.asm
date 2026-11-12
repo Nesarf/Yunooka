@@ -764,6 +764,7 @@ long_entry:
     call run_gate_blocked
     call run_homeshare_test
     call run_gate_test
+    call run_clear_test
     call run_pixel_test
     call run_line_test
     call run_calc_live
@@ -10092,6 +10093,79 @@ clear_block:
     pop rax
     ret
 
+; 清屏：把六万四千个字节写成给定颜色（320 x 200）。入参：dl = 颜色。
+;
+; 为什么单独一段而不是循环调 clear_block：整屏是一千个八乘八的块，每块都要算一次
+; 地址，而这里地址是连着的 —— 一个指针走到底就完了，省下九万多次乘加。
+;
+; 为什么不用 rep stosb：它要 rdi / rcx / al 三样同时就位，而且小段上的启动开销随处理器
+; 不同。这一版要的是「一定能跑、数得清」，六万四千次循环在这个尺度上没有区别。
+clear_screen:
+    push rax
+    push rcx
+    push rdi
+    mov rdi, 0xA0000
+    mov rcx, 64000
+    mov al, dl
+.loop:
+    mov [rdi], al
+    inc rdi
+    dec rcx
+    jnz .loop
+    pop rdi
+    pop rcx
+    pop rax
+    ret
+
+; 清屏：先画一点东西，把整屏写成 0x05，再读回来。
+;
+; 判据读四个点，前三个都落在刚才画过、而且本来是亮的位置上：H 顶边的左右两端
+; （0x81 的两个 1，也就是 (10,10) 与 (17,10)），以及它下面一行的左端 (10,11)。
+; 第四点是 (0,0)，那里从没画过。四个都该是 05 —— 前三个证明清屏盖住了画过的地方，
+; 第四个证明它不是只改那几个像素。
+;
+; 第二点最早写的是 (11,10)，而那是个**空**位（0x81 的中间六个比特都是 0）。验红时
+; 它读出的 00 与「清屏了」在串口上一模一样，于是那个点等于是白读的 —— 一点也没在测。
+; 一个判据点必须落在「本该非零」的地方，否则它证明不了任何事。
+;
+; 为什么这一格值得单独判：屏幕上有过像素、线、框、字，而「把它们擦掉」从来没有过。
+; 没有清屏就没有「一帧」—— 两次画的东西叠在一起，谁也分不开谁是谁。
+run_clear_test:
+    mov rdi, 10
+    mov rsi, 10
+    lea rdx, [font_H]
+    mov r8b, 0x2F
+    call draw_glyph
+
+    mov dl, 0x05
+    call clear_screen
+
+    mov rsi, line_clear
+    call puts64
+    mov rdi, 10
+    mov rsi, 10
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 17
+    mov rsi, 10
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 10
+    mov rsi, 11
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    xor rdi, rdi
+    xor rsi, rsi
+    call read_pixel
+    call put_hex64
+    jmp put_nl64
+
 ; 屏幕上写一个字母，判据读四个像素。
 ;
 ; 为什么到这一轮才做：屏幕上有过像素、线、框、矩形与整窗，但从没出现过一个字母。
@@ -13972,6 +14046,7 @@ font_digits:
 line_text:  db "Yunooka: text ", 0
 str_01:     db "01", 0
 line_glyph: db "Yunooka: glyph ", 0
+line_clear: db "Yunooka: clear ", 0
 line_space: db " ", 0
 ; 别的系统的五个样本的路径。名字是 ASCII，所以码元就是它自己的字节。
 fs_pe_path: dw 0x03B1, 0x003A, 0x002F, 0x0070, 0x0065, 0x002E, 0x0062, 0x0069, 0x006E, 0
