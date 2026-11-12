@@ -400,10 +400,10 @@ const 回声串 = "myon here";
 // Math.ceil(程序字节.length / 512)，所以它自己会变成 2。
 // 1280：第八个函数把包顶过了 1024。它自己占九十来字节，而路径那个常量又不能省 ——
 // 这一版的包没有变量，常量是唯一能重复取用的东西。
-const 程序包 = Buffer.alloc(1600);
+const 程序包 = Buffer.alloc(2048);
 程序包.write("HMYRB", 0, "latin1");
 程序包.writeUInt16LE(1, 5);       // 版本
-程序包.writeUInt16LE(12, 7);      // 十二个函数
+程序包.writeUInt16LE(13, 7);      // 十三个函数
 let 位 = 9;
 程序包.writeUInt16LE(4, 位); 位 += 2;                      // 名字长度
 for (const 字 of "main") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
@@ -935,6 +935,47 @@ for (const 字 of "len") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 
   程序包[位++] = 3;
   程序包.writeUInt16LE(4, 位); 位 += 2;
   for (const 字 of "clip") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+  程序包.writeUInt16LE(4, 位); 位 += 2;
+程序包[位++] = 28;                                          // 返回
+}
+
+// 第十三个函数：把一个文件的内容画进窗口里。
+//
+// 七条指令：两个坐标常量（70、100）、一个路径常量（docs/note.txt）、调内置 slurp、
+// 一个颜色常量（0x2F）、调内置 text（四参）、返回。
+//
+// 压栈顺序是这一格唯一要注意的地方：slurp 的返回值直接压在 x、y 上面，于是栈上依次是
+// x、y、串、颜色 —— 正是 text 要的顺序。中间不需要任何暂存，因为「函数返回值压在自己
+// 那一步的栈顶上」这条规矩让三层调用能直接串起来。
+//
+// 颜色用 0x2F 而不是内容区的 0x0F：同色的话字画上去也看不见，而那看起来像「什么都没画」。
+{
+  程序包.writeUInt16LE(8, 位); 位 += 2;                      // 名字长度（showfile 是八个码元）
+  for (const 字 of "showfile") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+  程序包.writeUInt16LE(0, 位); 位 += 2;                      // 参数量
+  程序包.writeUInt16LE(0, 位); 位 += 2;                      // 槽数
+  程序包.writeUInt16LE(0, 位); 位 += 2;                      // 效果数
+  程序包.writeUInt32LE(7, 位); 位 += 4;                      // 七条指令
+  for (const 值 of [70, 100]) {                              // 字的 x、y
+    程序包[位++] = 5;
+    程序包[位++] = 1;
+    程序包.writeDoubleLE(值, 位); 位 += 8;
+  }
+  const 要读的 = "docs/note.txt";
+  程序包[位++] = 5;                                          // 常量：路径
+  程序包[位++] = 2;
+  程序包.writeUInt16LE(要读的.length, 位); 位 += 2;
+  for (const 字 of 要读的) { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+  程序包[位++] = 3;                                          // 调内置 slurp（一参）
+  程序包.writeUInt16LE(5, 位); 位 += 2;
+  for (const 字 of "slurp") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
+  程序包.writeUInt16LE(1, 位); 位 += 2;
+  程序包[位++] = 5;                                          // 常量：颜色
+  程序包[位++] = 1;
+  程序包.writeDoubleLE(0x2F, 位); 位 += 8;
+  程序包[位++] = 3;                                          // 调内置 text（四参）
+  程序包.writeUInt16LE(4, 位); 位 += 2;
+  for (const 字 of "text") { 程序包.writeUInt16LE(字.charCodeAt(0), 位); 位 += 2; }
   程序包.writeUInt16LE(4, 位); 位 += 2;
 程序包[位++] = 28;                                          // 返回
 }

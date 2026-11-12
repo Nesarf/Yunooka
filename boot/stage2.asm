@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 140
+stage2_sectors equ 141
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -810,6 +810,8 @@ long_entry:
     call run_prog_title_test
     ; 裁剪：字画到窗口外面该消失。
     call run_prog_clip_test
+    ; 窗口里显示一个文件：第三个内容来源。
+    call run_prog_file_test
     ; 窗口那一层到现在只有线与框。这一条让它能写字。
     call run_glyph_test
     ; 一个字母到一行字：字模成表，字距由判据量出来。
@@ -4292,6 +4294,78 @@ run_prog_clip_test:
     jmp put_nl64
 .missing:
     mov rsi, line_progclip_bad
+    call puts64
+    ret
+
+; ======================================================================
+; 窗口里显示一个文件的内容
+; ======================================================================
+;
+; 到上一格为止，窗口里的字有两个来源：包里的常量，与宿主递进来的一行。这一格是第三个
+; 来源 —— 磁盘上的文件。三个来源合起来，一个「文本查看器」的形状就齐了。
+;
+; 包里那个函数叫 showfile，七条指令：两个坐标常量（70、100）、一个路径常量、调 slurp、
+; 一个颜色常量、调 text、返回。
+;
+; 这一格只加包，固件一个字没改：slurp 返回的串形状（u16 长度 + 码元）正是 draw_utf16
+; 吃的那一种，而 text 已经把这两头接起来了。所以「能显示文件」这件事在上一格就已经具备，
+; 只差有人把它连起来 —— 而连起来的那一句是压栈顺序：slurp 的返回值直接压在 x、y 上面，
+; 栈上依次就是 x、y、串、颜色。
+;
+; 判据读三个点：
+;   (70,100) 是 Y 顶边最左列，0x66 的 bit7 是 0，该露出内容区底色 0x0F
+;   (72,100) 是 bit5，该是字色 0x2F
+;   (80,100) 是第二个字符（u 折成 U）顶边的 bit5，从 70 + 8 = 78 起，78 + 2 = 80，也该是 0x2F
+; 第二点与第三点之间隔着八像素 —— 「一个字」与「一整行」在这里分得开。
+run_prog_file_test:
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]
+    mov r8, fs_prog_name
+    mov r9, 9
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz .missing
+    mov rdi, r15
+    call fs_load
+    mov r14, rsi
+    mov [pkg_base], r14
+    mov rdi, name_showfile
+    mov r8, 8
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+    mov qword [pkg_base], 0x70000
+    mov rsi, line_progfile
+    call puts64
+    mov rdi, 70
+    mov rsi, 100
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 72
+    mov rsi, 100
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 80
+    mov rsi, 100
+    call read_pixel
+    call put_hex64
+    jmp put_nl64
+.missing:
+    mov rsi, line_progfile_bad
     call puts64
     ret
 
@@ -13942,6 +14016,9 @@ name_textline: dw 0x0074, 0x0065, 0x0078, 0x0074, 0x006C, 0x0069, 0x006E, 0x0065
 name_echo2text: dw 0x0065, 0x0063, 0x0068, 0x006F, 0x0032, 0x0074, 0x0065, 0x0078, 0x0074
 name_titlewin: dw 0x0074, 0x0069, 0x0074, 0x006C, 0x0065, 0x0077, 0x0069, 0x006E
 name_clipped: dw 0x0063, 0x006C, 0x0069, 0x0070, 0x0070, 0x0065, 0x0064
+name_showfile: dw 0x0073, 0x0068, 0x006F, 0x0077, 0x0066, 0x0069, 0x006C, 0x0065
+line_progfile: db "Yunooka: progfile ", 0
+line_progfile_bad: db "Yunooka: progfile missing", 0
 line_progclip: db "Yunooka: progclip ", 0
 line_progclip_bad: db "Yunooka: progclip missing", 0
 line_progtitle: db "Yunooka: progtitle ", 0
