@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 155
+stage2_sectors equ 157
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -838,6 +838,8 @@ long_entry:
     call run_prog_sub_test
     ; 落点：内层拿到的两个值是坐标，它在上面画字。
     call run_prog_draw_test
+    ; 尺寸：宽与高也来自全局，窗口能变大变小。
+    call run_prog_size_test
     ; 窗口那一层到现在只有线与框。这一条让它能写字。
     call run_glyph_test
     ; 一个字母到一行字：字模成表，字距由判据量出来。
@@ -5560,6 +5562,17 @@ run_prog_redraw_test:
     mov qword [global_kinds + 11 * 8], 1
     mov rax, 0x404E000000000000      ; 60.0
     mov [global_vals + 11 * 8], rax
+    ; 宽与高也进全局 7 与 8：这一格固定成 200x90，与从前的默认尺寸一致，判据点才不用改
+    ;
+    ; 用 7 与 8 而不是 16 与 17 —— 全局区只有十六格。第一次写这一格时用了 16，越界写到
+    ; global_vals 后面的内存上，save 判据当场红成「save docs/inner.txt lost」，而这与窗口
+    ; 毫无关系。.op_getglobal 那一处早就写过「上限不做检查」。
+    mov qword [global_kinds + 7 * 8], 1
+    mov rax, 0x4069000000000000      ; 200.0
+    mov [global_vals + 7 * 8], rax
+    mov qword [global_kinds + 8 * 8], 1
+    mov rax, 0x4056800000000000      ; 90.0
+    mov [global_vals + 8 * 8], rax
     mov qword [global_kinds + 9 * 8], 1
     mov qword [global_vals + 9 * 8], 0
     mov rdi, name_redraw
@@ -5667,6 +5680,13 @@ run_prog_shift_test:
     mov qword [global_kinds + 11 * 8], 1
     mov rax, 0x404E000000000000      ; 60.0
     mov [global_vals + 11 * 8], rax
+    ; winat 现在要四个参数，宽高也从全局来
+    mov qword [global_kinds + 7 * 8], 1
+    mov rax, 0x4069000000000000      ; 200.0
+    mov [global_vals + 7 * 8], rax
+    mov qword [global_kinds + 8 * 8], 1
+    mov rax, 0x4056800000000000      ; 90.0
+    mov [global_vals + 8 * 8], rax
     mov rdi, name_shiftwin
     mov r8, 8
     xor r15, r15
@@ -5895,6 +5915,88 @@ run_prog_draw_test:
     jmp exec
 .missing:
     mov rsi, line_progdraw_bad
+    call puts64
+    ret
+
+; ======================================================================
+; 尺寸也来自全局
+; ======================================================================
+;
+; 位置进全局之后，尺寸还写死在 winat 里（200x90）。这一格把它也搬出来：全局 16 是宽、
+; 17 是高，winat 改成四个参数，redraw 与 shiftwin 都跟着传。
+;
+; 判据用一个非默认的尺寸 —— 160x70 —— 读窗口的两只角：
+;   (259, 129)  内角（100+160-1, 60+70-1），应当是底色 1F
+;   (260, 130)  外角，应当在窗口外面，也就是背景色 00
+;
+; 两个点一起才问得出「尺寸从哪来」：只读内角的话，一个画成 200x90 的实现照样能过 ——
+; 它盖住了内角。外角才是这一格的判据。
+run_prog_size_test:
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]
+    mov r8, fs_prog_name
+    mov r9, 9
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz .missing
+    mov rdi, r15
+    call fs_load
+    mov r14, rsi
+    mov [pkg_base], r14
+
+    mov rsi, line_progsize
+    call puts64
+
+    xor dl, dl
+    call clear_screen
+
+    ; 位置 (100, 60)、尺寸 160x70、选择子归零（画 O）
+    mov qword [global_kinds + 10 * 8], 1
+    mov rax, 0x4059000000000000      ; 100.0
+    mov [global_vals + 10 * 8], rax
+    mov qword [global_kinds + 11 * 8], 1
+    mov rax, 0x404E000000000000      ; 60.0
+    mov [global_vals + 11 * 8], rax
+    mov qword [global_kinds + 7 * 8], 1
+    mov rax, 0x4064000000000000      ; 160.0
+    mov [global_vals + 7 * 8], rax
+    mov qword [global_kinds + 8 * 8], 1
+    mov rax, 0x4051800000000000      ; 70.0
+    mov [global_vals + 8 * 8], rax
+    mov qword [global_kinds + 9 * 8], 1
+    mov qword [global_vals + 9 * 8], 0
+    mov rdi, name_redraw
+    mov r8, 6
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    call .reset_and_run
+
+    mov rdi, 259
+    mov rsi, 129
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 260
+    mov rsi, 130
+    call read_pixel
+    call put_hex64
+    mov qword [pkg_base], 0x70000
+    jmp put_nl64
+.reset_and_run:
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    jmp exec
+.missing:
+    mov rsi, line_progsize_bad
     call puts64
     ret
 
@@ -15613,6 +15715,8 @@ name_bridge4: dw 0x0062, 0x0072, 0x0069, 0x0064, 0x0067, 0x0065, 0x0034
 name_drawat: dw 0x0064, 0x0072, 0x0061, 0x0077, 0x0061, 0x0074
 line_progdraw: db "Yunooka: progdraw ", 0
 line_progdraw_bad: db "Yunooka: progdraw missing", 0
+line_progsize: db "Yunooka: progsize ", 0
+line_progsize_bad: db "Yunooka: progsize missing", 0
 line_progdrag: db "Yunooka: progdrg ", 0
 line_progdrag_bad: db "Yunooka: progdrg missing", 0
 line_progglobal: db "Yunooka: progglobal ", 0
