@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 133
+stage2_sectors equ 134
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -803,6 +803,8 @@ long_entry:
     call run_win_test
     ; 窗口那一层到现在只有线与框。这一条让它能写字。
     call run_glyph_test
+    ; 一个字母到一行字：字模成表，字距由判据量出来。
+    call run_text_test
     ; 第五个函数：读一个文件，返回它的字节数。
     call run_filesize_test
     ; 第六个函数：写一份文件，再读回来打出去。它要排在 dirfull 之前 —— 那一条会把
@@ -10143,6 +10145,65 @@ run_glyph_test:
     call put_hex64
     jmp put_nl64
 
+; 一行字：两个数字，以及它们之间的字距。
+;
+; 判据读四个点，各说一件事：
+;   (100,80) 暗 —— 0 的顶边从第二位起，所以最左一列是空的
+;   (102,80) 亮 —— 0 顶边的右段
+;   (101,84) 亮 —— 0 的左竖
+;   (111,80) 亮 —— 1 顶边的第四个字节位
+;   (110,80) 暗 —— 它左边一位，1 的顶边那里是空的
+; 前三点验字模，后两点一起把字距钉住，而它们必须成对：111 在字距偏大时变暗（同一像素
+; 落到 1 顶边更左的空位上），110 在字距偏小时变亮（同一像素落到 1 顶边最左那个亮位上）。
+; 只读一个点只能测出一侧的偏差 —— 第一版就只读了 111，而字距改成七时它照样亮。
+run_text_test:
+    mov rdi, 100
+    mov rsi, 80
+    xor dl, dl
+    call clear_block
+    mov rdi, 108
+    mov rsi, 80
+    xor dl, dl
+    call clear_block
+
+    mov rdi, 100
+    mov rsi, 80
+    lea rdx, [str_01]
+    mov r8b, 0x2F
+    call draw_text
+
+    mov rsi, line_text
+    call puts64
+    mov rdi, 100
+    mov rsi, 80
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 102
+    mov rsi, 80
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 101
+    mov rsi, 84
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 111
+    mov rsi, 80
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 110
+    mov rsi, 80
+    call read_pixel
+    call put_hex64
+    jmp put_nl64
+
 run_line_test:
     mov r12, 0
     mov r13, 0
@@ -11396,6 +11457,60 @@ draw_glyph:
 .next_row:
     inc r9
     jmp .row
+.done:
+    pop r11
+    pop r10
+    pop r9
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    ret
+
+; 把一行字铺到帧缓冲。入参：rdi = x，rsi = y，rdx = 以 0 结尾的字符串，r8b = 颜色。
+;
+; 这一版只声明支持数字 0 到 9。别的字符被**跳过**而不是画成一个方块 —— 因为「画不出来」
+; 与「画错了」在屏幕上长得一样，而在判据里必须分得开。要扩字符集就是加字模，机制不动。
+;
+; 字距是八像素：字模本身八宽，所以相邻两个字符之间没有空隙。加空隙要改这个增量，而
+; 那是排版的事，等有排版再说 —— 现在只有一个数，判据能量它。
+;
+; 全部寄存器都保存：调用者是 exec，它用 r12 指指令流、r13 数指令数。
+draw_text:
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push r9
+    push r10
+    push r11
+    mov r9, rdi                    ; 当前这一格的 x
+    lea r11, [font_digits]
+.loop:
+    movzx rax, byte [rdx]
+    test rax, rax
+    jz .done
+    cmp rax, '0'
+    jb .next
+    cmp rax, '9'
+    ja .next
+    sub rax, '0'
+    shl rax, 3                     ; 每个字模八字节，所以是乘八
+    mov r10, r11
+    add r10, rax
+    mov rdi, r9
+    push rdx                       ; draw_glyph 自己会保存 rdx，但这里还是存一份：
+    mov rdx, r10                   ; 调用之后还要用它推进字符串
+    call draw_glyph
+    pop rdx
+    add r9, 8                      ; 字距：与字模宽度相同，所以无空隙
+.next:
+    inc rdx
+    jmp .loop
 .done:
     pop r11
     pop r10
@@ -13841,6 +13956,21 @@ line_embed_missing: db " none", 0
 ; 8x8 位图那一份字模，以及它用到的两段文字。H 的中间那一横在第 4 行（从 0 起算），
 ; 所以它的位图是「四行两竖、一行全亮、三行两竖」—— 判据读的那四个点各自的亮暗就来自这里。
 font_H:     db 0x81, 0x81, 0x81, 0x81, 0xFF, 0x81, 0x81, 0x81
+; 数字 0 到 9 的 8x8 字模，每个八字节、最高位在左边。表是连续的，所以「字符减 0x30、
+; 乘八、加到表头」就是它的位置 —— draw_text 里那三行的全部内容。
+font_digits:
+    db 0x3C, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x3C   ; 0
+    db 0x18, 0x38, 0x18, 0x18, 0x18, 0x18, 0x18, 0x7E   ; 1
+    db 0x3C, 0x66, 0x06, 0x0C, 0x18, 0x30, 0x60, 0x7E   ; 2
+    db 0x3C, 0x66, 0x06, 0x1C, 0x06, 0x66, 0x66, 0x3C   ; 3
+    db 0x0C, 0x1C, 0x3C, 0x6C, 0x6C, 0x7E, 0x0C, 0x0C   ; 4
+    db 0x7E, 0x60, 0x60, 0x7C, 0x06, 0x06, 0x66, 0x3C   ; 5
+    db 0x1C, 0x30, 0x60, 0x7C, 0x66, 0x66, 0x66, 0x3C   ; 6
+    db 0x7E, 0x06, 0x0C, 0x18, 0x30, 0x30, 0x30, 0x30   ; 7
+    db 0x3C, 0x66, 0x66, 0x3C, 0x66, 0x66, 0x66, 0x3C   ; 8
+    db 0x3C, 0x66, 0x66, 0x3E, 0x06, 0x0C, 0x18, 0x30   ; 9
+line_text:  db "Yunooka: text ", 0
+str_01:     db "01", 0
 line_glyph: db "Yunooka: glyph ", 0
 line_space: db " ", 0
 ; 别的系统的五个样本的路径。名字是 ASCII，所以码元就是它自己的字节。
