@@ -812,6 +812,8 @@ long_entry:
     call run_prog_clip_test
     ; 窗口里显示一个文件：第三个内容来源。
     call run_prog_file_test
+    ; 写槽：包里第一次能改自己的状态。
+    call run_prog_set_test
     ; 窗口那一层到现在只有线与框。这一条让它能写字。
     call run_glyph_test
     ; 一个字母到一行字：字模成表，字距由判据量出来。
@@ -1251,13 +1253,17 @@ scan_instrs:
     mov [instr_offsets + rcx * 8], rsi
     movzx eax, byte [rsi]
     inc rsi
-    ; 形状表只有 34 项（opcode 0 到 33）。越界读到的会是紧跟着的那串字符
+    ; 形状表现在有 35 项（opcode 0 到 34）。越界读到的会是紧跟着的那串字符
     ; （line_letters 的 'Y'），而 'Y' = 89 会落到「8 tuple」那一支上跳两字节 ——
     ; 于是偏移表从某一条起全部错位，而执行时才以 unknown op 的形式露出来。
     ;
     ; 这一条只写一次，而且它走在真正的循环前面：如果它出现，后面那些 unknown op 就有
     ; 一个明确的来源。
-    cmp eax, 33
+    ;
+    ; 上限是硬编码的，所以「加一条 opcode」是三处而不是两处：形状表加一项、分派链加两行，
+    ; 还有这里这个数。漏掉第三处的症状最难看 —— 它不报错，只是提前停下，而 instr_offsets
+    ; 里剩下那几格是上一个函数留下的旧偏移，于是这个函数跑到别人的代码上去。
+    cmp eax, 34
     jbe .shape_ok
     ; 越界：把 opcode 与它所在的地址一起打出来。
     ;
@@ -1339,6 +1345,8 @@ exec:
     je .op_const
     cmp r14, 19                     ; 取
     je .op_get
+    cmp r14, 34                     ; 存（本侧追加的号，不在 HMYR 的 34 条里）
+    je .op_set
     cmp r14, 26                     ; 弃
     je .op_drop
     cmp r14, 7                      ; 等
@@ -1389,6 +1397,26 @@ exec:
     mov rax, [stack_kinds + rcx * 8]
     mov rdx, [stack_vals + rcx * 8]
     call push_val
+    inc rbx
+    jmp .loop
+.op_set:
+    ; 写槽：立即数是一个 u16 槽号，值从栈顶取一个。与 .op_get 共用同一段地址算术 ——
+    ; 帧基址加槽号，所以「读」与「写」看到的一定是同一个格子。
+    ;
+    ; 这是包里第一条能改自己状态的指令。在它之前，所有函数都是「读参数、算、返回」，
+    ; 一个计数器都写不出来，也就一个循环都写不出来。所以这一条比它看起来重要：它是
+    ; 「包能有状态」与「包只能算一次」之间的分界。
+    ;
+    ; rcx 要 push 起来：pop_val 会用它自己的一套寄存器，而槽地址算完之后不能丢。
+    movzx eax, word [rsi]           ; 槽号
+    mov rcx, [frame_sp]
+    mov rcx, [frame_slotbase + rcx * 8]
+    add rcx, rax
+    push rcx
+    call pop_val                    ; rax = 种类，rdx = 内容
+    pop rcx
+    mov [stack_kinds + rcx * 8], rax
+    mov [stack_vals + rcx * 8], rdx
     inc rbx
     jmp .loop
 .op_drop:
@@ -4366,6 +4394,65 @@ run_prog_file_test:
     jmp put_nl64
 .missing:
     mov rsi, line_progfile_bad
+    call puts64
+    ret
+
+; ======================================================================
+; 写槽：包里第一次能改自己的状态
+; ======================================================================
+;
+; 在 opcode 17（写槽）之前，包里所有函数都是「读参数、算、返回」—— 一个计数器都写不出来，
+; 也就一个循环都写不出来。所以这一条比它看起来重要：它是「包能有状态」与「包只能算一次」
+; 之间的分界。
+;
+; 包里那个函数叫 slotwrite，四条指令：常量 42、写槽 1、读槽 1、返回。它短得几乎不像一课，
+; 而那是刻意的 —— 这一条验的是「写与读看到同一个格子」，掺进循环或条件就分不清是哪一环
+; 坏的。
+;
+; 判据的力气在分辨力上：若写槽是空操作，读槽读到的是一格初始值零，于是返回 0 而不是 42。
+; 所以「跑出 42」证明的是写进去了，不只是「没有报错」。
+;
+; 槽 1 而不是槽 0：槽 0 是第一个参数的位置。这个函数零参，所以槽 0 空着；用槽 1 是为了
+; 顺手把「槽号从 0 数」这个约定也钉住 —— 若哪天它变成从 1 数，这一条会红。
+run_prog_set_test:
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]
+    mov r8, fs_prog_name
+    mov r9, 9
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz .missing
+    mov rdi, r15
+    call fs_load
+    mov r14, rsi
+    mov [pkg_base], r14
+    mov rdi, name_slotwrite
+    mov r8, 9
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+    mov r15, rax
+    mov r14, rdx
+    mov qword [pkg_base], 0x70000
+    mov rsi, line_progset
+    call puts64
+    mov rax, r15
+    mov rdx, r14
+    call print_value
+    call put_nl64
+    ret
+.missing:
+    mov rsi, line_progset_bad
     call puts64
     ret
 
@@ -13740,6 +13827,7 @@ line_nl:   db 13, 10, 0
 imm_shape:
     db 0, 1, 0, 6, 6, 7, 0, 0, 3, 0, 3, 0, 0, 2, 2, 2, 2, 2, 0, 1
     db 0, 0, 0, 0, 0, 0, 0, 5, 0, 4, 0, 1, 6, 3
+    db 1                     ; 34：本侧自己的「存」，HMYR 的表里没有这一条
 
 line_letters: db "Yunooka: letters -> ", 0
 line_op_bad: db "Yunooka: scan op ", 0
@@ -14017,6 +14105,9 @@ name_echo2text: dw 0x0065, 0x0063, 0x0068, 0x006F, 0x0032, 0x0074, 0x0065, 0x007
 name_titlewin: dw 0x0074, 0x0069, 0x0074, 0x006C, 0x0065, 0x0077, 0x0069, 0x006E
 name_clipped: dw 0x0063, 0x006C, 0x0069, 0x0070, 0x0070, 0x0065, 0x0064
 name_showfile: dw 0x0073, 0x0068, 0x006F, 0x0077, 0x0066, 0x0069, 0x006C, 0x0065
+name_slotwrite: dw 0x0073, 0x006C, 0x006F, 0x0074, 0x0077, 0x0072, 0x0069, 0x0074, 0x0065
+line_progset: db "Yunooka: progset ", 0
+line_progset_bad: db "Yunooka: progset missing", 0
 line_progfile: db "Yunooka: progfile ", 0
 line_progfile_bad: db "Yunooka: progfile missing", 0
 line_progclip: db "Yunooka: progclip ", 0
