@@ -5521,12 +5521,12 @@ run_prog_bump_test:
 ; 全局位置改到 (140,90) 再调 —— 于是第二趟进来时它记着的旧位置就是 (100,60)，该被擦掉。
 ;
 ; 判据三点：
-;   (100, 60)  第一帧的左上角。第二趟先擦这一块，所以它应当是背景色 00
-;   (153, 94)  第二帧标题 'O' 顶横的中央（标题画在 (150, 94)），应当是 0F
-;   (151, 110) 第二帧内容第一个字符 'e' 的笔画（内容画在 (150, 110)），应当是 2F
+;   (0, 0)     清屏之后宿主人为画的记号。第一趟标志是 0，不该擦它，所以它还在（2F）
+;   (100, 60)  第一帧的左上角。第二趟标志已是 1，先擦这一块，所以是背景色 00
+;   (141, 90)  第二帧的左上角（窗口在 140,90），底色 1F
 ;
-; 第一点与第三点是同一件事的两面：一个说旧的不在了，一个说新的在了。而第一点正是这一格比
-; 上一格多出来的那一条 —— 上一格只证明「没画在旧位置」，这一格才证明「旧位置被擦」。
+; 第一点与第二点合起来才是这一格的话：第一次不擦（别人的像素留着）、第二次擦（自己的旧帧
+; 清掉）。一个标志位，两句话一起成立。
 run_prog_redraw_test:
     mov rdi, 1024
     call fs_load
@@ -5547,15 +5547,16 @@ run_prog_redraw_test:
     mov rsi, line_progredraw
     call puts64
 
-    ; 一、清屏：这一格要在新位置上重画，所以旧位置必须先是空的。
-    ;    第四点读到的 00 因此证明的是「没画在旧位置」，而不是「旧位置被擦」—— 移动的两步是
-    ;    「擦旧、画新」，redraw 现在只做后者；前者要等它也知道旧位置在哪。
+    ; 一、清屏，然后在左上角画一块记号 —— 那是「别人的像素」：第一次调用不该碰它
     xor dl, dl
     call clear_screen
+    xor rdi, rdi
+    xor rsi, rsi
+    mov dl, 0x2F
+    call clear_block
 
-    ; 二、第一次：位置 (100, 60)，选择子归零（画 O）。
-    ;    这一趟进来时全局 14 与 15 还是 0，所以它先擦 (0,0) 那块 —— 清屏之后那儿是空的，
-    ;    擦一块空白无害。这是「不加标志位」的代价，也是它可接受的理由。
+    ; 二、第一次：位置 (100, 60)、尺寸 200x90、选择子归零（画 O）、标志清零。
+    ;    标志必须是 0 —— 同一趟里前面的测试可能调过 redraw，已经把它置成过 1。
     mov qword [global_kinds + 10 * 8], 1
     mov rax, 0x4059000000000000      ; 100.0
     mov [global_vals + 10 * 8], rax
@@ -5575,6 +5576,8 @@ run_prog_redraw_test:
     mov [global_vals + 8 * 8], rax
     mov qword [global_kinds + 9 * 8], 1
     mov qword [global_vals + 9 * 8], 0
+    mov qword [global_kinds + 4 * 8], 1
+    mov qword [global_vals + 4 * 8], 0
     mov rdi, name_redraw
     mov r8, 6
     xor r15, r15
@@ -5585,8 +5588,7 @@ run_prog_redraw_test:
     call .reset_and_run
 
     ; 三、第二次：把位置改到 (140, 90)，再调一次。
-    ;    这一趟进来，全局 14 与 15 记着的是 (100, 60) —— 上一帧自己写下的。所以它先擦那一块，
-    ;    再在 (140, 90) 画新的。判据第三点问的就是这一擦。
+    ;    这一趟标志已经是 1，所以它先擦 (100,60) 那一块，再在 (140,90) 画新的。
     mov qword [global_kinds + 10 * 8], 1
     mov rax, 0x4061800000000000      ; 140.0
     mov [global_vals + 10 * 8], rax
@@ -5602,21 +5604,21 @@ run_prog_redraw_test:
     mov r12, rsi
     call .reset_and_run
 
-    ; 四、三点：旧位置空了、新标题在、新内容在
+    ; 四、三点：记号还在（第一次没擦）、旧位置空了（第二次擦了）、新窗口在
+    xor rdi, rdi
+    xor rsi, rsi
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
     mov rdi, 100
     mov rsi, 60
     call read_pixel
     call put_hex64
     mov rsi, line_space
     call puts64
-    mov rdi, 153
-    mov rsi, 94
-    call read_pixel
-    call put_hex64
-    mov rsi, line_space
-    call puts64
-    mov rdi, 151
-    mov rsi, 110
+    mov rdi, 141
+    mov rsi, 90
     call read_pixel
     call put_hex64
     mov qword [pkg_base], 0x70000
