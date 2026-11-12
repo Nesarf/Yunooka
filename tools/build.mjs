@@ -1314,5 +1314,16 @@ const 盘UUID = "1b4e28ba-2fa1-11d2-883f-0016d3cca427";
 const 转 = spawnSync(VBox, ["convertfromraw", 盘像, 盘, "--format", "VDI", "--uuid", 盘UUID], { encoding: "utf8" });
 if (转.status !== 0) 失败("convertfromraw 失败：" + String(转.stderr || "").slice(0, 300));
 console.log("vdi      " + 盘 + "（" + Math.round(fs.statSync(盘).size / 1024) + " KiB）");
+
+// ---- 四·五、盖一个「这盘是新的」戳 ----
+//
+// 为什么光有修改时间不够：run 会写盘，所以跑过一次之后 vdi 仍然是新的，而它已经不是
+// build 造的那一块了。run.mjs 里那道检查只看得见「vdi 比 disk.img 旧」（一次 build
+// 半路停了），看不见「vdi 被上一次运行改过」—— 后者曾经让 save 那条判据红成
+// 「要么包没读回那行字，要么目录里查不到 out.txt」，读起来像缺陷，其实是脏盘。
+//
+// 戳与 vdi 同生：build 写下它，run 在起虚拟机之前删掉它。于是「戳不在」只有一个含义 ——
+// 这块盘已经被跑过。它比修改时间可靠，因为 run 不需要在退出时做什么就能让它失效。
+fs.writeFileSync(path.join(建, ".fresh"), String(Date.now()));
 console.log("");
 console.log("下一步：node tools/run.mjs");

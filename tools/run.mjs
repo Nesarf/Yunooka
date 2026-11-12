@@ -145,6 +145,24 @@ if (!fs.existsSync(盘)) 做不了("还没有 build/disk.vdi，先跑 node tools
   }
 }
 
+// 而「比 disk.img 新」只挡得住一次半路停掉的 build，挡不住「这块盘被跑过」。
+//
+// run 会写盘：save 那一条把目录页与数据页写回去，而第二趟启动正是靠这一点验持久化。
+// 所以跑过一次之后 vdi 仍然是新的，可它已经不是 build 造的那一块了。那种盘上
+// docs/inner.txt 已经存在，于是 run_save_test 走「第二趟」那个分支、打 save survived
+// 而不是 save，而判据报红在写盘上 —— 一条与「没先 build」毫无关系的判据。
+//
+// 戳的定义在 build.mjs 那边：build 写它，这里删它。删在起虚拟机之前，因为一起机就可能
+// 写盘；于是只要 run 跑起来了，下一次都必须重新 build。这里比「退出时清干净」严格，
+// 而严格是对的 —— 半路崩掉的 run 同样写过盘。
+{
+  const 戳 = path.join(建, ".fresh");
+  if (!fs.existsSync(戳))
+    做不了("这块盘已经被上一次运行改过（build/.fresh 不在）—— save 那一条判据要求盘是"
+      + "新的。先跑 node tools/build.mjs");
+  fs.unlinkSync(戳);
+}
+
 // ---- 一、机器：没有就建，有就复用 ----
 const 册 = vbox(["list", "vms"]);
 if (册.status !== 0) 做不了("VBoxManage list vms 跑不动");
