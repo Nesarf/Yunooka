@@ -9,7 +9,7 @@ Yunooka 的现在：三十轮之后
 
     判据        106 条，全在 run.mjs 的某条链上
     事件        13 个 event= 行，每一个都有判据在读
-        PLAN        56 个目标：41 done、12 blocked、2 open、1 active
+        PLAN        56 个目标：42 done、12 blocked、1 open、1 active
     第二段      占 155 个扇区，上限 192（余三十七格）
     三条链      引导 1 + 加载器 8 + 主体 155 —— 种子从第 164 个扇区起
     种子        74594 字节、版本 1、202 个函数。真包，不再是占位
@@ -23,7 +23,15 @@ OnlySign 第三环（PLAN: onlysign，open）
   闭了。域乘、域加减、点、标量乘、编解码、验签、接进 OnlySign、缺件进补完界面、
   密钥可外置 —— 每一层都有判据，每一层都见过红。
 
-  剩下的只有一件：放一颗真种子进 keys/onlysign.seed。机制已就位，换种子不碰源码。
+  种子已就位：keys/onlysign.seed 里是 32 字节的私钥（不入库，.gitignore 里写着）。
+  派生出的公钥是 BADA1AEF7E2F35B9 DD79831534C11EF1 AD34A228AF744FD4 79FDC7236A5E74EA，
+  写进 boot/pubkey.inc；auth.bin 用同一颗种子签，两处同源所以自洽。
+
+  换种子之后 build 与 run 都重跑过：两个退出码都是 0，串口上是
+  event=onlysign ok items=4 与 event=onlysign3 ok。
+
+  还有一件要知道的：种子不用改源码就能换，但换了之后旧盘要重建 —— 公钥与签名一起变。
+  而种子丢了也不影响机器跑，只是重新生成一颗就等于换了一个签名身份。
 
 盘的健康（PLAN: disk-health，blocked）
 
