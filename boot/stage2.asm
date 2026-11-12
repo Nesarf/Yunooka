@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 152
+stage2_sectors equ 154
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -834,6 +834,8 @@ long_entry:
     call run_prog_shift_test
     ; 两值：两个值一起过桥，内层把它们加起来。
     call run_prog_sum2_test
+    ; 顺序：减法不交换，于是「谁落进哪个槽」第一次有判据。
+    call run_prog_sub_test
     ; 窗口那一层到现在只有线与框。这一条让它能写字。
     call run_glyph_test
     ; 一个字母到一行字：字模成表，字距由判据量出来。
@@ -1395,6 +1397,8 @@ exec:
     je .op_index
     cmp r14, 0                      ; 加（号是 0，不是 30 —— 30 是减）
     je .op_add
+    cmp r14, 30                     ; 减：左减右。形状表里它本来就有（无立即数），只是分派链上
+    je .op_sub                      ; 一直没接 —— 而这正是「加一条 opcode 是三处」的又一次
     cmp r14, 6                      ; 除
     je .op_div
     ; 不认的指令：把号报出来。静默返回「空」会让一个陌生的操作码看起来像「算出了空值」，
@@ -1984,6 +1988,87 @@ exec:
     push rax
     push rdx
 .rp2_done:
+    pop qword [rp_val]
+    pop qword [rp_kind]
+    pop qword [frame_sp]
+    pop qword [stack_top]
+    pop qword [pkg_base]
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    call scan_instrs
+    mov rax, [rp_kind]
+    mov rdx, [rp_val]
+    call push_val
+    inc rbx
+    jmp .loop
+
+.op_runpkg3:
+    ; 减法桥。与 runpkg2 逐条一样，只有一处不同：它跑内层的 sub2 而不是 sum2。
+    ;
+    ; 另起一个内置而不是给 runpkg2 加一个「用哪个函数」的参数：函数名在包格式里是立即数
+    ; （u16 长度加码元），把它变成运行时选出来的串，要连 find_fn_by_name 的接口一起改。
+    ; 那是另一件事，而这一格要说的是「顺序」。
+    call pop_val                    ; 第二个实参（栈顶）
+    mov [rp_b], rdx
+    mov [rp_kb], rax
+    call pop_val                    ; 第一个实参
+    mov [rp_val], rdx
+    mov [rp_kind], rax
+
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    push qword [pkg_base]
+    push qword [stack_top]
+    push qword [frame_sp]
+
+    mov rdi, 1026
+    call fs_load
+    mov rdi, 1026
+    call ata_read
+
+    mov rdi, fs_myon_path
+    call fs_open_path
+    test rax, rax
+    jz .rp3_fail
+    mov rax, [last_addr]
+    mov [pkg_base], rax
+    mov rdi, name_sub2
+    mov r8, 4
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .rp3_fail
+    mov r12, rsi
+    ; 验红那一次把这两个落槽的顺序调过来，读数从 42 变成 -42 —— 减法一换就变号，
+    ; 「槽 0 是第一个实参」这句话于是有了判据。而这一次红能看见，还多亏了 print_value
+    ; 补上的那个减号：它原来只看指数与尾数，负数一律以绝对值回来。
+    mov rax, [rp_kind]
+    mov rdx, [rp_val]
+    mov [stack_kinds], rax
+    mov [stack_vals], rdx
+    mov rax, [rp_kb]
+    mov rdx, [rp_b]
+    mov [stack_kinds + 8], rax
+    mov [stack_vals + 8], rdx
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+    push rax
+    push rdx
+    jmp .rp3_done
+.rp3_fail:
+    xor eax, eax
+    xor edx, edx
+    push rax
+    push rdx
+.rp3_done:
     pop qword [rp_val]
     pop qword [rp_kind]
     pop qword [frame_sp]
@@ -2653,6 +2738,22 @@ exec:
     call pop_val                    ; 左
     movq xmm0, rdx
     addsd xmm0, xmm1
+    movq rdx, xmm0
+    mov rax, 1
+    call push_val
+    inc rbx
+    jmp .loop
+
+.op_sub:
+    ; 减：左减右。它与加只差一条指令，而它比加多证明一件事 —— 减法不交换。
+    ;
+    ; 桥接那一格用加法验证「两个值都到了」，可加法测不出「谁放进哪个槽」：顺序反了和还是那
+    ; 个和。减法一换就变号，于是「槽 0 是第一个实参」这句话第一次有了判据。
+    call pop_val                    ; 右
+    movq xmm1, rdx
+    call pop_val                    ; 左
+    movq xmm0, rdx
+    subsd xmm0, xmm1
     movq rdx, xmm0
     mov rax, 1
     call push_val
@@ -4117,6 +4218,19 @@ print_value:
     call puts64
     jmp put_num64
 .num:
+    ; f64_to_int 只看指数与尾数，不看符号位 —— 所以负数会以绝对值回来。打印之前先看符号位：
+    ; 置位就先打一个减号，再把那一位清掉。
+    ;
+    ; 这一条是减法那一格逼出来的：-42 与 42 在串口上长得一样，于是「交换两个实参」这个
+    ; 验红根本红不了。判据的形状里有一个字漏了，而那个字恰好是这一格唯一要证明的东西。
+    test rdx, rdx
+    jns .num_pos
+    push rdx
+    mov al, '-'
+    call putc64
+    pop rdx
+    btc rdx, 63
+.num_pos:
     mov rax, rdx
     call f64_to_int
     jmp put_num64
@@ -5551,6 +5665,56 @@ run_prog_sum2_test:
     jmp put_nl64
 .missing:
     mov rsi, line_progsum_bad
+    call puts64
+    ret
+
+; ======================================================================
+; 顺序：减法把「谁落进哪个槽」钉住
+; ======================================================================
+;
+; 上一格用加法验证「两个值都到了」，可加法测不出顺序 —— 顺序反了，和还是那个和。减法不交换：
+; 50 减 8 得 42，8 减 50 得 -42。于是「槽 0 是第一个实参」这句话第一次有了判据。
+;
+; 这个读数还带着第三种可能：只送到一个。那时内层算的是「那个数减残留」，结果既不是 42 也
+; 不是 -42 —— 三种情况各有各的数，一个读数全部分得开。
+run_prog_sub_test:
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]
+    mov r8, fs_prog_name
+    mov r9, 9
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz .missing
+    mov rdi, r15
+    call fs_load
+    mov r14, rsi
+    mov [pkg_base], r14
+    mov rdi, name_bridge3
+    mov r8, 7
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+    mov r15, rax
+    mov r14, rdx
+    mov qword [pkg_base], 0x70000
+    mov rsi, line_progsub
+    call puts64
+    mov rax, r15
+    mov rdx, r14
+    call print_value
+    jmp put_nl64
+.missing:
+    mov rsi, line_progsub_bad
     call puts64
     ret
 
@@ -15096,6 +15260,7 @@ bi_name_border: dw 0x0062, 0x006F, 0x0072, 0x0064, 0x0065, 0x0072
 bi_name_runpkg: dw 0x0072, 0x0075, 0x006E, 0x0070, 0x006B, 0x0067
 bi_name_runpkg1: dw 0x0072, 0x0075, 0x006E, 0x0070, 0x006B, 0x0067, 0x0031
 bi_name_runpkg2: dw 0x0072, 0x0075, 0x006E, 0x0070, 0x006B, 0x0067, 0x0032
+bi_name_runpkg3: dw 0x0072, 0x0075, 0x006E, 0x0070, 0x006B, 0x0067, 0x0033
 bi_name_rect: dw 0x0072, 0x0065, 0x0063, 0x0074
 bi_name_text: dw 0x0074, 0x0065, 0x0078, 0x0074
 bi_name_clip: dw 0x0063, 0x006C, 0x0069, 0x0070
@@ -15133,6 +15298,9 @@ builtin_table:
     dq 7
     dq bi_name_runpkg2
     dq exec.op_runpkg2
+    dq 7
+    dq bi_name_runpkg3
+    dq exec.op_runpkg3
     dq 4
     dq bi_name_rect
     dq exec.op_rect
@@ -15253,6 +15421,10 @@ name_bridge2: dw 0x0062, 0x0072, 0x0069, 0x0064, 0x0067, 0x0065, 0x0032
 name_sum2: dw 0x0073, 0x0075, 0x006D, 0x0032
 line_progsum: db "Yunooka: progsum ", 0
 line_progsum_bad: db "Yunooka: progsum missing", 0
+name_bridge3: dw 0x0062, 0x0072, 0x0069, 0x0064, 0x0067, 0x0065, 0x0033
+name_sub2: dw 0x0073, 0x0075, 0x0062, 0x0032
+line_progsub: db "Yunooka: progsub ", 0
+line_progsub_bad: db "Yunooka: progsub missing", 0
 line_progdrag: db "Yunooka: progdrg ", 0
 line_progdrag_bad: db "Yunooka: progdrg missing", 0
 line_progglobal: db "Yunooka: progglobal ", 0
