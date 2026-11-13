@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 165
+stage2_sectors equ 166
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -854,6 +854,8 @@ long_entry:
     call run_event_unbound_test
     ; 工程失活：同一个工程的四条判决 —— 没名字、失活、被信任、接受。
     call run_project_test
+    ; 伪装可被识破：两个同名工程，只有签名在清单里。
+    call run_disguise_test
     ; 窗口那一层到现在只有线与框。这一条让它能写字。
     call run_glyph_test
     ; 一个字母到一行字：字模成表，字距由判据量出来。
@@ -6837,6 +6839,109 @@ trust_project:
     mov r11, line_proj_trusted
     jmp emit_project
 
+; ----------------------------------------------------------------------
+; 伪装：两个同名工程，只有签名在清单里
+; ----------------------------------------------------------------------
+;
+; 判据取自 design/INPUT.txt 第十二节第五条：两个工程同名、同声明的能力，只有一个的签名
+; 在清单里。两者各请求创建一个控制器，一个成功、一个失活，而串口上那两行不同。
+;
+; 这一条的力气在于「名字上完全不可分，只在签名上可分」—— 所以它的验红方式与前面几格不同：
+; 把查找从签名改成名字，判据必须红。一个按名字判断的实现在前面每一格都能通过，因为那些格
+; 里名字与签名没有人故意撞在一起。
+;
+; 三行，因为它是一次对照而不是一个状态：被信任的那一行也在里面，否则读的人看不出「名字 1
+; 只属于签名 7」这件事 —— 而那是剩下两行唯一能比较的基准。
+
+; 按签名信任一个工程，并记下它的名字。输入 rdi = 签名，rsi = 名字。
+;
+; 与 trust_project 的差只有「顺手记名字」这一列：状态机完全相同。这一列能记下来，
+; 却不能当主键 —— 而这一格要的正是这个区别。
+trust_named:
+    mov r14, rdi
+    mov r13, rsi
+    call find_project
+    cmp rax, -1
+    jne .have
+    call new_project
+    cmp rax, -1
+    je .done
+    mov rcx, rax
+    mov [proj_name + rcx * 8], r13
+.have:
+    mov qword [proj_state + rax * 8], 2
+.done:
+    mov r11, line_proj_trusted
+    jmp emit_disguise
+
+; 打一行伪装判决。输入 r14 = 签名，r13 = 名字，r11 = 状态串。
+emit_disguise:
+    mov rsi, line_disguise_head
+    call puts64
+    mov rax, r14
+    call put_num64
+    mov rsi, line_disguise_name
+    call puts64
+    mov rax, r13
+    call put_num64
+    mov rsi, line_disguise_what
+    call puts64
+    mov rsi, r11
+    jmp puts64
+
+; 按签名请求创建控制器，并把名字一起记下来。输入 rdi = 签名，rsi = 名字。
+;
+; 状态判断与 request_controller 逐条相同 —— 它多出来的只有「记名字」与「打名字」。
+; 两份请求例程并存而不合并，是因为合并要一个「要不要打名字」的开关，而一个为了两处
+; 输出差异而存在的开关，比两份各二十条指令更难读。
+request_disguise:
+    mov r14, rdi
+    mov r13, rsi
+    call find_project
+    cmp rax, -1
+    jne .have
+    call new_project
+    cmp rax, -1
+    je .full
+    mov rcx, rax
+    mov [proj_name + rcx * 8], r13
+.have:
+    mov rcx, rax
+    mov rax, [proj_state + rcx * 8]
+    cmp rax, 2
+    je .accepted
+    cmp rax, 1
+    je .inactive
+    mov qword [proj_state + rcx * 8], 1
+    mov r11, line_proj_untrusted
+    jmp emit_disguise
+.inactive:
+    mov r11, line_proj_inactive
+    jmp emit_disguise
+.accepted:
+    ; 接受仍然有可读的后果：控制器登记成「签名加十」，所以这一行带 src=17。
+    mov rdi, r14
+    add rdi, 10
+    call register_source
+    mov rsi, line_disguise_head
+    call puts64
+    mov rax, r14
+    call put_num64
+    mov rsi, line_disguise_name
+    call puts64
+    mov rax, r13
+    call put_num64
+    mov rsi, line_disguise_what
+    call puts64
+    mov rsi, line_proj_accepted
+    call puts64
+    mov rax, r14
+    add rax, 10
+    call put_num64
+    jmp put_nl64
+.full:
+    ret
+
 ; ======================================================================
 ; 工程失活：四条判决，同一个工程
 ; ======================================================================
@@ -6871,6 +6976,44 @@ run_project_test:
     ; 五、同一份请求 —— 这一次该被接受，并且真的建出一个控制器（编号 13）。
     mov rdi, 3
     jmp request_controller
+
+; ======================================================================
+; 伪装可被识破：同名不算数，签名才算
+; ======================================================================
+;
+; 三行读数成对看：名字 1 属于签名 7（第一行），所以它请求时被接受（第二行）；而签名 8
+; 也报名字 1 的时候，它不在清单里，于是被挡下（第三行）。第一行是基准 —— 少了它，
+; 剩下两行看不出「名字 1 只属于 7」。
+run_disguise_test:
+    ; 一、三张表清空。名字列也要清 —— 不清的话「同名」可能是上一格留下的痕迹。
+    mov qword [proj_id + 0 * 8], 0
+    mov qword [proj_id + 1 * 8], 0
+    mov qword [proj_id + 2 * 8], 0
+    mov qword [proj_id + 3 * 8], 0
+    mov qword [proj_state + 0 * 8], 0
+    mov qword [proj_state + 1 * 8], 0
+    mov qword [proj_state + 2 * 8], 0
+    mov qword [proj_state + 3 * 8], 0
+    mov qword [proj_name + 0 * 8], 0
+    mov qword [proj_name + 1 * 8], 0
+    mov qword [proj_name + 2 * 8], 0
+    mov qword [proj_name + 3 * 8], 0
+
+    ; 二、签名 7 进清单，名字记 1。
+    mov rdi, 7
+    mov rsi, 1
+    call trust_named
+
+    ; 三、签名 7 请求 —— 它在清单里，该被接受，控制器编号 17。
+    mov rdi, 7
+    mov rsi, 1
+    call request_disguise
+
+    ; 四、签名 8、同一个名字 1 —— 名字一样而签名不一样，该被挡下。一个按名字判断的
+    ;    实现会在这里把它放过去，而那正是这一条要抓的东西。
+    mov rdi, 8
+    mov rsi, 1
+    jmp request_disguise
 
 ; ======================================================================
 ; 一个包画一个窗口
@@ -16449,6 +16592,12 @@ src_bind: times 4 dq 0
 ; 它留下一条失活的记录，下一次报的是「失活」。两态的话，那两行会合成一行。
 proj_id: times 4 dq 0
 proj_state: times 4 dq 0
+; 名字列：与签名表同下标。名字是一个编号 —— 这一层只需要比较两个名字是否相同，
+; 不需要它的字节；真名进来的时候这一列会换成指向名字的指针，而查找仍然走签名。
+;
+; 这一列存在的唯一理由，是让「同名」这个事实可核对：判据要读到两个不同的签名带着
+; 同一个名字，才证明那两行是伪装与被识破，而不是两个无关的工程。
+proj_name: times 4 dq 0
 bi_name_slurp: dw 0x0073, 0x006C, 0x0075, 0x0072, 0x0070
 bi_name_save: dw 0x0073, 0x0061, 0x0076, 0x0065
 bi_name_list: dw 0x006C, 0x0069, 0x0073, 0x0074
@@ -16639,6 +16788,11 @@ line_proj_untrusted: db "untrusted", 13, 10, 0
 line_proj_inactive: db "inactive", 13, 10, 0
 line_proj_trusted: db "trusted", 13, 10, 0
 line_proj_accepted: db "accepted src=", 0
+; 伪装那一行：签名、名字、判决。它走自己的行首，因为它是「一次对照」的结果 ——
+; 两行成对读才有意义，而 project 那一行说的是单个工程的状态。
+line_disguise_head: db "Yunooka: disguise sig=", 0
+line_disguise_name: db " name=", 0
+line_disguise_what: db " ", 0
 line_reject_ready: db "Yunooka: reject ready", 13, 10, 0
 line_reject_again: db "Yunooka: reject again", 13, 10, 0
 line_event_kind: db " kind=key payload=", 0
