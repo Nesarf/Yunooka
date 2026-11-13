@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 159
+stage2_sectors equ 161
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -207,7 +207,7 @@ stage2:
     mov dword [dap_lba], 1024
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x4000
-    mov word [dap_count], 38       ; preread-sectors: 预读几个扇区，这个数由 build 核对
+    mov word [dap_count], 40       ; preread-sectors: 预读几个扇区，这个数由 build 核对
     call read_batch
     jnc .fs_ready
     mov si, line_fs_preread
@@ -844,6 +844,8 @@ long_entry:
     call run_prog_high_test
     ; 两窗：两个窗口各有自己一组格子，挪第二个不伤第一个。
     call run_prog_two_test
+    ; 移窗：方向键从键盘进来，策略在包里，窗口自己走。
+    call run_prog_move_test
     ; 窗口那一层到现在只有线与框。这一条让它能写字。
     call run_glyph_test
     ; 一个字母到一行字：字模成表，字距由判据量出来。
@@ -3429,6 +3431,60 @@ run_key_poll:
     mov rax, r15
     call put_hex64
     call put_nl64
+    ret
+
+; 等一个方向键的「按下」。回来 eax = 0x4B（左）或 0x4D（右），或者 0 表示预算用完。
+;
+; 为什么读两次 0x60：方向键不是单字节的键。集 1 里它由两个码组成 —— 前缀 0xE0，后面
+; 才是方向本身。而 8042 的输出缓冲一次只放一个字节：不把 0xE0 读走，后面那个就进不来。
+; 所以「读一次」在这里是不够的，而不够的症状很有欺骗性 —— 读到的永远是 0xE0，看起来
+; 像「主机根本没送键」。
+;
+; 为什么第二个字节也要挑：放开码同样带 0xE0 前缀。右方向键按下是 E0 4D、放开是 E0 CD，
+; 两者形状一样。第一版读到的第二字节原样返回，于是同一个键的按下与放开被数成了两次 ——
+; 判据第二点 (28,20) 读 1F 而不是 00，而原因不是擦旧坏了，是窗口只挪了一次：第二次
+; 「按键」拿到的 205 不等于 77，keymove 什么都不做。
+;
+; 所以这里只认方向键的按下码，其他的（放开码、别的键、别的扩展键）都回到等待。判断
+; 「哪一边算右」不在这里 —— 那是界面的意见，归包里的 keymove。宿主只负责说「按了哪个
+; 方向键」。
+wait_arrow:
+    mov r10, 2000000               ; 约三秒：够主机从看到握手到把码送进来，又不至于让第二趟干等
+.wait_first:
+    mov dx, 0x64
+    in al, dx
+    test al, 0x01
+    jnz .first
+    dec r10
+    jnz .wait_first
+    xor eax, eax
+    ret
+.first:
+    mov dx, 0x60
+    in al, dx
+    cmp al, 0xE0
+    jne .wait_first                ; 放开码（0x9D…）与普通键都不是我们要的
+    mov r10, 2000000               ; 前缀已到手，第二字节紧跟着来
+.wait_second:
+    mov dx, 0x64
+    in al, dx
+    test al, 0x01
+    jnz .second
+    dec r10
+    jnz .wait_second
+    xor eax, eax
+    ret
+.second:
+    mov dx, 0x60
+    in al, dx
+    cmp al, 0x4B                   ; 左
+    je .done
+    cmp al, 0x4D                   ; 右
+    je .done
+    mov r10, 5000000               ; 不是方向键的按下：把预算补回来，继续等
+    jmp .wait_first
+.done:
+    movzx eax, al
     ret
 
 ; 比较两段字节。rdi 与 rsi 是地址，rcx 是字节数。相等清进位。
@@ -6210,6 +6266,163 @@ run_prog_two_test:
     jmp exec
 .missing:
     mov rsi, line_progtwo_bad
+    call puts64
+    ret
+
+; ======================================================================
+; 窗口跟着按键走
+; ======================================================================
+;
+; 前面每一格挪窗口，都是测试自己改全局 10/11 或 16/17 —— 窗口没有动过，是别人替它动了。
+; 这一格不同：挪它的那一步来自一次真的按键。
+;
+; 路分三段：主机送扫描码（VBoxManage controlvm keyboardputscancode）→ 宿主读 8042 的
+; 0x60、把方向键的第二个字节写进全局 22 → 包里的 keymove 判「这是右键」、把全局 16 加
+; 八、再调 redraw2 重画。策略在包里，键码在全局，宿主只管读 —— 这条分工与「输入是宿主口、
+; 渲染与策略归包」是同一条。
+;
+; 握手两次。串口只能往外说，所以「现在轮到按键了」必须由客人机自己报出来：先打
+; move ready，主机看到才送第一个右方向键；挪完打 move again，主机再送一个。靠时间猜的
+; 话，送早了键还在缓冲里、送晚了这个测试已经超时，而两种坏法在串口上都只表现为
+; 「progmove 后面没有数」。
+;
+; 判据三点：
+;   (90, 20)    窗口右边界内侧。它只在「位置真的到了 36」时才亮 —— 窗口宽六十，起点
+;               20 时右边界 79、28 时 87，两者都盖不到九十。第一版这点读的是 (36,20)，
+;               而那个点分不开「没挪」与「只挪一次」：窗口只要到过 28，36 就落在它里面。
+;               验红那一次读数 1F 1F 1F，三种坏法共用一个读数，等于没问。
+;   (28, 20)    第一次的位置。第二次调用该把它擦成背景色
+;   (100, 60)   第一窗口的左上角。从头到尾没有人碰过它
+;
+; 三点合起来把三种情况分开：没挪与只挪一次都会让第一点读 00，而对了的那一趟是 1F。
+run_prog_move_test:
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]
+    mov r8, fs_prog_name
+    mov r9, 9
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz .missing
+    mov rdi, r15
+    call fs_load
+    mov r14, rsi
+    mov [pkg_base], r14
+
+    mov rsi, line_progmove
+    call puts64
+
+    ; 一、清屏，画第一窗口 (100,60) 200x90。标志清零，所以第一次不擦别人的像素。
+    xor dl, dl
+    call clear_screen
+    mov qword [global_kinds + 10 * 8], 1
+    mov rax, 0x4059000000000000      ; 100.0
+    mov [global_vals + 10 * 8], rax
+    mov qword [global_kinds + 11 * 8], 1
+    mov rax, 0x404E000000000000      ; 60.0
+    mov [global_vals + 11 * 8], rax
+    mov qword [global_kinds + 7 * 8], 1
+    mov rax, 0x4069000000000000      ; 200.0
+    mov [global_vals + 7 * 8], rax
+    mov qword [global_kinds + 8 * 8], 1
+    mov rax, 0x4056800000000000      ; 90.0
+    mov [global_vals + 8 * 8], rax
+    mov qword [global_kinds + 9 * 8], 1
+    mov qword [global_vals + 9 * 8], 0
+    mov qword [global_kinds + 4 * 8], 1
+    mov qword [global_vals + 4 * 8], 0
+    mov rdi, name_redraw
+    mov r8, 6
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    call .reset_and_run
+
+    ; 二、第二窗口 (20,20) 60x50。它是接下来要被挪的那一个。
+    mov qword [global_kinds + 16 * 8], 1
+    mov rax, 0x4034000000000000      ; 20.0
+    mov [global_vals + 16 * 8], rax
+    mov qword [global_kinds + 17 * 8], 1
+    mov rax, 0x4034000000000000      ; 20.0
+    mov [global_vals + 17 * 8], rax
+    mov qword [global_kinds + 18 * 8], 1
+    mov rax, 0x404E000000000000      ; 60.0
+    mov [global_vals + 18 * 8], rax
+    mov qword [global_kinds + 19 * 8], 1
+    mov rax, 0x4049000000000000      ; 50.0
+    mov [global_vals + 19 * 8], rax
+    mov qword [global_kinds + 21 * 8], 1
+    mov qword [global_vals + 21 * 8], 0
+    mov rdi, name_redraw2
+    mov r8, 7
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    call .reset_and_run
+
+    ; 三、第一次握手与第一次按键
+    mov rsi, line_move_ready
+    call puts64
+    call wait_arrow
+    call .send_key
+
+    ; 四、第二次握手与第二次按键
+    mov rsi, line_move_again
+    call puts64
+    call wait_arrow
+    call .send_key
+
+    ; 五、三点
+    mov rdi, 90
+    mov rsi, 20
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 28
+    mov rsi, 20
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 100
+    mov rsi, 60
+    call read_pixel
+    call put_hex64
+    mov qword [pkg_base], 0x70000
+    jmp put_nl64
+; 把等到的那个键码写进全局 22，再让包里的 keymove 去决定怎么动。
+; 键码用 cvtsi2sd 转成双精度：全局存的是 double，一个整数放进去必须按同一个格式写，
+; 否则读回来的是一位一位拼出来的、说不清来处的东西。
+.send_key:
+    mov r15, rax
+    cvtsi2sd xmm0, r15
+    movq rax, xmm0
+    mov qword [global_kinds + 22 * 8], 1
+    mov [global_vals + 22 * 8], rax
+    mov rdi, name_keymove
+    mov r8, 7
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    call .reset_and_run
+    ret
+.reset_and_run:
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    jmp exec
+.missing:
+    mov rsi, line_progmove_bad
     call puts64
     ret
 
@@ -15939,6 +16152,11 @@ line_proghigh_bad: db "Yunooka: proghigh missing", 0
 name_redraw2: dw 0x0072, 0x0065, 0x0064, 0x0072, 0x0061, 0x0077, 0x0032
 line_progtwo: db "Yunooka: progtwo ", 0
 line_progtwo_bad: db "Yunooka: progtwo missing", 0
+name_keymove: dw 0x006B, 0x0065, 0x0079, 0x006D, 0x006F, 0x0076, 0x0065
+line_progmove: db "Yunooka: progmove ", 0
+line_progmove_bad: db "Yunooka: progmove missing", 0
+line_move_ready: db "Yunooka: move ready", 13, 10, 0
+line_move_again: db "Yunooka: move again", 13, 10, 0
 line_progdrag: db "Yunooka: progdrg ", 0
 line_progdrag_bad: db "Yunooka: progdrg missing", 0
 line_progglobal: db "Yunooka: progglobal ", 0
