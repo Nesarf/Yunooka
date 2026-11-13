@@ -858,6 +858,8 @@ long_entry:
     call run_disguise_test
     ; 注册：一份完整的、两份各缺一项的 —— 而两道缺项给出同一行字。
     call run_register_test
+    ; 不锁定：缺一位、只给那一位、再给完整的一份。
+    call run_nolock_test
     ; 窗口那一层到现在只有线与框。这一条让它能写字。
     call run_glyph_test
     ; 一个字母到一行字：字模成表，字距由判据量出来。
@@ -7069,6 +7071,55 @@ run_register_test:
     ; 四、缺源位（0b110）—— 缺的是另一项，而那一行必须与上一条逐字节相同。
     mov rdi, 6
     jmp register_material
+
+; ======================================================================
+; 失败不留状态、也不锁定：两次失败之后，完整材料仍然成功
+; ======================================================================
+;
+; 判据取自 design/INPUT.txt 第十二节第七条：连着若干次失败的尝试之后，一份正确的材料仍然
+; 成功；而一次「差一点就对」的尝试不会让下一次变短。两样合起来才是「不锁定」那个取舍的
+; 可测形式 —— 少了任何一样，一个把状态留在某处、或者试几次就锁死的实现也能过。
+;
+; 第二半（不让下一次变短）比第一半难测，因为「变短」在串口上不显形。它的可测形式在这里：
+; 第一次给「缺签名位」的材料，第二次只给签名位 —— 一个记住了「前两位已经对了」的实现会
+; 让第二次成功，而一个每次从头比 7 的实现会拒绝它。所以第二行必须是 denied。
+;
+; 这一格读三行，而它们必须按这个顺序：denied、denied、ok。第三行是「不锁定」，第二行是
+; 「不留状态」，缺一条，判据就只测了一半。
+nolock_material:
+    ; 输入 rdi = 材料。它不读任何上一次的状态 —— 这一格要测的正是这一点。
+    mov r14, rdi
+    cmp rdi, 7
+    jne .denied
+    mov rdi, 22
+    call register_source
+    mov rsi, line_nolock_ok
+    jmp puts64
+.denied:
+    mov rsi, line_nolock_denied
+    jmp puts64
+
+; ======================================================================
+; 不锁定：缺一位、只给那一位、再给完整的一份
+; ======================================================================
+run_nolock_test:
+    ; 一、清登记表。
+    mov qword [src_registry + 0 * 8], 0
+    mov qword [src_registry + 1 * 8], 0
+    mov qword [src_registry + 2 * 8], 0
+    mov qword [src_registry + 3 * 8], 0
+
+    ; 二、缺签名位，失败。
+    mov rdi, 3
+    call nolock_material
+
+    ; 三、只给签名位。一个记住了上一次的实现在这里会成功 —— 而那正是漏洞。
+    mov rdi, 4
+    call nolock_material
+
+    ; 四、完整的一份。连着两次失败之后它仍然成功：不锁定的那一半。
+    mov rdi, 7
+    jmp nolock_material
 
 ; ======================================================================
 ; 一个包画一个窗口
@@ -16853,6 +16904,10 @@ line_disguise_what: db " ", 0
 ; 而「不说明缺什么」正是这一条判据要测的东西。
 line_register_ok: db "Yunooka: register ok", 13, 10, 0
 line_register_denied: db "Yunooka: register denied", 13, 10, 0
+; 不锁定那两行：它走自己的行首，因为它测的是「两次失败之后」这一条时间线，而不是
+; 一份材料的结果。合成一套行首会让两条判据按位置切同一股串口流，而那最容易错位。
+line_nolock_ok: db "Yunooka: nolock ok", 13, 10, 0
+line_nolock_denied: db "Yunooka: nolock denied", 13, 10, 0
 line_reject_ready: db "Yunooka: reject ready", 13, 10, 0
 line_reject_again: db "Yunooka: reject again", 13, 10, 0
 line_event_kind: db " kind=key payload=", 0
