@@ -196,7 +196,7 @@ console.log("种子      " + 种子说明);
 //
 // 盘的大小由 --size 给（单位 MB），默认 64。现在只用了开头几十兆，所以其余是空的；
 // 那是有意的 —— 装文件系统、放工具链、塞基本库都要空间，而一块盘的尺寸定得早，
-// 后面就不必为了扩大它去搬分区。这块机器 D 盘够用，1 G 到 4 G 都装得下。
+// 后面就不必为了扩大它去搬分区。这块机器的盘够用，1 G 到 4 G 都装得下。
 const 盘大小MB = (() => {
   const i = process.argv.indexOf("--size");
   const v = i >= 0 && i + 1 < process.argv.length ? Number(process.argv[i + 1]) : 64;

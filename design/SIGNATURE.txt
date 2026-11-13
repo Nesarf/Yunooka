@@ -5,10 +5,10 @@ Yunooka 的签名匹配（Nanodesu 与 Torikago 的素材从哪来）
 
 这四件都在，路径与版本都核过：
 
-  ClamAV 1.5.4   E:\DaShaoHuo\apps\ClamAV          引擎；库在 E:\DaShaoHuo\cache\clamav\db
-  YARA 4.5.5     E:\DaShaoHuo\apps\YARA            规则引擎（yara64 / yarac64）
-  YARA-X 1.21.0  E:\DaShaoHuo\apps\YARA-X          VirusTotal 的 Rust 重写版，可执行文件叫 yr
-  Torikago       E:\~Sayori~Sleeping~\Torikago     静态分诊；Nanodesu 在 nanodesu-release
+  ClamAV 1.5.4   （本机安装位置不记）          引擎；库在 （本机库目录不记）
+  YARA 4.5.5     （本机安装位置不记）            规则引擎（yara64 / yarac64）
+  YARA-X 1.21.0  （本机安装位置不记）-X          VirusTotal 的 Rust 重写版，可执行文件叫 yr
+  Torikago       （本机检出位置不记）     静态分诊；Nanodesu 在 nanodesu-release
 
 库的实测体量：main.cvd 89 MB、daily.cld 86 MB、bytecode.cvd 0.3 MB，加载后 3,628,164 条
 签名。那三个文件是打包格式（压缩 + 签名），不是能直接读的文本。

@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 168
+stage2_sectors equ 170
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -849,6 +849,8 @@ long_entry:
     ; 都会先把它吃掉（实测：移窗那一次的等待拿走了它，而它恰好也是右键的码，所以窗口
     ; 真的挪了，只是判据没看在它身上）。
     call run_mbox_live_test
+    ; 同级：同一个窗口被两条路各操作一次，两趟读数应当相同。
+    call run_same_test
     ; 移窗：方向键从键盘进来，策略在包里，窗口自己走。
     call run_prog_move_test
     ; 事件行：一次按键成为一行带源与目标的记录。
@@ -3576,7 +3578,7 @@ mbox_poll:
     ; 而这一格要证明的正是「运行时还能读到一份启动时没读过的内容」。同一个扇区做不到
     ; 那件事 —— 启动时读的与运行时读的若是同一处，两次读到的必然是同一份字节。
     mov byte [ata_dev], 0x10        ; 从盘：信箱住在 primary slave
-    mov rdi, 4
+    mov rdi, [mbox_head]
     mov rsi, mbox_buf
     call ata_read
     mov byte [ata_dev], 0           ; 读完立刻放回去：文件系统那一整套读的是主盘
@@ -3591,6 +3593,7 @@ mbox_poll:
     je .none
     ; 记下新的：同一条消息不会被读成两条。这一步就是「新」这个字在代码里的全部含义。
     mov [mbox_serial0], rax
+    inc qword [mbox_head]           ; 队头前进：下一条从下一个扇区读
     mov r14, rax
     mov rsi, line_mbox_new
     call puts64
@@ -7269,6 +7272,176 @@ run_mbox_live_test:
     call wait_arrow
     mov r15, rax
     jmp arbitrate
+
+; ======================================================================
+; 同级：同一个窗口被两条路各操作一次
+; ======================================================================
+;
+; 判据取自 design/INPUT.txt 第十二节第八条：同一个窗口被真实键鼠与虚拟键鼠各操作一次，
+; 两趟的读数完全相同，而事件行只在源 id 那一格不同。
+;
+; 前面那些格子各证了一半：信箱那一格证明「另一条路能送一个键」，工程与绑定那几格证明
+; 「谁在送由源说话」。这一条问的是它们合起来的那句 —— 同一个动作从两条路来，结果一样吗。
+;
+; 两趟必须由两条不同的路送，而这件事不能靠「谁先等谁先得」：轮询在 4096 轮就发生，而
+; 键盘要一百毫秒才到，于是第一趟几乎必然拿到信箱的键。所以队头是可安排的 —— 第一趟把
+; 它摆到一个没有 YUNOMBX 的扇区（空转问不到东西，只能等键盘），第二趟摆回有消息的那一格。
+; 安排时序、而不是碰运气，判据才有意义。
+run_same_test:
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]
+    mov r8, fs_prog_name
+    mov r9, 9
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz .missing
+    mov rdi, r15
+    call fs_load
+    mov r14, rsi
+    mov [pkg_base], r14
+
+    ; 一、清屏，第二窗口起点 (20,20) 60x50，标志清零（第一次不擦别人的像素）。
+    xor dl, dl
+    call clear_screen
+    mov qword [global_kinds + 16 * 8], 1
+    mov rax, 0x4034000000000000      ; 20.0
+    mov [global_vals + 16 * 8], rax
+    mov qword [global_kinds + 17 * 8], 1
+    mov rax, 0x4034000000000000      ; 20.0
+    mov [global_vals + 17 * 8], rax
+    mov qword [global_kinds + 18 * 8], 1
+    mov rax, 0x404E000000000000      ; 60.0
+    mov [global_vals + 18 * 8], rax
+    mov qword [global_kinds + 19 * 8], 1
+    mov rax, 0x4049000000000000      ; 50.0
+    mov [global_vals + 19 * 8], rax
+    mov qword [global_kinds + 21 * 8], 1
+    mov qword [global_vals + 21 * 8], 0
+    mov rdi, name_redraw2
+    mov r8, 7
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    call .reset_and_run
+
+    ; 二、两条路都登记并绑好同一个操作员 —— 「同级」说的是地位，绑定说的是身份，
+    ;    所以两条路都要有身份，谁都不例外。
+    mov qword [src_registry + 0 * 8], 0
+    mov qword [src_registry + 1 * 8], 0
+    mov qword [src_registry + 2 * 8], 0
+    mov qword [src_registry + 3 * 8], 0
+    mov qword [src_bind + 0 * 8], 0
+    mov qword [src_bind + 1 * 8], 0
+    mov qword [src_bind + 2 * 8], 0
+    mov qword [src_bind + 3 * 8], 0
+    mov rdi, 1
+    call register_source
+    mov rdi, 1
+    mov rsi, 1
+    call bind_source
+    mov rdi, 5
+    call register_source
+    mov rdi, 5
+    mov rsi, 1
+    call bind_source
+
+    ; 三、焦点窗口记成 3。这是一个别处不用的编号，于是判据能在整份串口里认出这两行
+    ;    事件，而不用按位置去切 —— 按位置切的东西，加一行就会错位。
+    mov qword [global_kinds + 27 * 8], 1
+    mov rax, 0x4008000000000000      ; 3.0
+    mov [global_vals + 27 * 8], rax
+
+    ; 四、第一趟：队头摆到 63（那一格没有 YUNOMBX），所以这一趟只能等键盘。
+    mov qword [mbox_head], 63
+    mov rsi, line_same_ready
+    call puts64
+    call wait_arrow
+    call .send_key
+    mov rsi, line_same_a
+    call puts64
+    call .three
+    call put_nl64
+
+    ; 五、把窗口画回起点：第二趟要从同一个地方出发，否则「两趟读数相同」测的是两件
+    ;    不同的事碰巧给出同一个数。
+    mov qword [global_kinds + 16 * 8], 1
+    mov rax, 0x4034000000000000      ; 20.0
+    mov [global_vals + 16 * 8], rax
+    mov qword [global_kinds + 17 * 8], 1
+    mov rax, 0x4034000000000000      ; 20.0
+    mov [global_vals + 17 * 8], rax
+    mov rdi, name_redraw2
+    mov r8, 7
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    call .reset_and_run
+
+    ; 六、第二趟：队头摆回有消息的那一格（第 5 个扇区），所以这一趟从盘上来。
+    mov qword [mbox_head], 5
+    mov rsi, line_same_again
+    call puts64
+    call wait_arrow
+    call .send_key
+    mov rsi, line_same_b
+    call puts64
+    call .three
+    mov qword [pkg_base], 0x70000
+    jmp put_nl64
+
+; 三点：(20,20) 是窗口挪走之后该空的地方，(28,20) 是新左上角的底色，
+; (40,20) 落在窗口里 —— 一个什么都不画的实现三点全空，过不了中间那两点。
+.three:
+    mov rdi, 20
+    mov rsi, 20
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 28
+    mov rsi, 20
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 40
+    mov rsi, 20
+    call read_pixel
+    call put_hex64
+    ret
+; 把等到的那个键码写进全局 22，再让包里的 keymove 去决定怎么动 —— 与移窗那一格同一份。
+.send_key:
+    mov r15, rax
+    cvtsi2sd xmm0, r15
+    movq rax, xmm0
+    mov qword [global_kinds + 22 * 8], 1
+    mov [global_vals + 22 * 8], rax
+    mov rdi, name_keymove
+    mov r8, 7
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    call .reset_and_run
+    ret
+.reset_and_run:
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    jmp exec
+.missing:
+    mov rsi, line_same_nopkg
+    call puts64
+    ret
 
 ; ======================================================================
 ; 一个包画一个窗口
@@ -16591,6 +16764,13 @@ mbox_buf: times 512 db 0
 ; 上一次见到的序列号。0 表示还没记过基准 —— 第一次轮询只记基准，不报新，
 ; 否则启动时那份快照会被当成一条刚到的输入。
 mbox_serial0: dq 0
+; 队头：下一次读哪个扇区。消费一条就前进一格 —— 队列因此能放不止一条消息，
+; 而「一条消息只被读一次」不再靠序列号，靠队头。
+;
+; 从 4 起：第 0 到第 3 是启动时读的那四个。测试可以把队头摆到别处（一个没有 YUNOMBX
+; 的扇区就是「这一趟别从盘上送东西」），于是「哪一趟由谁来送」变成一件可以安排的事，
+; 而不是靠谁先等谁先得。
+mbox_head: dq 4
 seed_magic: db "HMYRB"
 
 ; Disk Address Packet，16 字节。每次调用前重设 count 与 off/seg —— int 0x13 会把
@@ -16955,6 +17135,12 @@ line_mbox_ready: db "Yunooka: mbox ready", 13, 10, 0
 line_mbox_base: db "Yunooka: mbox base=", 0
 line_mbox_new: db "Yunooka: mbox new=", 0
 line_mbox_readfail: db "Yunooka: mbox read failed", 13, 10, 0
+; 同级那四行：两趟各一行读数，加上两次握手。
+line_same_ready: db "Yunooka: same ready", 13, 10, 0
+line_same_again: db "Yunooka: same again", 13, 10, 0
+line_same_a: db "Yunooka: same a ", 0
+line_same_b: db "Yunooka: same b ", 0
+line_same_nopkg: db "Yunooka: same nopkg", 13, 10, 0
 line_fs2_fail: db "Yunooka: beta preread failed", 13, 10, 0
 line_idt_ok: db "Yunooka: idt ok", 13, 10, 0
 line_exception: db "Yunooka: exception ", 0

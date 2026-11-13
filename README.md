@@ -71,7 +71,7 @@ tools/run.mjs      挂盘、引导、读串口、比对
 
 ```
 node tools/build.mjs                                  # 不带宽种子
-node tools/build.mjs --seed D:\himeyuri\bootstrap\pack.hmtn
+node tools/build.mjs --seed <语言仓库>/bootstrap/pack.hmtn
 node tools/run.mjs
 ```
 
@@ -119,7 +119,7 @@ node tools/build.mjs --seed <种子> --size 4096     # 4 GB
 都要空间，而一块盘的尺寸定得早，后面就不必为了扩大它去搬分区。
 
 还有一件实测的事：**名义尺寸不等于占用**。64 MB 的盘建出来的 vdi 只有 3 MB ——
-VirtualBox 对全零区域是稀疏的。所以 1 G 到 4 G 的盘不必担心在 D 盘上吃掉那么多，
+VirtualBox 对全零区域是稀疏的。所以 1 G 到 4 G 的盘不必担心在 真的吃掉那么多，
 除非真的写满了。
 
 注意 BIOS 的 MBR 那颗路只到 2 TB；1 到 4 G 远在范围内。
@@ -1079,8 +1079,7 @@ Miketsukami 那个组合有内在理由：Rhino 给形状、Keil 给让它动起
 
 ### 两个仓库：Core 与 ASA
 
-**Hiou Rengo-Core**（基础，8 GB 以内，D 盘）与 **Hiou Rengo-ASA**（扩展，初步 325 GB，
-G 盘；ASA 是 Ain Soph Aur，无限光）。
+**Hiou Rengo-Core**（基础，8 GB 以内）与 **Hiou Rengo-ASA**（扩展，初步 325 GB；ASA 是 Ain Soph Aur，无限光）。
 
 **而那条分界不是大小，是 `FILETYPE.txt` 里一条已经写下的规矩**：容器「不进 SDK 与 OS 的
 发布包」，理由是分发 —— 单个文件过大会撞上传限制，它只在用户装好之后在自己机器上即时编译。
@@ -1089,7 +1088,7 @@ G 盘；ASA 是 Ain Soph Aur，无限光）。
 那一份**（语料、外部档案、大件素材）。这条边界比「8 GB / 325 GB」结实，因为两个数会随规模
 漂，而「能不能进发布包」不会。
 
-`D:\Hiou Rengo` 已经存在，而**它就是 Core** —— 它的 README 写着「这个目录装用 HMYR 写程序
+`Hiou Rengo` 这个目录已经存在，而**它就是 Core** —— 它的 README 写着「这个目录装用 HMYR 写程序
 所需要的一切」，那一句正是核心的定义。所以目录名不改：改名会动到 himeyuri 那几个仓库文档
 里的路径，而收益只是名字对齐。
 

@@ -484,7 +484,7 @@ tools 归拢（没有 goal）
 
 两个入口，因为它们的默认值都不替你决定：
 
-  node tools/build.mjs --seed D:\himeyuri\bootstrap\pack.hmtn
+  node tools/build.mjs --seed <语言仓库>/bootstrap/pack.hmtn
   node tools/run.mjs
 
 build 不带 --seed 也建得出来。那样盘上没有种子，第二段走到 heap ok 就停 —— 那条
