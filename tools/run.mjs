@@ -487,6 +487,7 @@ let 送过名字 = false;
 let 送过算式 = false;
 let 送过移窗 = false;
 let 送过再移 = false;
+let 送过事件 = false;
 // 六十秒。移窗那一条排在 prog 那一串测试的末尾（progtwo 之后），而前三条握手在它前面
 // 就走完了 —— 二十秒不够它跑到，而二十秒之后循环已经退出，送键这一步就永远不会发生。
 // 收手的条件里带着「移窗也跑完了」，所以正常情况下这个上限用不满。
@@ -535,6 +536,14 @@ for (let i = 0; i < 120; i++) {
       vbox(["controlvm", 机名, "keyboardputscancode", "e0", "cd"]);
       送过再移 = true;
     }
+    // 事件行那一格也要一次按键，而它排在这两次之后 —— 条件里带上「前两次已经送过」，
+    // 于是三次按键的顺序与客人机那三次等待的顺序一致。
+    if (送过再移 && !送过事件 && 读到.includes("Yunooka: event ready")) {
+      vbox(["controlvm", 机名, "keyboardputscancode", "e0", "4d"]);
+      睡(120);
+      vbox(["controlvm", 机名, "keyboardputscancode", "e0", "cd"]);
+      送过事件 = true;
+    }
     const 步数 = (读到.match(/Yunooka: op /g) || []).length;
     const 结果数 = (读到.match(/Yunooka: fn116 -> /g) || []).length;
     const 按名数 = (读到.match(/Yunooka: byname/g) || []).length;
@@ -543,7 +552,8 @@ for (let i = 0; i < 120; i++) {
     const 交互完 = /Yunooka: shell ready[\s\S]*?Yunooka: shell> files/.test(读到)
       && /Yunooka: repl ready[\s\S]*?Yunooka: repl-live> letters/.test(读到)
       && /Yunooka: calc ready[\s\S]*?=2\.000000/.test(读到)
-      && /Yunooka: move ready[\s\S]*?Yunooka: move again[\s\S]*?Yunooka: progmove [0-9A-F]/.test(读到);
+      && /Yunooka: move ready[\s\S]*?Yunooka: move again[\s\S]*?Yunooka: progmove [0-9A-F]/.test(读到)
+      && /Yunooka: event src=\d+/.test(读到);
     if (交互完 && 全程.every((s) => 读到.includes(s)) && 步数 >= 4 && 结果数 >= 2 && 按名数 >= 2) break;
   }
 }
@@ -1805,6 +1815,15 @@ const 移窗行 = /Yunooka: progmove[\s\S]{0,80}?([0-9A-F]{16}) ([0-9A-F]{16}) (
 const 移窗成 = 移窗行 !== null
   && 移窗行[1] === "000000000000001F" && 移窗行[2] === "0000000000000000"
   && 移窗行[3] === "000000000000001F";
+// 事件行：一次按键成为一行带源与目标的记录。四个字段 —— 源 id、种类、负载、目标窗口。
+// 而源与目标来自全局 26 与 27，这一格刚把它们写成 1 与 2 —— 所以「src=1 target=2」证明
+// 那两个字段有来处，而不是宿主写死的两个常数。payload 是一次方向键的第二个字节（4B 或 4D）；
+// 等不到键时它是零，判据就红。
+// 验红那一次把源那一格改成 3，读数变成 src=3，判据红 —— 于是这一行确实来自全局。
+const 事件行 = /Yunooka: event src=(\d+) kind=key payload=([0-9A-F]{16}) target=(\d+)/.exec(读到);
+const 事件成 = 事件行 !== null
+  && 事件行[1] === "1" && 事件行[3] === "2"
+  && /004B|004D/.test(事件行[2].slice(-4));
 // 写：造一个不存在的名字、写一段只有这里才有的字节、再按路径打开它。
 // 判据是那段内容本身 —— 而且 files 的列表里也要多出这个名字，因为「目录里多了一条」
 // 与「数据落对了地方」是两件事，两件都得成立。
@@ -2035,6 +2054,11 @@ console.log("移窗      " + (移窗行
   : "(没跑到)")
   + (移窗成 ? "  —— 两次按键各挪八列：新的在、旧的空、另一个窗口没被伤"
     : "  —— 不对：应当是 1F 00 1F（(90,20) 只可能在两次都生效时亮）"));
+console.log("事件行    " + (事件行
+  ? "src=" + 事件行[1] + " payload=" + 事件行[2].slice(-4) + " target=" + 事件行[3]
+  : "(没跑到)")
+  + (事件成 ? "  —— 四字段齐全：源与目标来自全局，负载来自那一次按键"
+    : "  —— 不对：应当是 src=1、payload=004B 或 004D、target=2"));
 console.log("文件系统  " + (fs行
   ? "v" + fs行[1] + "，根目录第 " + fs行[2] + " 号扇区，第一个名字 " + fs行[3]
   : "(没读出来)")
@@ -2400,6 +2424,7 @@ const 其余成 = 有种子
     && 高位成
     && 两窗成
     && 移窗成
+    && 事件成
     && 壳成
     && 除成
     && 数学成

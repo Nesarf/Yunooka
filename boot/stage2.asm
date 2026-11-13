@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 161
+stage2_sectors equ 162
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -846,6 +846,8 @@ long_entry:
     call run_prog_two_test
     ; 移窗：方向键从键盘进来，策略在包里，窗口自己走。
     call run_prog_move_test
+    ; 事件行：一次按键成为一行带源与目标的记录。
+    call run_event_line_test
     ; 窗口那一层到现在只有线与框。这一条让它能写字。
     call run_glyph_test
     ; 一个字母到一行字：字模成表，字距由判据量出来。
@@ -6425,6 +6427,62 @@ run_prog_move_test:
     mov rsi, line_progmove_bad
     call puts64
     ret
+
+; ======================================================================
+; 事件行：一次按键成为一行带源与目标的记录
+; ======================================================================
+;
+; 这是「复数控制器」那一批设计的第一块砖，而它取的是最小的一块：不碰第二个源、不碰绑定、
+; 不碰授权，只把「一次按键成为一行事件」这条形状做出来。
+;
+; 形状取自 design/INPUT.txt 第四节，四个字段：
+;   src      那个控制器属于哪一路输入源（全局 26）
+;   kind     按下、放开、移动、滚轮之一；这一格只有按下，所以写死成 key
+;   payload  键码；这一格是方向键的第二个字节
+;   target   那个源当前焦点所指的窗口（全局 27）
+;
+; 源与目标从全局来，而这一格只打一行事件。它要证明的正是「那两个字段不是宿主写死的那两个
+; 常数」：判据读 src=1 与 target=2，而这两个数是这一格刚写进全局的 —— 换成 3 与 4，判据
+; 就红（验红那一次改成 3）。
+;
+; 为什么源与目标放全局而不是当参数：事件行是宿主自己打的，它不经过包，也就不存在「包的
+; 参数槽」这一说。而更实在的理由是它们本来就是状态 —— 焦点是状态，源也是。
+;
+; 这一格没有判据去验「同一个键不会变成两行」：那是按键去抖该管的事，而这一层还没有它。
+run_event_line_test:
+    ; 一、两个全局：源 1、焦点窗口 2。全局存的是双精度，所以按双精度写。
+    mov qword [global_kinds + 26 * 8], 1
+    mov rax, 0x3FF0000000000000      ; 1.0
+    mov [global_vals + 26 * 8], rax
+    mov qword [global_kinds + 27 * 8], 1
+    mov rax, 0x4000000000000000      ; 2.0
+    mov [global_vals + 27 * 8], rax
+
+    ; 二、握手。串口只能往外说，所以「现在轮到按键了」必须由客人机自己报 —— 与移窗那一格
+    ;    同一个理由：靠时间猜的话，送早了键还在缓冲里、送晚了这一格已经超时。
+    mov rsi, line_event_ready
+    call puts64
+
+    ; 三、等一个方向键。等不到时 wait_arrow 交回 0，于是 payload 会是零，判据红。
+    call wait_arrow
+    mov r15, rax
+
+    ; 四、一行事件。源与目标各自从全局读回来，所以这一行证明那两个字段有来处。
+    mov rsi, line_event_head
+    call puts64
+    mov rax, [global_vals + 26 * 8]
+    call f64_to_int
+    call put_num64
+    mov rsi, line_event_kind
+    call puts64
+    mov rax, r15
+    call put_hex64
+    mov rsi, line_event_target
+    call puts64
+    mov rax, [global_vals + 27 * 8]
+    call f64_to_int
+    call put_num64
+    jmp put_nl64
 
 ; ======================================================================
 ; 一个包画一个窗口
@@ -16157,6 +16215,10 @@ line_progmove: db "Yunooka: progmove ", 0
 line_progmove_bad: db "Yunooka: progmove missing", 0
 line_move_ready: db "Yunooka: move ready", 13, 10, 0
 line_move_again: db "Yunooka: move again", 13, 10, 0
+line_event_ready: db "Yunooka: event ready", 13, 10, 0
+line_event_head: db "Yunooka: event src=", 0
+line_event_kind: db " kind=key payload=", 0
+line_event_target: db " target=", 0
 line_progdrag: db "Yunooka: progdrg ", 0
 line_progdrag_bad: db "Yunooka: progdrg missing", 0
 line_progglobal: db "Yunooka: progglobal ", 0
