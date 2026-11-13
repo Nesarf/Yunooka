@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 171
+stage2_sectors equ 172
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -38,6 +38,16 @@ seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 
 ; 少一个的症状是「甲盘条目数与索引不一致」：层三列得出二十条，而索引在十六条那里
 ; 截断了 —— 那个诊断是对的，因为截断是这一层自己做的决定。
 index_cap      equ 30
+
+; 等键的两条时间轴，单位是 TSC 计数而不是毫秒 —— 换算成毫秒要宿主的核频，而这一层
+; 不知道那个数。实测是：四圈循环走一个计数（rdtsc 跟核频，不跟某个固定晶振），
+; 所以同一个数在快机器上等得短、在慢机器上等得长。这不是缺陷，正是想要的形状：
+; 环境变快时预算自己变短，而不是把余量吃掉。
+;
+; 默认六百兆：三 GHz 上约两百毫秒，一 GHz 上约六百毫秒。宿主每 150 毫秒读一次串口，
+; 两头都盖得住。盖不住的那一处（键要经过宿主才进来）由调用点把 [wait_budget] 临时加长。
+poll_ticks     equ 20000000            ; 两次问信箱之间：三 GHz 上约七毫秒
+wait_ticks     equ 600000000           ; 一次等键的默认预算
 
 ; 信箱盘一次读几个扇区。第 0 个是头（YUNOMBX：主机送进来的那一行），第 1 个往后
 ; 是补丁包（YUNOPAT：补完界面拿来修的那一份字节）。
@@ -680,6 +690,28 @@ long_entry:
     mov rsi, line_heap_ok
     call puts64
 
+    ; ---- 时钟自检 ----
+    ; 在这一格之前，这台机器没有「现在过去了多久」这个概念。等键的预算是循环次数，
+    ; 而同一个数字在两台机器上是不同的墙钟时长 —— 那正是同级那一条判据卡住的地方：
+    ; 宿主每 150 毫秒读一次串口，客人机却在几十毫秒里把预算烧完了。
+    ;
+    ; rdtsc 不需要端口、不需要中断、不需要校准就能读。它的绝对频率不能假定（那是
+    ; 宿主的事），所以这里不换算成秒，只问一件事：让一段真有指令在跑的活过去之后，
+    ; 这个数变了没有、变了多少。变了才谈得上「等一会儿」。
+    call tsc_now
+    mov [clock_a], rax
+    mov rcx, 4000
+.clock_spin:
+    add rax, rcx
+    dec rcx
+    jnz .clock_spin
+    call tsc_now
+    sub rax, [clock_a]
+    mov rsi, line_clock_head
+    call puts64
+    call put_num64
+    call put_nl64
+
     ; 没有种子就不读它的头。否则从零里会读出一个「版本 0、0 个函数」，而第一条指令
     ; 那个 0 还会被翻成「加」—— 垃圾被翻译成漂亮数字，看起来像真读懂了。
     ; 判据要的是「读得懂」，不是「读得出数」。
@@ -849,15 +881,19 @@ long_entry:
     ; 都会先把它吃掉（实测：移窗那一次的等待拿走了它，而它恰好也是右键的码，所以窗口
     ; 真的挪了，只是判据没看在它身上）。
     call run_mbox_live_test
-    ; 同级：同一个窗口被两条路各操作一次 —— **这一格暂时挂起**，原因写在下面的注释里，
-    ; 而它自己那一段代码留在原处（不调用它，判据也不挂），因为设计是对的，缺的是一只秒表。
+    ; 同级：同一个窗口被两条路各操作一次 —— 这一格挂起过一轮，等的正是刚刚落地的时钟。
     ;
-    ; 挂起的理由：两趟必须由两条不同的路送，而第一趟的键盘键要靠宿主「看到握手之后再送」。
-    ; 宿主每 150 毫秒读一次串口文件，而 wait_arrow 的等待预算在虚拟机上跑完只要几十毫秒 ——
-    ; 于是键总是在等待结束之后才到。payload 全零，读起来像键没送到，实测是这一边早就放了手。
-    ; 把预算调大是猜：200 万、2000 万、2 亿三个量级各试过一次，读数没有变好，只把第一趟
-    ; 从「几十毫秒」拉成「几十秒」。**在没有时钟的这一层，把两边的时序对齐只能靠猜，而猜不是判据。**
-    ; 要它落地，先得有一样东西：客人机能读到「现在过去了多久」。
+    ; 挂起时挡路的是：两趟必须由两条不同的路送，而第一趟的键盘键要靠宿主「看到握手之后
+    ; 再送」。宿主每 150 毫秒读一次串口，而当时 wait_arrow 的预算数的是循环次数 —— 在虚拟
+    ; 机上几十毫秒就烧完，于是键总在放手之后才到。调预算是猜，三个量级都试过，没有变好。
+    ;
+    ; 现在预算是 rdtsc 量的墙钟，于是「等多久」成了这一层能说清的事 —— 这一格因此
+    ; 又能往下推一步：超时的时候串口会说等掉了多少个计数，于是「预算不够」与「键没来」
+    ; 第一次能分开。而分开之后看到的是第二件：把预算加大十倍（三乘十的十次方）也照样
+    ; 等满，而同一段代码、同一个送法在相邻的「事件行」那一处，用默认预算（六乘十的八次方）
+    ; 就等到了。所以这一次不是时钟的事，是那一次宿主没把键送到 8042 —— 差别在那一刻
+    ; 宿主自己的处境里，而不在等待长度里。下一步是先量宿主那一侧（看到 same ready 到
+    ; vbox 返回之间有多少毫秒），而不是再动这个数。
     ; call run_same_test
     ; 移窗：方向键从键盘进来，策略在包里，窗口自己走。
     call run_prog_move_test
@@ -938,6 +974,21 @@ seed_header:
     mov rax, r13
     call put_num64
     jmp put_nl64
+
+; 读时间戳计数，回来 rax = 64 位的那一个数。
+;
+; 为什么是 rdtsc 而不是 RTC 或 PIT：后两者都要走端口，而端口读的是 BCD 秒（分辨率
+; 一秒）或者 1.19 MHz 的 16 位计数（每 55 毫秒绕回一次），拿它们量「几百毫秒」都要
+; 自己数绕回。rdtsc 一条指令就给出单调递增的 64 位数，唯一不肯说的是它的频率 ——
+; 所以调用它的人只许比较两次读数的差，不许把那个差当成秒。
+;
+; 这一点要写死在心里：同一个差在 1 GHz 与 4 GHz 的宿主上是四倍的墙钟时长。凡是
+; 拿它当预算的地方，预算都要留够余量，宁可多等也不许假定快。
+tsc_now:
+    rdtsc                          ; edx:eax，高 32 位在 edx
+    shl rdx, 32
+    or rax, rdx
+    ret
 
 ; 打印 rax 的十进制值。与 16 位那一份同一个算法，换 64 位寄存器。
 ; emit 那一步不用保存 rax：pop 出来的余数用掉就丢，下一个 pop 会覆盖。
@@ -3484,28 +3535,37 @@ run_key_poll:
 ; 「哪一边算右」不在这里 —— 那是界面的意见，归包里的 keymove。宿主只负责说「按了哪个
 ; 方向键」。
 wait_arrow:
-    ; 预算放在 r8 而不是 r10：r10 是 ata_read 内部的忙等计数器，而这条循环现在会调它
-    ; （空转时问信箱）。用 r10 的后果不是算错 —— 每一轮轮询都把预算重置成 200000，
-    ; 于是这个循环永远耗不完，症状是「mbox ready 之后串口静住」。
+    ; 预算是墙钟，不是循环次数。
     ;
-    ; 两千万而不是两百万：这一条循环在虚拟机上只要几十毫秒就跑完两百万轮，而宿主是
-    ; 每 150 毫秒读一次串口文件 —— 于是「宿主看到握手、再把键送进来」永远赶不上。
-    ; 症状是事件行的 payload 全零，读起来像键没送到，而实测是等待早就结束了。
-    mov r8, 2000000
+    ; 以前这里数的是「还能转几圈」，而那个数字什么也不算：同一台机器上转一圈的时间
+    ; 被 ATA 读、被缓存、被宿主的调度拉得很开，于是两百万轮可能是二十五毫秒，也可能
+    ; 是半秒。宿主是每 150 毫秒读一次串口文件的 —— 于是「宿主看到握手、再把键送进来」
+    ; 这件事，能不能赶上完全取决于这台机器今天跑多快。症状是事件行的 payload 全零，
+    ; 读起来像键没送到，而实测是等待早就结束了。
+    ;
+    ; 现在起点与终点都是 rdtsc 读出来的数，同单位、单调、与机器快慢无关。默认预算
+    ; 放在 [wait_budget] 里，为的是让某个调用点能临时加长 —— 等一个要经过宿主的键，
+    ; 和「看看有没有键」不是同一件事，不该用同一个数。
+    call tsc_now
+    mov [clock_start], rax
+    add rax, [wait_budget]
+    mov [clock_deadline], rax
+    call tsc_now
+    add rax, poll_ticks
+    mov [clock_nextpoll], rax
+    ; 硬上界留在 r8：万一这台机器上 rdtsc 不动（某些虚拟化配置会冻结它），上面那条
+    ; 比较就永远不成立，而这里至少还能转完就放手。它不是预算，是保险丝。
+    mov r8, 1000000000
     xor r9d, r9d
 .wait_first:
-    ; 每 4096 轮问一次信箱 —— 这就是「运行时空转时轮询」落到指令上的样子。
-    ;
-    ; 代价照实算：一次等键约两百万轮，于是这里会问约五百次，每次一趟 ata_read。
-    ; 那比「只在某一条测试里轮询」贵，但后者就不是空转时轮询了 —— 它只是把第二条路
-    ; 摆在一个测试函数里，而通道本身仍然是只在启动时读的。
-    inc r9
-    test r9d, 0xFFF
-    jnz .no_mbox
-    ; 保存 r8 与 r9 再问信箱。ata_read 是别人写的（它是文件系统那一层的第一块砖），
-    ; 它用哪些寄存器不该由这里假定 —— 实测 r10 被它当忙等计数器用，而 r8 现在也被它
-    ; 动过：预算被改掉之后 wait_arrow 会「很快超时」，读数是一个 payload 全零的事件行，
-    ; 看起来像键没送到。两处都推一次，代价是四条指令。
+    ; 到点了没有，每轮问一次时钟。rdtsc 是几条指令，比一次真实的 ATA 读便宜两个
+    ; 数量级，所以「问时间」可以每轮做，「问信箱」只能按节拍做。
+    call tsc_now
+    cmp rax, [clock_deadline]
+    jae .timeout
+    cmp rax, [clock_nextpoll]
+    jb .no_mbox
+    add qword [clock_nextpoll], poll_ticks
     push r8
     push r9
     call mbox_poll
@@ -3520,6 +3580,16 @@ wait_arrow:
     jnz .first
     dec r8
     jnz .wait_first
+.timeout:
+    ; 超时的时候把等掉的时间打出来。一个「没等到」有两件完全不同的事要做：预算太短
+    ; （那就把数调大），或者根本没人在送（那调多大都一样）。它们在这行之前的串口上
+    ; 长得一模一样，而这一行把差别摆出来：第二趟会是一场真实的往返，那个数就是它的量。
+    call tsc_now
+    sub rax, [clock_start]
+    mov rsi, line_wait_timeout
+    call puts64
+    call put_num64
+    call put_nl64
     xor eax, eax
     ret
 .first:
@@ -3527,7 +3597,11 @@ wait_arrow:
     in al, dx
     cmp al, 0xE0
     jne .wait_first                ; 放开码（0x9D…）与普通键都不是我们要的
-    mov r8, 2000000                ; 前缀已到手，第二字节紧跟着来
+    ; 前缀已到手，第二字节紧跟着来 —— 而预算不再重设。总预算只有一份：两个字节之间
+    ; 真要等那么久，那已经不是「键在路上的延迟」，而是有一边没说清。重设预算会把一次
+    ; 等待变成两次，而两次加起来仍然超时的时候，日志里看不出是哪一个先到。这里曾经
+    ; 就是那样：第一趟读到前缀、等不到方向字节，而串口上什么也不说 —— 因为那条路径
+    ; 是「静悄悄返回 0」，与「真的没有键」长得一模一样。
 .wait_second:
     mov dx, 0x64
     in al, dx
@@ -3535,8 +3609,7 @@ wait_arrow:
     jnz .second
     dec r8
     jnz .wait_second
-    xor eax, eax
-    ret
+    jmp .timeout                   ; 第二字节没来，与「一个字节都没来」是同一件事
 .second:
     mov dx, 0x60
     in al, dx
@@ -3544,8 +3617,7 @@ wait_arrow:
     je .done
     cmp al, 0x4D                   ; 右
     je .done
-    mov r8, 5000000                ; 不是方向键的按下：把预算补回来，继续等
-    jmp .wait_first
+    jmp .wait_first                ; 不是方向键的按下：继续等，预算不补
 .done:
     movzx eax, al
     ; 键盘这一路不碰源：它是调用者默认的那一条，而调用者会自己设（或什么都不设，
@@ -7393,10 +7465,18 @@ run_same_test:
     mov [global_vals + 25 * 8], rax
 
     ; 四、第一趟：队头摆到 63（那一格没有 YUNOMBX），所以这一趟只能等键盘。
+    ;
+    ; 这一处把预算临时加长：要等的是「宿主看到 same ready、起一个 VBoxManage、把键送进来」
+    ; 整条往返。宿主每 150 毫秒读一次串口，而一次 VBoxManage 调用本身要起一个进程 ——
+    ; 实测三乘十的九次方（三 GHz 上约一秒）不够用，所以这里给到十倍。等待一旦有键就
+    ; 立刻返回，所以这个数大不拖慢成功的那一趟，只决定「放弃」要多久。
+    mov rax, 30000000000
+    mov [wait_budget], rax
     mov qword [mbox_head], 63
     mov rsi, line_same_ready
     call puts64
     call wait_arrow
+    mov qword [wait_budget], wait_ticks
     mov r15, rax
     call arbitrate
     mov rax, r15
@@ -7404,6 +7484,24 @@ run_same_test:
     mov rsi, line_same_a
     call puts64
     call .three
+    ; 诊断：两趟的读数差在第一点，而第一点的擦除用的是全局 24/25（上一帧位置）。
+    ; 所以把四个格子照原样打出来 —— 猜「擦到哪儿去了」不如让它们自己说。
+    mov rsi, line_same_g
+    call puts64
+    movsd xmm0, [global_vals + 24 * 8]
+    call put_f64
+    mov rsi, line_space
+    call puts64
+    movsd xmm0, [global_vals + 25 * 8]
+    call put_f64
+    mov rsi, line_space
+    call puts64
+    movsd xmm0, [global_vals + 16 * 8]
+    call put_f64
+    mov rsi, line_space
+    call puts64
+    movsd xmm0, [global_vals + 17 * 8]
+    call put_f64
     call put_nl64
 
     ; 五、把窗口画回起点：第二趟要从同一个地方出发，否则「两趟读数相同」测的是两件
@@ -16855,6 +16953,13 @@ line5:     db "Yunooka: long mode ok", 13, 10, 0
 line_alloc: db "Yunooka: alloc ", 0
 line_heap_ok: db "Yunooka: heap ok", 13, 10, 0
 line_heap_bad: db "Yunooka: heap bad", 13, 10, 0
+line_clock_head: db "Yunooka: clock ticks=", 0
+clock_a: dq 0
+clock_start: dq 0
+line_wait_timeout: db "Yunooka: wait timeout ", 0
+clock_deadline: dq 0
+clock_nextpoll: dq 0
+wait_budget: dq wait_ticks
 line_seed_hdr: db "Yunooka: seed v", 0
 line_seed_mid: db " ", 0
 line_fn: db "Yunooka: fn ", 0
@@ -17181,6 +17286,7 @@ line_same_ready: db "Yunooka: same ready", 13, 10, 0
 line_same_again: db "Yunooka: same again", 13, 10, 0
 line_same_a: db "Yunooka: same a ", 0
 line_same_b: db "Yunooka: same b ", 0
+line_same_g: db "Yunooka: same g ", 0
 line_same_nopkg: db "Yunooka: same nopkg", 13, 10, 0
 line_fs2_fail: db "Yunooka: beta preread failed", 13, 10, 0
 line_idt_ok: db "Yunooka: idt ok", 13, 10, 0
