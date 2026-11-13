@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 162
+stage2_sectors equ 163
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -848,6 +848,8 @@ long_entry:
     call run_prog_move_test
     ; 事件行：一次按键成为一行带源与目标的记录。
     call run_event_line_test
+    ; 未登记被拒：同一个键，源在清单里就放行、不在就留一行拒绝。
+    call run_event_reject_test
     ; 窗口那一层到现在只有线与框。这一条让它能写字。
     call run_glyph_test
     ; 一个字母到一行字：字模成表，字距由判据量出来。
@@ -6449,6 +6451,88 @@ run_prog_move_test:
 ; 参数槽」这一说。而更实在的理由是它们本来就是状态 —— 焦点是状态，源也是。
 ;
 ; 这一格没有判据去验「同一个键不会变成两行」：那是按键去抖该管的事，而这一层还没有它。
+
+; ----------------------------------------------------------------------
+; 三个例程：登记、发射、仲裁
+; ----------------------------------------------------------------------
+;
+; 上一格把「一次按键成为一行事件」写在一处。这一格把它拆成两件事 —— 发射一行，与决定
+; 要不要发射。拆的理由是判据：一个「打了拒绝行却照样把事件放过去」的实现，在只有发射
+; 的时候完全看不出来，因为它打的那一行每个字段都对。
+;
+; 顺序照依赖写：先有清单，才有查清单的人，才有查完之后的一放一挡。
+
+; 登记一个源。输入 rdi = 源 id，填第一个空位。
+;
+; 表满的时候什么都不做。一个真实的登记在填不进去时要报出来，而这一格只登记一个源、
+; 表有四个位置，「满了」是这一格里唯一没有人读的分支 —— 让它先空着，等第二个源。
+register_source:
+    xor rcx, rcx
+.scan:
+    cmp rcx, 4
+    jae .full
+    cmp qword [src_registry + rcx * 8], 0
+    je .put
+    inc rcx
+    jmp .scan
+.put:
+    mov [src_registry + rcx * 8], rdi
+.full:
+    ret
+
+; 打一行事件。输入 r15 = 负载，源与目标从全局 26 / 27 读。
+;
+; 它只管形状，不管该不该打 —— 判断在 arbitrate 里。这六条指令是上一格原样搬来的，
+; 一个字节没改，所以上一格那条判据仍然指着同一段代码。
+emit_event:
+    mov rsi, line_event_head
+    call puts64
+    mov rax, [global_vals + 26 * 8]
+    call f64_to_int
+    call put_num64
+    mov rsi, line_event_kind
+    call puts64
+    mov rax, r15
+    call put_hex64
+    mov rsi, line_event_target
+    call puts64
+    mov rax, [global_vals + 27 * 8]
+    call f64_to_int
+    call put_num64
+    jmp put_nl64
+
+; 仲裁一次按键。输入 r15 = 负载：源在清单里就发射，不在就留一行拒绝。
+;
+; 拒绝行也带源 id。理由与事件行带源 id 是同一条 —— 一行记录要说得清是谁。而理由是一个
+; 字段（rejected=...），不是一句散文：这一层后面还要区分「未登记」与「未绑定」，两种
+; 拒绝的修法不同，串口上分不开就等于没分（design/INPUT.txt 第十二节第三条判据）。
+; 把理由做成字段之后，将来加一种拒绝是加一个值，不是改一次句子的形状。
+;
+; 查表是线性的四格，不建哈希：四格的表用哈希，只是把「查什么」藏进一个函数里。
+arbitrate:
+    mov rax, [global_vals + 26 * 8]
+    call f64_to_int
+    mov r14, rax
+    xor rcx, rcx
+.scan:
+    cmp rcx, 4
+    jae .reject
+    cmp qword [src_registry + rcx * 8], r14
+    je .accept
+    inc rcx
+    jmp .scan
+.accept:
+    jmp emit_event
+.reject:
+    mov rsi, line_input_head
+    call puts64
+    mov rax, r14
+    call put_num64
+    mov rsi, line_input_reason
+    call puts64
+    mov rsi, line_input_unregistered
+    jmp puts64
+
 run_event_line_test:
     ; 一、两个全局：源 1、焦点窗口 2。全局存的是双精度，所以按双精度写。
     mov qword [global_kinds + 26 * 8], 1
@@ -6468,21 +6552,60 @@ run_event_line_test:
     mov r15, rax
 
     ; 四、一行事件。源与目标各自从全局读回来，所以这一行证明那两个字段有来处。
-    mov rsi, line_event_head
+    ;    这一段本身抽成了 emit_event —— 下一个测试要在同一个「发射」上再套一层仲裁，
+    ;    两处各写一遍的话，仲裁那一条红起来就有一半的理由落在「发射」上。
+    jmp emit_event
+
+; ======================================================================
+; 未登记被拒：一个没有名字的源送来的一次按键被挡下
+; ======================================================================
+;
+; 判据取自 design/INPUT.txt 第十二节第二条：把一个没有名字的源 id 送进仲裁，事件被挡下，
+; 而串口上留一行拒绝。
+;
+; 这一条最容易被一个「打了一行拒绝、但仍然把事件放过去」的实现骗过 —— 那种实现打的那一行
+; 完全正确，只有把整份串口读一遍、确认没有 event src=2 才分得开。所以这一格的两次按键送
+; 的是同一个键，只差源 id 一格：源 1 那一行进事件行，源 2 那一行只留拒绝。两次负载相同
+; 这件事有用 —— 它让「同一个东西，两种待遇」在串口上直接看得见。
+;
+; 清表那四行不是客套：上一格没有这张表，所以这一格的起点必须是一张确定的空表。不清的话，
+; 「源 1 放行」也可能只是上一次运行留在内存里的东西 —— 而那看起来与真登记完全一样。
+run_event_reject_test:
+    ; 一、空表。
+    mov qword [src_registry + 0 * 8], 0
+    mov qword [src_registry + 1 * 8], 0
+    mov qword [src_registry + 2 * 8], 0
+    mov qword [src_registry + 3 * 8], 0
+
+    ; 二、只登记 1 号源。2 号故意留着不登记 —— 它就是下一半的被拒者。
+    mov rdi, 1
+    call register_source
+
+    ; 三、源 1、焦点窗口 2，与上一格同一组全局。这一次走仲裁，所以它同时也验了
+    ;    「登记过的源照旧放行」—— 少了这一半，一个永远拒绝的实现也能过。
+    mov qword [global_kinds + 26 * 8], 1
+    mov rax, 0x3FF0000000000000      ; 1.0
+    mov [global_vals + 26 * 8], rax
+    mov qword [global_kinds + 27 * 8], 1
+    mov rax, 0x4000000000000000      ; 2.0
+    mov [global_vals + 27 * 8], rax
+
+    mov rsi, line_reject_ready
     call puts64
-    mov rax, [global_vals + 26 * 8]
-    call f64_to_int
-    call put_num64
-    mov rsi, line_event_kind
+    call wait_arrow
+    mov r15, rax
+    call arbitrate
+
+    ; 四、同一个键，源换成 2。它不在清单里，所以这一次该被挡下。
+    mov qword [global_kinds + 26 * 8], 1
+    mov rax, 0x4000000000000000      ; 2.0
+    mov [global_vals + 26 * 8], rax
+
+    mov rsi, line_reject_again
     call puts64
-    mov rax, r15
-    call put_hex64
-    mov rsi, line_event_target
-    call puts64
-    mov rax, [global_vals + 27 * 8]
-    call f64_to_int
-    call put_num64
-    jmp put_nl64
+    call wait_arrow
+    mov r15, rax
+    jmp arbitrate
 
 ; ======================================================================
 ; 一个包画一个窗口
@@ -16042,6 +16165,12 @@ clip_y1: dq 0
 ; 两组尺寸，十六格立刻见底。扩到三十二不是留余量 —— 是下一件事需要它。
 global_kinds: times 32 dq 0
 global_vals:  times 32 dq 0
+; 登记表：四格，0 表示空位，非零就是一个登记过的源 id。
+;
+; 它是这一层的第一份清单，而它现在只回答一个问题：这个源 id 在不在里面。四格是容量下界，
+; 不是一个设计数字 —— 这一格只登记一个源、送两个源。0 当空位是安全的：源 id 从 1 数起，
+; 而 0 在事件行里会让判据读不出源。
+src_registry: times 4 dq 0
 bi_name_slurp: dw 0x0073, 0x006C, 0x0075, 0x0072, 0x0070
 bi_name_save: dw 0x0073, 0x0061, 0x0076, 0x0065
 bi_name_list: dw 0x006C, 0x0069, 0x0073, 0x0074
@@ -16217,6 +16346,13 @@ line_move_ready: db "Yunooka: move ready", 13, 10, 0
 line_move_again: db "Yunooka: move again", 13, 10, 0
 line_event_ready: db "Yunooka: event ready", 13, 10, 0
 line_event_head: db "Yunooka: event src=", 0
+; 拒绝行：源 id 与理由各自一格。理由做成字段而不是散文，因为这一层后面还要区分
+; 「未绑定」与「工程失活」—— 三种拒绝的修法各不相同，串口上分不开就等于没分。
+line_input_head: db "Yunooka: input src=", 0
+line_input_reason: db " rejected=", 0
+line_input_unregistered: db "unregistered", 13, 10, 0
+line_reject_ready: db "Yunooka: reject ready", 13, 10, 0
+line_reject_again: db "Yunooka: reject again", 13, 10, 0
 line_event_kind: db " kind=key payload=", 0
 line_event_target: db " target=", 0
 line_progdrag: db "Yunooka: progdrg ", 0
