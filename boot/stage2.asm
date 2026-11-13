@@ -856,6 +856,8 @@ long_entry:
     call run_project_test
     ; 伪装可被识破：两个同名工程，只有签名在清单里。
     call run_disguise_test
+    ; 注册：一份完整的、两份各缺一项的 —— 而两道缺项给出同一行字。
+    call run_register_test
     ; 窗口那一层到现在只有线与框。这一条让它能写字。
     call run_glyph_test
     ; 一个字母到一行字：字模成表，字距由判据量出来。
@@ -7014,6 +7016,59 @@ run_disguise_test:
     mov rdi, 8
     mov rsi, 1
     jmp request_disguise
+
+; ======================================================================
+; 注册是全有或全无：两道缺项，同一行字
+; ======================================================================
+;
+; 判据取自 design/INPUT.txt 第十二节第六条：一份完整的注册材料成功；同一份删掉任意一项就
+; 失败，而失败那一行与「缺了哪一项」无关 —— 两种不同的缺项必须给出同一行字。
+;
+; 这一条测的不是「会不会拒绝」，是「拒绝说不说得清」。一个把缺项写进那行的实现完全能拒绝，
+; 而它会送出一个可以逐项收敛的信号：试错的人改一位、看行变不变，几十次之后就凑齐了。
+; 所以判据要比较的是那两行**是否逐字节相同**，不是「两行都以 denied 开头」。
+;
+; 材料在这里是三个位：源、操作员、签名。只有 7 算完整 —— 多出来的位也不合格，
+; 因为一份材料不该带着它没声明的字段，那与缺项是同一个问题的另一面。
+register_material:
+    ; 输入 rdi = 材料。输出一行。
+    mov r14, rdi
+    cmp rdi, 7
+    jne .denied
+    ; 完整：真的登记一个源（编号 21），然后说成功。
+    mov rdi, 21
+    call register_source
+    mov rsi, line_register_ok
+    jmp puts64
+.denied:
+    ; 两道不同的缺项都落在这里，而这里只有一句字 —— 这正是这一条要的形状。
+    mov rsi, line_register_denied
+    jmp puts64
+
+; ======================================================================
+; 注册：一份完整的、两份各缺一项的
+; ======================================================================
+;
+; 三行读数：ok、denied、denied。判据要的是后两行相等 —— 而它们相等这件事，
+; 只有把整行读下来才看得见。
+run_register_test:
+    ; 一、清登记表，让 ok 那一次真的登记得进去（表满时 register_source 会静默丢掉）。
+    mov qword [src_registry + 0 * 8], 0
+    mov qword [src_registry + 1 * 8], 0
+    mov qword [src_registry + 2 * 8], 0
+    mov qword [src_registry + 3 * 8], 0
+
+    ; 二、完整材料。
+    mov rdi, 7
+    call register_material
+
+    ; 三、缺签名位（0b011）。
+    mov rdi, 3
+    call register_material
+
+    ; 四、缺源位（0b110）—— 缺的是另一项，而那一行必须与上一条逐字节相同。
+    mov rdi, 6
+    jmp register_material
 
 ; ======================================================================
 ; 一个包画一个窗口
@@ -16793,6 +16848,11 @@ line_proj_accepted: db "accepted src=", 0
 line_disguise_head: db "Yunooka: disguise sig=", 0
 line_disguise_name: db " name=", 0
 line_disguise_what: db " ", 0
+; 注册那两行：成功与失败各一句，而失败那一句**不带「缺了哪一项」**。
+; 这不是省字：两种不同的缺项必须给出同一行，否则一个试错的人可以逐项收敛，
+; 而「不说明缺什么」正是这一条判据要测的东西。
+line_register_ok: db "Yunooka: register ok", 13, 10, 0
+line_register_denied: db "Yunooka: register denied", 13, 10, 0
 line_reject_ready: db "Yunooka: reject ready", 13, 10, 0
 line_reject_again: db "Yunooka: reject again", 13, 10, 0
 line_event_kind: db " kind=key payload=", 0
