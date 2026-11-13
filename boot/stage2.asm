@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 163
+stage2_sectors equ 165
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -852,6 +852,8 @@ long_entry:
     call run_event_reject_test
     ; 未绑定被拒：同一个源 id，这次它登记了却没有主人 —— 拒绝的理由换一格。
     call run_event_unbound_test
+    ; 工程失活：同一个工程的四条判决 —— 没名字、失活、被信任、接受。
+    call run_project_test
     ; 窗口那一层到现在只有线与框。这一条让它能写字。
     call run_glyph_test
     ; 一个字母到一行字：字模成表，字距由判据量出来。
@@ -6702,6 +6704,173 @@ run_event_unbound_test:
     call wait_arrow
     mov r15, rax
     jmp arbitrate
+
+; ======================================================================
+; 工程失活：主体不被信任，于是它驱动的行为全部无效
+; ======================================================================
+;
+; 判据取自 design/INPUT.txt 第十二节第四条：一个签名不在清单里的工程请求创建控制器，整个
+; 工程失活、串口上留一行；而同一份请求在签名进了清单之后被接受 —— 两条都要验，只验前一条
+; 的话，一个「永远拒绝」的实现也能过。
+;
+; 这一格与前几格不是同一类东西。前三格判的是一次事件，这一格判的是一个主体的状态，而状态
+; 与判决的差在这里可测：一个逐次查清单的实现在第二次请求上会再报一次「不在清单里」，正确
+; 的实现在第二次报的是「失活」—— 两行字不同，而那不是措辞的差别，是两种实现的差别。
+;
+; 三态（0 空位 · 1 失活 · 2 信任）要第三态，正因为「没见过」与「见过而失活」必须分开：
+; 合成两态的话，第一次与第二次请求会给出同一行读数，而这一格的判据问的就是它们的不同。
+
+; 找一条工程记录。输入 rdi = 工程 id，输出 rax = 下标，找不到是 -1。
+find_project:
+    xor rcx, rcx
+.scan:
+    cmp rcx, 4
+    jae .none
+    cmp qword [proj_id + rcx * 8], rdi
+    je .found
+    inc rcx
+    jmp .scan
+.found:
+    mov rax, rcx
+    ret
+.none:
+    mov rax, -1
+    ret
+
+; 建一条工程记录，状态 0。输入 rdi = 工程 id，输出 rax = 新下标，表满时 -1。
+;
+; 表满与寄存器满了都返回 -1 而不是悄悄丢掉：一个建不出来的记录若被当成「建好了」，
+; 接下来那次查询会读出空位，而空位在这个状态机里的含义是「失活」—— 结果是拒绝，
+; 但拒绝的理由是错的，而那比拒绝本身更难查。
+new_project:
+    xor rcx, rcx
+.scan:
+    cmp rcx, 4
+    jae .none
+    cmp qword [proj_id + rcx * 8], 0
+    je .put
+    inc rcx
+    jmp .scan
+.put:
+    mov [proj_id + rcx * 8], rdi
+    mov qword [proj_state + rcx * 8], 0
+    mov rax, rcx
+    ret
+.none:
+    mov rax, -1
+    ret
+
+; 打一行工程判决。输入 r14 = 工程 id，r11 = 状态字符串（自带换行）。
+emit_project:
+    mov rsi, line_proj_head
+    call puts64
+    mov rax, r14
+    call put_num64
+    mov rsi, line_proj_what
+    call puts64
+    mov rsi, r11
+    jmp puts64
+
+; 一个工程请求创建控制器。输入 rdi = 工程 id，四种结局在串口上各是一行。
+;
+; 它建记录、改状态，所以调用者不要指望 rdi / rax 还能用 —— 而这一格只有测试在调它。
+request_controller:
+    mov r14, rdi
+    call find_project
+    cmp rax, -1
+    jne .have
+    call new_project
+    cmp rax, -1
+    je .full
+.have:
+    mov rcx, rax
+    mov rax, [proj_state + rcx * 8]
+    cmp rax, 2
+    je .accepted
+    cmp rax, 1
+    je .inactive
+    ; 状态 0：第一次撞门。它从「没见过」变成「失活」—— 一次不合格的尝试让主体进入这个
+    ; 状态，之后它的每一次请求都从状态出发，不再回头去查清单。这就是「判定落在主体启用
+    ; 的时候，不落在每一次行为上」落到指令上的样子。
+    mov qword [proj_state + rcx * 8], 1
+    mov r11, line_proj_untrusted
+    jmp emit_project
+.inactive:
+    mov r11, line_proj_inactive
+    jmp emit_project
+.accepted:
+    ; 接受要有一个可读的后果：控制器真的建出来。用工程 id 加十来编号，所以串口上那一格
+    ; 说的是「哪个控制器」，而不只是「接受了」。
+    mov rdi, r14
+    add rdi, 10
+    call register_source
+    mov rsi, line_proj_head
+    call puts64
+    mov rax, r14
+    call put_num64
+    mov rsi, line_proj_what
+    call puts64
+    mov rsi, line_proj_accepted
+    call puts64
+    mov rax, r14
+    add rax, 10
+    call put_num64
+    jmp put_nl64
+.full:
+    ret
+
+; 把一个工程写进信任清单。输入 rdi = 工程 id，没有记录就建一条。
+;
+; 它只改状态，不碰控制器：撤销要沿着链往下走（工程、操作员、控制器），而这一格只做最上面
+; 那一环 —— 下面的传递要等控制器真的带着工程 id，而那还没有。
+trust_project:
+    mov r14, rdi
+    call find_project
+    cmp rax, -1
+    jne .have
+    call new_project
+    cmp rax, -1
+    je .done
+.have:
+    mov qword [proj_state + rax * 8], 2
+.done:
+    mov r11, line_proj_trusted
+    jmp emit_project
+
+; ======================================================================
+; 工程失活：四条判决，同一个工程
+; ======================================================================
+;
+; 四行读数是一条序列，而判据把它们当一条序列来读：没名字、失活、被信任、接受。分开成四个
+; 独立的正则也能过，但那样一个「每次都报 untrusted」的实现会在第一行与第三行以外全对，
+; 而任何一行单看都像个正常答案。
+run_project_test:
+    ; 一、两张表清空。
+    mov qword [proj_id + 0 * 8], 0
+    mov qword [proj_id + 1 * 8], 0
+    mov qword [proj_id + 2 * 8], 0
+    mov qword [proj_id + 3 * 8], 0
+    mov qword [proj_state + 0 * 8], 0
+    mov qword [proj_state + 1 * 8], 0
+    mov qword [proj_state + 2 * 8], 0
+    mov qword [proj_state + 3 * 8], 0
+
+    ; 二、工程 3 第一次请求 —— 从没出现过，所以报不在清单里，并被置为失活。
+    mov rdi, 3
+    call request_controller
+
+    ; 三、同一个工程再请求 —— 这一次该报失活，因为上一行把它写成了失活。若实现是逐次
+    ;    查清单的，这里会再报一次 untrusted，而那一行与上一行完全一样。
+    mov rdi, 3
+    call request_controller
+
+    ; 四、把 3 写进信任清单。
+    mov rdi, 3
+    call trust_project
+
+    ; 五、同一份请求 —— 这一次该被接受，并且真的建出一个控制器（编号 13）。
+    mov rdi, 3
+    jmp request_controller
 
 ; ======================================================================
 ; 一个包画一个窗口
@@ -16273,6 +16442,13 @@ src_registry: times 4 dq 0
 ; 「它属于谁」。合成一张表也跑得动，但那样「登记过」与「有主人」就再也分不开了，而这一层
 ; 的第三条判据问的正是这两件事之间的那个差。
 src_bind: times 4 dq 0
+; 工程表：四格。id 是工程的身份，state 是它的状态 —— 0 空位、1 失活、2 信任。
+;
+; 三态而不是两态，是因为「没见过」与「见过而失活」是两件事，而这一格的判据要问的正是
+; 它们之间的差：一个从未见过的工程第一次撞门，报的是「不在清单里」；撞过一次之后，
+; 它留下一条失活的记录，下一次报的是「失活」。两态的话，那两行会合成一行。
+proj_id: times 4 dq 0
+proj_state: times 4 dq 0
 bi_name_slurp: dw 0x0073, 0x006C, 0x0075, 0x0072, 0x0070
 bi_name_save: dw 0x0073, 0x0061, 0x0076, 0x0065
 bi_name_list: dw 0x006C, 0x0069, 0x0073, 0x0074
@@ -16455,6 +16631,14 @@ line_input_reason: db " rejected=", 0
 line_input_unregistered: db "unregistered", 13, 10, 0
 line_input_unbound: db "unbound", 13, 10, 0
 line_unbound_ready: db "Yunooka: unbound ready", 13, 10, 0
+; 工程那一层：一行一个工程的判决。四种结局各是一个词，而「失活」与「不在清单里」必须
+; 是两个词 —— 修法不同，串口上分不开就等于没分。
+line_proj_head: db "Yunooka: project ", 0
+line_proj_what: db " ", 0
+line_proj_untrusted: db "untrusted", 13, 10, 0
+line_proj_inactive: db "inactive", 13, 10, 0
+line_proj_trusted: db "trusted", 13, 10, 0
+line_proj_accepted: db "accepted src=", 0
 line_reject_ready: db "Yunooka: reject ready", 13, 10, 0
 line_reject_again: db "Yunooka: reject again", 13, 10, 0
 line_event_kind: db " kind=key payload=", 0
