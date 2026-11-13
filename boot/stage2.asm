@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 166
+stage2_sectors equ 168
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -844,6 +844,11 @@ long_entry:
     call run_prog_high_test
     ; 两窗：两个窗口各有自己一组格子，挪第二个不伤第一个。
     call run_prog_two_test
+    ; 信箱：运行时的第二条输入路 —— 没有人按键，键从第二块盘上来。它排在所有键盘等待
+    ; 之前，因为空转时轮询意味着「谁在等，谁拿到」—— 消息只有一条，而前面任何一个等待
+    ; 都会先把它吃掉（实测：移窗那一次的等待拿走了它，而它恰好也是右键的码，所以窗口
+    ; 真的挪了，只是判据没看在它身上）。
+    call run_mbox_live_test
     ; 移窗：方向键从键盘进来，策略在包里，窗口自己走。
     call run_prog_move_test
     ; 事件行：一次按键成为一行带源与目标的记录。
@@ -3275,11 +3280,17 @@ ata_read:
     jmp .retry
 .idle:
     mov rdi, [rsp]                  ; LBA（重试时也要还在）
-    ; 设备/头：主盘、LBA 模式、再带上 LBA 的高四位
+    ; 设备/头：LBA 模式、再带上 LBA 的高四位，而「哪一块盘」由 ata_dev 决定。
+    ;
+    ; bit4 是设备选择：0 是 primary master（主盘，文件系统住的那块），0x10 是 primary
+    ; slave（信箱盘）。这一格之前它是写死的 0xE0 —— 于是 ata_read 只能读主盘，
+    ; 而信箱盘在从盘上，所以「用 ata_read 读信箱」这件事以前根本没成立过：
+    ; 读是读成功了的，读回来的却是主盘同一号扇区的字节。
     mov rax, rdi
     shr rax, 24
     and al, 0x0F
     or al, 0xE0
+    or al, byte [ata_dev]
     mov dx, 0x1F6
     out dx, al
     ; 扇区数
@@ -3463,13 +3474,29 @@ run_key_poll:
 ; 「哪一边算右」不在这里 —— 那是界面的意见，归包里的 keymove。宿主只负责说「按了哪个
 ; 方向键」。
 wait_arrow:
-    mov r10, 2000000               ; 约三秒：够主机从看到握手到把码送进来，又不至于让第二趟干等
+    ; 预算放在 r8 而不是 r10：r10 是 ata_read 内部的忙等计数器，而这条循环现在会调它
+    ; （空转时问信箱）。用 r10 的后果不是算错 —— 每一轮轮询都把预算重置成 200000，
+    ; 于是这个循环永远耗不完，症状是「mbox ready 之后串口静住」。
+    mov r8, 2000000                ; 约三秒：够主机从看到握手到把码送进来，又不至于让第二趟干等
+    xor r9d, r9d
 .wait_first:
+    ; 每 4096 轮问一次信箱 —— 这就是「运行时空转时轮询」落到指令上的样子。
+    ;
+    ; 代价照实算：一次等键约两百万轮，于是这里会问约五百次，每次一趟 ata_read。
+    ; 那比「只在某一条测试里轮询」贵，但后者就不是空转时轮询了 —— 它只是把第二条路
+    ; 摆在一个测试函数里，而通道本身仍然是只在启动时读的。
+    inc r9
+    test r9d, 0xFFF
+    jnz .no_mbox
+    call mbox_poll
+    test rax, rax
+    jnz .from_mbox
+.no_mbox:
     mov dx, 0x64
     in al, dx
     test al, 0x01
     jnz .first
-    dec r10
+    dec r8
     jnz .wait_first
     xor eax, eax
     ret
@@ -3478,13 +3505,13 @@ wait_arrow:
     in al, dx
     cmp al, 0xE0
     jne .wait_first                ; 放开码（0x9D…）与普通键都不是我们要的
-    mov r10, 2000000               ; 前缀已到手，第二字节紧跟着来
+    mov r8, 2000000                ; 前缀已到手，第二字节紧跟着来
 .wait_second:
     mov dx, 0x64
     in al, dx
     test al, 0x01
     jnz .second
-    dec r10
+    dec r8
     jnz .wait_second
     xor eax, eax
     ret
@@ -3495,10 +3522,90 @@ wait_arrow:
     je .done
     cmp al, 0x4D                   ; 右
     je .done
-    mov r10, 5000000               ; 不是方向键的按下：把预算补回来，继续等
+    mov r8, 5000000                ; 不是方向键的按下：把预算补回来，继续等
     jmp .wait_first
 .done:
     movzx eax, al
+    ; 键盘这一路不碰源：它是调用者默认的那一条，而调用者会自己设（或什么都不设，
+    ; 那就是上一次的值）。只有信箱那一路要改源 —— 因为调用者不知道这次是信箱。
+    ;
+    ; 这里曾经也设了一次源，于是「设源 2、等键、仲裁」那一条变成了「设源 2、等键、
+    ; 源被改回 1、仲裁」，读数从 input src=2 变成 event src=1。判据当场红了。
+    ret
+.from_mbox:
+    ; 信箱这一路的源 id 是 5。它在收尾处设，与键盘那一路对称：两条路的差别只在源那一格，
+    ; 键码与返回值形状完全一样 —— 这正是「同级」在代码里的第一次落地。
+    mov r15, rax
+    mov rax, 0x4014000000000000      ; 5.0
+    mov [global_vals + 26 * 8], rax
+    mov rax, r15
+    ret
+
+; ======================================================================
+; 空转时问一次信箱：序列号变了就是一条新输入
+; ======================================================================
+;
+; 这条通道一直存在，但它以前只在启动时读一次（实模式，int 0x13，落在 0x50000）。
+; 这一格让它变成运行时的：长模式下用 ata_read 读第 0 个扇区，比序列号。
+;
+; 为什么比序列号而不是比内容：内容可以相同（同一个命令送两次是合法的），而「来了一条新的」
+; 这件事只能由发送方的计数说明。序列号写在头偏移 16，是 run.mjs 与 stage2 共享的那一份
+; 约定里早就有的一格 —— 注释里当时写着「将来客人机靠它认新」，这一格就是那个将来。
+;
+; 键码借的是偏移 10 那两个留白字节。它曾经被借去当 ATA 的开关，后来不用了；现在它是
+; 「这一条输入是什么键」。留白可以换用途，但换一次要在两边同时写下来，否则下一次有人
+; 读到旧用途。
+;
+; 返回 rax = 键码（0 表示没有新的）。它只在 wait_arrow 的空转里被调用。
+mbox_poll:
+    cmp qword [mbox_serial0], 0
+    jne .ready
+    ; 第一次：只记基准。基准取自启动时那份快照 —— 它是「我们知道盘上原本是什么」。
+    mov eax, [0x50000 + 16]
+    mov [mbox_serial0], rax
+    mov r14, rax
+    mov rsi, line_mbox_base
+    call puts64
+    mov rax, r14
+    call put_num64
+    call put_nl64
+    xor eax, eax
+    ret
+.ready:
+    ; 读第 4 个扇区。为什么不是第 0 个：第 0 到第 3 是启动时读的那四个（头与补丁包），
+    ; 而这一格要证明的正是「运行时还能读到一份启动时没读过的内容」。同一个扇区做不到
+    ; 那件事 —— 启动时读的与运行时读的若是同一处，两次读到的必然是同一份字节。
+    mov byte [ata_dev], 0x10        ; 从盘：信箱住在 primary slave
+    mov rdi, 4
+    mov rsi, mbox_buf
+    call ata_read
+    mov byte [ata_dev], 0           ; 读完立刻放回去：文件系统那一整套读的是主盘
+    jc .readfail
+    mov rdi, mbox_buf
+    mov rsi, mbox_magic
+    mov rcx, 8
+    call bytes_eq
+    jc .none
+    mov eax, [mbox_buf + 16]
+    cmp rax, [mbox_serial0]
+    je .none
+    ; 记下新的：同一条消息不会被读成两条。这一步就是「新」这个字在代码里的全部含义。
+    mov [mbox_serial0], rax
+    mov r14, rax
+    mov rsi, line_mbox_new
+    call puts64
+    mov rax, r14
+    call put_num64
+    call put_nl64
+    movzx eax, word [mbox_buf + 10]
+    test rax, rax
+    jz .none
+    ret
+.readfail:
+    mov rsi, line_mbox_readfail
+    call puts64
+.none:
+    xor eax, eax
     ret
 
 ; 比较两段字节。rdi 与 rsi 是地址，rcx 是字节数。相等清进位。
@@ -7120,6 +7227,48 @@ run_nolock_test:
     ; 四、完整的一份。连着两次失败之后它仍然成功：不锁定的那一半。
     mov rdi, 7
     jmp nolock_material
+
+; ======================================================================
+; 信箱：运行时的第二条输入路
+; ======================================================================
+;
+; 这一格不是「又有一个测试」，是第二条运行时输入路第一次真的存在。在此之前只有一条
+; （8042 键盘），而 design/INPUT.txt 第十二节明说过：把同一路注入改个名字当第二源，
+;; 比没有第二源更坏 —— 它会给出一个绿，理由是名字不同。
+;
+; 这里两条路真的不同：一条来自 8042 的输出缓冲，一条来自第二块 IDE 盘的第一个扇区。
+; 而它们在汇合处只差一样东西 —— 源 id 那一格。这正是第八条判据（同级）要的形状，
+; 而这一格只立它自己的那一半：信箱送来的键，走的是与键盘同一个仲裁。
+run_mbox_live_test:
+    ; 一、清两张表，登记 5、绑 5。源 5 是信箱这一路的约定编号（键盘是 1）。
+    mov qword [src_registry + 0 * 8], 0
+    mov qword [src_registry + 1 * 8], 0
+    mov qword [src_registry + 2 * 8], 0
+    mov qword [src_registry + 3 * 8], 0
+    mov qword [src_bind + 0 * 8], 0
+    mov qword [src_bind + 1 * 8], 0
+    mov qword [src_bind + 2 * 8], 0
+    mov qword [src_bind + 3 * 8], 0
+    mov rdi, 5
+    call register_source
+    mov rdi, 5
+    mov rsi, 1
+    call bind_source
+
+    ; 二、焦点窗口 2。
+    mov qword [global_kinds + 27 * 8], 1
+    mov rax, 0x4000000000000000      ; 2.0
+    mov [global_vals + 27 * 8], rax
+
+    ; 三、握手：宿主看到这一行，就把信箱盘上的序列号加一。
+    mov rsi, line_mbox_ready
+    call puts64
+
+    ; 四、等一次输入。这一趟没有人按键 —— 所以拿到的那个必然是从盘上来的，
+    ;    而它走的是与键盘同一个 wait_arrow 与同一个 arbitrate。
+    call wait_arrow
+    mov r15, rax
+    jmp arbitrate
 
 ; ======================================================================
 ; 一个包画一个窗口
@@ -16433,6 +16582,15 @@ drive: db 0
 mbox_save: db 0
 mbox_carry: db 0
 mbox_magic: db "YUNOMBX", 0
+; 运行时轮询用的缓冲：一次 ata_read 读进来 512 字节。
+;
+; 它不与 0x50000 那一块共用。那一块是启动时实模式读进来的快照，而这一块每次都是新读的。
+; 两者分开，才分得清「启动时那一份」与「刚才盘上那一份」—— 而这一格要的正是后者：
+; 一条只在启动时读的通道，与一条运行时还能读到新东西的通道，是两件不同的事。
+mbox_buf: times 512 db 0
+; 上一次见到的序列号。0 表示还没记过基准 —— 第一次轮询只记基准，不报新，
+; 否则启动时那份快照会被当成一条刚到的输入。
+mbox_serial0: dq 0
 seed_magic: db "HMYRB"
 
 ; Disk Address Packet，16 字节。每次调用前重设 count 与 off/seg —— int 0x13 会把
@@ -16547,6 +16705,11 @@ frame_slotbase: times 4 dq 0
 instr_offsets: times 64 dq 0
 test_arg: dq 1
 ata_buf: dq 0
+; 这一趟 ata_read 读哪一块盘：0 是主盘，0x10 是从盘（信箱盘）。
+;
+; 它平时是 0 —— 文件系统那一整套读的都是主盘，而它们是这条通道的绝大多数调用者。
+; 只有 mbox_poll 在读之前把它置成 0x10、读完置回，所以「哪块盘」这件事只在一处出现。
+ata_dev: db 0
 fs_buf: dq 0
 ; 当前这个盘符对应哪一块盘：预读区的基址，与那一段从哪个扇区起。
 ; 默认是 α（主盘）。fs_open_path 认盘符之后会把它们改成 β 的，用完拨回来。
@@ -16788,6 +16951,10 @@ line_fs_preread: db "Yunooka: fs preread failed", 13, 10, 0
 line_mbox_ok: db "Yunooka: mailbox ok", 13, 10, 0
 line_mbox_bad: db "Yunooka: mailbox bad", 13, 10, 0
 line_mbox_fail: db "Yunooka: no mailbox", 13, 10, 0
+line_mbox_ready: db "Yunooka: mbox ready", 13, 10, 0
+line_mbox_base: db "Yunooka: mbox base=", 0
+line_mbox_new: db "Yunooka: mbox new=", 0
+line_mbox_readfail: db "Yunooka: mbox read failed", 13, 10, 0
 line_fs2_fail: db "Yunooka: beta preread failed", 13, 10, 0
 line_idt_ok: db "Yunooka: idt ok", 13, 10, 0
 line_exception: db "Yunooka: exception ", 0
