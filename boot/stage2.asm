@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 158
+stage2_sectors equ 159
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -842,6 +842,8 @@ long_entry:
     call run_prog_size_test
     ; 高位：全局区扩到三十二格，编号 20 可用。
     call run_prog_high_test
+    ; 两窗：两个窗口各有自己一组格子，挪第二个不伤第一个。
+    call run_prog_two_test
     ; 窗口那一层到现在只有线与框。这一条让它能写字。
     call run_glyph_test
     ; 一个字母到一行字：字模成表，字距由判据量出来。
@@ -6062,6 +6064,152 @@ run_prog_high_test:
     jmp put_nl64
 .missing:
     mov rsi, line_proghigh_bad
+    call puts64
+    ret
+
+; ======================================================================
+; 两个窗口
+; ======================================================================
+;
+; 到这一格为止，屏幕上只可能有一个窗口。redraw 的位置在全局 10 与 11、尺寸在 7 与 8、
+; 旧位置在 14 与 15、标志在 4 —— 它画得再完整，也只是「那一个」。这一格要两。
+;
+; 做法：包里加第三十二个函数 redraw2，它读另一组格子（位置 16 与 17、尺寸 18 与 19、
+; 旧位置 24 与 25、标志 21），三层矩形的相对关系照旧交给 winat。所以两份窗口的差别只剩
+; 「读哪一组格子」与「标题字母是几」。
+;
+; 判据读三点，而三点各占一个区，互不重叠 —— 这一点必须算清楚，因为挑错点的代价是
+; 一条正确实现也过不了的判据：
+;   (100, 60)   第一窗口的左上角。它在第二窗口的整个生命周期里都该是 1F —— 三个判据点里
+;               只有它证明「第二个窗口没有伤到第一个」。
+;   (20, 20)    第二窗口的旧左上角。挪走之后它应当回到背景色 00 —— 一个只画新位置、不擦
+;               旧位置的实现会把 1F 留在那里。
+;   (20, 100)   第二窗口的新左上角。挪完之后是 1F。
+;
+; 几何：第一窗口 (100,60) 起、200x90，占 x 100..299；第二窗口 (20,20) 起、60x50，占 x 20..79，
+; 拉开二十列的间隔。所以第一窗口那一点既不在第二窗口的旧位置里，也不在它的新位置里 ——
+; 把边界推成「刚好相邻」就说不清了，两个矩形相切时那一个像素归谁是实现细节。
+;
+; 验红那一次把 redraw2 擦旧指令里的宽高（读全局 18、19）换成第一窗口的尺寸（7、8），
+; 于是第二窗口一挪，擦的范围变成 (20,20,200,90)，伸到 (100,60) 上。读数从
+; 1F 00 1F 变成 00 00 1F —— 只翻第一点，而它翻的理由恰好是「尺寸必须是自己那一组」。
+; 两次调用都是 exec，中间不重置屏幕，所以第三点的 1F 只可能是第二次调用画的。
+run_prog_two_test:
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]
+    mov r8, fs_prog_name
+    mov r9, 9
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz .missing
+    mov rdi, r15
+    call fs_load
+    mov r14, rsi
+    mov [pkg_base], r14
+
+    mov rsi, line_progtwo
+    call puts64
+
+    ; 一、清屏。之后的每一个非零像素都只能来自这两次调用
+    xor dl, dl
+    call clear_screen
+
+    ; 二、第一窗口：位置 (100,60)、尺寸 200x90、标题选择子归零、标志清零。
+    ;    标志必须自己写成 0 —— 同一趟前面的测试调过 redraw，已经把它置成过 1，
+    ;    而那样第一次调用就会去擦一个与本测试无关的旧位置。
+    mov qword [global_kinds + 10 * 8], 1
+    mov rax, 0x4059000000000000      ; 100.0
+    mov [global_vals + 10 * 8], rax
+    mov qword [global_kinds + 11 * 8], 1
+    mov rax, 0x404E000000000000      ; 60.0
+    mov [global_vals + 11 * 8], rax
+    mov qword [global_kinds + 7 * 8], 1
+    mov rax, 0x4069000000000000      ; 200.0
+    mov [global_vals + 7 * 8], rax
+    mov qword [global_kinds + 8 * 8], 1
+    mov rax, 0x4056800000000000      ; 90.0
+    mov [global_vals + 8 * 8], rax
+    mov qword [global_kinds + 9 * 8], 1
+    mov qword [global_vals + 9 * 8], 0
+    mov qword [global_kinds + 4 * 8], 1
+    mov qword [global_vals + 4 * 8], 0
+    mov rdi, name_redraw
+    mov r8, 6
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    call .reset_and_run
+
+    ; 三、第二窗口：位置 (20,20)、尺寸 60x50、标志清零。它落在第一窗口左边那一条空处，
+    ;    两个矩形隔着二十列 —— 判据第一点因此不会被它碰到。
+    mov qword [global_kinds + 16 * 8], 1
+    mov rax, 0x4034000000000000      ; 20.0
+    mov [global_vals + 16 * 8], rax
+    mov qword [global_kinds + 17 * 8], 1
+    mov rax, 0x4034000000000000      ; 20.0
+    mov [global_vals + 17 * 8], rax
+    mov qword [global_kinds + 18 * 8], 1
+    mov rax, 0x404E000000000000      ; 60.0
+    mov [global_vals + 18 * 8], rax
+    mov qword [global_kinds + 19 * 8], 1
+    mov rax, 0x4049000000000000      ; 50.0
+    mov [global_vals + 19 * 8], rax
+    mov qword [global_kinds + 21 * 8], 1
+    mov qword [global_vals + 21 * 8], 0
+    mov rdi, name_redraw2
+    mov r8, 7
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    call .reset_and_run
+
+    ; 四、把第二窗口挪到 (20,100)：标志已是 1，所以它先擦 (20,20) 那一块，再画新的。
+    mov qword [global_kinds + 17 * 8], 1
+    mov rax, 0x4059000000000000      ; 100.0
+    mov [global_vals + 17 * 8], rax
+    mov rdi, name_redraw2
+    mov r8, 7
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    call .reset_and_run
+
+    ; 五、三点：第一个没被伤、旧的擦干净了、新的画出来了
+    mov rdi, 100
+    mov rsi, 60
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 20
+    mov rsi, 20
+    call read_pixel
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 20
+    mov rsi, 100
+    call read_pixel
+    call put_hex64
+    mov qword [pkg_base], 0x70000
+    jmp put_nl64
+.reset_and_run:
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    jmp exec
+.missing:
+    mov rsi, line_progtwo_bad
     call puts64
     ret
 
@@ -15788,6 +15936,9 @@ line_progsize_bad: db "Yunooka: progsize missing", 0
 name_highslot: dw 0x0068, 0x0069, 0x0067, 0x0068, 0x0073, 0x006C, 0x006F, 0x0074
 line_proghigh: db "Yunooka: proghigh ", 0
 line_proghigh_bad: db "Yunooka: proghigh missing", 0
+name_redraw2: dw 0x0072, 0x0065, 0x0064, 0x0072, 0x0061, 0x0077, 0x0032
+line_progtwo: db "Yunooka: progtwo ", 0
+line_progtwo_bad: db "Yunooka: progtwo missing", 0
 line_progdrag: db "Yunooka: progdrg ", 0
 line_progdrag_bad: db "Yunooka: progdrg missing", 0
 line_progglobal: db "Yunooka: progglobal ", 0
