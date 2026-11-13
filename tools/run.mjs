@@ -490,6 +490,7 @@ let 送过再移 = false;
 let 送过事件 = false;
 let 送过拒 = false;
 let 送过再拒 = false;
+let 送过未绑 = false;
 // 六十秒。移窗那一条排在 prog 那一串测试的末尾（progtwo 之后），而前三条握手在它前面
 // 就走完了 —— 二十秒不够它跑到，而二十秒之后循环已经退出，送键这一步就永远不会发生。
 // 收手的条件里带着「移窗也跑完了」，所以正常情况下这个上限用不满。
@@ -561,6 +562,15 @@ for (let i = 0; i < 120; i++) {
       vbox(["controlvm", 机名, "keyboardputscancode", "e0", "cd"]);
       送过再拒 = true;
     }
+    // 未绑定那一格再来一次按键，而它用的是同一个源 id：源 2 上一趟没登记、这一趟登记了
+    // 却没有主人。同一个身份、两种状态 —— 所以两次送同一个键是对的，那让串口上那两行
+    // 只差理由一格。
+    if (送过再拒 && !送过未绑 && 读到.includes("Yunooka: unbound ready")) {
+      vbox(["controlvm", 机名, "keyboardputscancode", "e0", "4d"]);
+      睡(120);
+      vbox(["controlvm", 机名, "keyboardputscancode", "e0", "cd"]);
+      送过未绑 = true;
+    }
     const 步数 = (读到.match(/Yunooka: op /g) || []).length;
     const 结果数 = (读到.match(/Yunooka: fn116 -> /g) || []).length;
     const 按名数 = (读到.match(/Yunooka: byname/g) || []).length;
@@ -571,7 +581,8 @@ for (let i = 0; i < 120; i++) {
       && /Yunooka: calc ready[\s\S]*?=2\.000000/.test(读到)
       && /Yunooka: move ready[\s\S]*?Yunooka: move again[\s\S]*?Yunooka: progmove [0-9A-F]/.test(读到)
       && /Yunooka: event src=\d+/.test(读到)
-      && /Yunooka: reject again[\s\S]*?Yunooka: input src=2 rejected=unregistered/.test(读到);
+      && /Yunooka: reject again[\s\S]*?Yunooka: input src=2 rejected=unregistered/.test(读到)
+      && /Yunooka: unbound ready[\s\S]*?Yunooka: input src=2 rejected=unbound/.test(读到);
     if (交互完 && 全程.every((s) => 读到.includes(s)) && 步数 >= 4 && 结果数 >= 2 && 按名数 >= 2) break;
   }
 }
@@ -1850,6 +1861,16 @@ const 事件成 = 事件行 !== null
 const 拒行 = /Yunooka: input src=(\d+) rejected=(\w+)/.exec(读到);
 const 拒成 = 拒行 !== null && 拒行[1] === "2" && 拒行[2] === "unregistered"
   && !/Yunooka: event src=2 kind=/.test(读到);
+// 未绑定被拒：同一个源 2，这一次它登记了、却没有绑主人，理由换成 unbound。
+// 判据一次说三件事：两行拒绝都在（同一个源的两种状态）、两行的理由不同、两次都没有
+// event src=2。第三件是上一格那条否证的延伸 —— 这一格也可能「打了 unbound 却照样放行」，
+// 而那种实现打的那一行依然完全正确。
+// 用同一个源 id 是有意的：把「谁被拒」那一格固定住，剩下能变的只有理由。两个不同的源
+// 各报一种理由，也能过，而那证明不了「同一份身份在两种状态下被区别对待」。
+const 拒集 = [...读到.matchAll(/Yunooka: input src=(\d+) rejected=(\w+)/g)].map((m) => [m[1], m[2]]);
+const 未登行 = 拒集.some(([id, why]) => id === "2" && why === "unregistered");
+const 未绑行 = 拒集.some(([id, why]) => id === "2" && why === "unbound");
+const 绑成 = 未登行 && 未绑行 && !/Yunooka: event src=2 kind=/.test(读到);
 // 写：造一个不存在的名字、写一段只有这里才有的字节、再按路径打开它。
 // 判据是那段内容本身 —— 而且 files 的列表里也要多出这个名字，因为「目录里多了一条」
 // 与「数据落对了地方」是两件事，两件都得成立。
@@ -2088,6 +2109,9 @@ console.log("事件行    " + (事件行
 console.log("拒绝      " + (拒行 ? "src=" + 拒行[1] + " rejected=" + 拒行[2] : "(没跑到)")
   + (拒成 ? "  —— 同一个键：登记过的那一源进事件行，没登记的那一源只留拒绝"
     : "  —— 不对：应当是 input src=2 rejected=unregistered，且整份串口里没有 event src=2"));
+console.log("未绑定    " + (未绑行 ? "src=2 rejected=unbound" : "(没跑到)")
+  + (绑成 ? "  —— 同一个源两种拒绝：未登记与未绑定是两行字，两次都没有事件漏过去"
+    : "  —— 不对：应当是同一个源 2 先后报 unregistered 与 unbound，且没有 event src=2"));
 console.log("文件系统  " + (fs行
   ? "v" + fs行[1] + "，根目录第 " + fs行[2] + " 号扇区，第一个名字 " + fs行[3]
   : "(没读出来)")
@@ -2455,6 +2479,7 @@ const 其余成 = 有种子
     && 移窗成
     && 事件成
     && 拒成
+    && 绑成
     && 壳成
     && 除成
     && 数学成
@@ -2547,7 +2572,7 @@ if (!成了) {
       // 窗口成 与 窗成 是两个不同的人：窗口成 是「包画了一个窗口」（win px），
       // 窗成 是「这台电脑的骨架」（window，四个位置各一种颜色）。两块都要点名。
       窗口包: 窗口成,
-      认前二: 认前二, 认第三: 认第三, 认外五: 认外五, 认外七: 认外七, 认外八: 认外八, 格: 格成, 嵌: 嵌成, 字: 字成, 清: 清成, 字串: 字串成, 上: 上成, 行: 行成, 小: 小成, 包字: 包字成, 包回: 包回成, 标题: 标题成, 裁: 裁成, 文: 文成, 槽: 槽成, 环: 环成, 局: 局成, 拖: 拖成, 帧: 帧成, 重: 题成, 值: 桥值成, 送: 送值成, 绘: 重画成, 移: 移位成, 两: 两值成, 序: 减序成, 落: 落点成, 寸: 尺寸成, 高: 高位成, 壳: 壳成, 事件: 事件成, 拒: 拒成,
+      认前二: 认前二, 认第三: 认第三, 认外五: 认外五, 认外七: 认外七, 认外八: 认外八, 格: 格成, 嵌: 嵌成, 字: 字成, 清: 清成, 字串: 字串成, 上: 上成, 行: 行成, 小: 小成, 包字: 包字成, 包回: 包回成, 标题: 标题成, 裁: 裁成, 文: 文成, 槽: 槽成, 环: 环成, 局: 局成, 拖: 拖成, 帧: 帧成, 重: 题成, 值: 桥值成, 送: 送值成, 绘: 重画成, 移: 移位成, 两: 两值成, 序: 减序成, 落: 落点成, 寸: 尺寸成, 高: 高位成, 壳: 壳成, 事件: 事件成, 拒: 拒成, 绑: 绑成,
       // 重求成 与 曲线成 不在这张表里：它们归种子族管了（重求成 要种子里的 units 这个名字，
       // 曲线成 要种子里的表达式）。留在这张表里会把「其余」一直标红，而红的原因是前提
       // 不存在 —— 那种红与「这一块坏了」长得一样，正是这一轮要拆开的那件事。

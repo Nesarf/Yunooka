@@ -850,6 +850,8 @@ long_entry:
     call run_event_line_test
     ; 未登记被拒：同一个键，源在清单里就放行、不在就留一行拒绝。
     call run_event_reject_test
+    ; 未绑定被拒：同一个源 id，这次它登记了却没有主人 —— 拒绝的理由换一格。
+    call run_event_unbound_test
     ; 窗口那一层到现在只有线与框。这一条让它能写字。
     call run_glyph_test
     ; 一个字母到一行字：字模成表，字距由判据量出来。
@@ -6480,6 +6482,28 @@ register_source:
 .full:
     ret
 
+; 把一个源绑到一个操作员。输入 rdi = 源 id，rsi = 操作员 id。
+;
+; 两张表同下标：第 i 格的源，它的主人写在第 i 格。分开放是因为它们回答两个不同的问题 ——
+; 登记回答「这个源存在吗」，绑定回答「它属于谁」。合成一张表也跑得动，但那样「登记过」与
+; 「有主人」就再也分不开了，而这一格的判据问的正是这两件事之间的那个差。
+;
+; 找不到那个源就什么都不做：绑定一个不存在的源，在真实系统里要报出来，而这一格只在一个
+; 登记过的源上绑，那个分支先空着。
+bind_source:
+    xor rcx, rcx
+.scan:
+    cmp rcx, 4
+    jae .none
+    cmp qword [src_registry + rcx * 8], rdi
+    je .put
+    inc rcx
+    jmp .scan
+.put:
+    mov [src_bind + rcx * 8], rsi
+.none:
+    ret
+
 ; 打一行事件。输入 r15 = 负载，源与目标从全局 26 / 27 读。
 ;
 ; 它只管形状，不管该不该打 —— 判断在 arbitrate 里。这六条指令是上一格原样搬来的，
@@ -6501,12 +6525,16 @@ emit_event:
     call put_num64
     jmp put_nl64
 
-; 仲裁一次按键。输入 r15 = 负载：源在清单里就发射，不在就留一行拒绝。
+; 仲裁一次按键。输入 r15 = 负载：源在清单里、而且绑在某个操作员上，才发射。
 ;
-; 拒绝行也带源 id。理由与事件行带源 id 是同一条 —— 一行记录要说得清是谁。而理由是一个
-; 字段（rejected=...），不是一句散文：这一层后面还要区分「未登记」与「未绑定」，两种
-; 拒绝的修法不同，串口上分不开就等于没分（design/INPUT.txt 第十二节第三条判据）。
-; 把理由做成字段之后，将来加一种拒绝是加一个值，不是改一次句子的形状。
+; 三种待遇在这里第一次分开，而分开的次序是这一条真正的判断：先问「这个源存在吗」，再问
+; 「它属于谁」。次序不能颠倒 —— 一个没有 id 的源连查绑定表的下标都没有，而「说不出你是谁」
+; 比「说不出你属于谁」更原始。反过来做的话，一个没登记的源会先撞上绑定表的一个空位、报出
+; 「未绑定」，于是查错的人会去翻绑定表，而问题在登记表里。
+;
+; 理由做成字段（rejected=...）而不是散文，这一格兑现了上一格留下的那句话：两种拒绝的差别
+; 只在这里分岔 —— 各给 r11 装一个字符串地址，拒绝行本身的形状一个字没动。加第三种拒绝
+; 就是再加一个标签，而那正是一个理由字段值钱的地方。
 ;
 ; 查表是线性的四格，不建哈希：四格的表用哈希，只是把「查什么」藏进一个函数里。
 arbitrate:
@@ -6516,13 +6544,21 @@ arbitrate:
     xor rcx, rcx
 .scan:
     cmp rcx, 4
-    jae .reject
+    jae .unregistered
     cmp qword [src_registry + rcx * 8], r14
-    je .accept
+    je .found
     inc rcx
     jmp .scan
-.accept:
+.found:
+    ; 找到这一格，接着问它有没有主人。绑定的操作员 id 写在同一个下标上，0 是空位。
+    cmp qword [src_bind + rcx * 8], 0
+    je .unbound
     jmp emit_event
+.unbound:
+    mov r11, line_input_unbound
+    jmp .reject
+.unregistered:
+    mov r11, line_input_unregistered
 .reject:
     mov rsi, line_input_head
     call puts64
@@ -6530,7 +6566,7 @@ arbitrate:
     call put_num64
     mov rsi, line_input_reason
     call puts64
-    mov rsi, line_input_unregistered
+    mov rsi, r11
     jmp puts64
 
 run_event_line_test:
@@ -6570,16 +6606,30 @@ run_event_line_test:
 ;
 ; 清表那四行不是客套：上一格没有这张表，所以这一格的起点必须是一张确定的空表。不清的话，
 ; 「源 1 放行」也可能只是上一次运行留在内存里的东西 —— 而那看起来与真登记完全一样。
+;
+; 下一格把「登记」与「有主人」分成两张表，于是这一格的源 1 也得先有主人才放行 —— 那个变化
+; 不在这一格的代码里，在它依赖的前提里。它当场红了：reject ready 之后那一行变成
+; input src=1 rejected=unbound。一条判据依赖的前提一变就自己说出来，这正是「判在链上」
+; 该有的样子 —— 而没有判据的话，这次改动会在没人注意的地方把「放行」变成「拒绝」。
 run_event_reject_test:
-    ; 一、空表。
+    ; 一、空表。绑定表也要清 —— 这一格做完之后，「登记」与「有主人」是两件事，而这一格
+    ;    要的源 1 是既有名字又有主人的那一种。不绑它的话，它会被下面的仲裁挡下，而那个红
+    ;    会长在「登记过的源照旧放行」这一条上，读起来像登记表坏了。
     mov qword [src_registry + 0 * 8], 0
     mov qword [src_registry + 1 * 8], 0
     mov qword [src_registry + 2 * 8], 0
     mov qword [src_registry + 3 * 8], 0
+    mov qword [src_bind + 0 * 8], 0
+    mov qword [src_bind + 1 * 8], 0
+    mov qword [src_bind + 2 * 8], 0
+    mov qword [src_bind + 3 * 8], 0
 
-    ; 二、只登记 1 号源。2 号故意留着不登记 —— 它就是下一半的被拒者。
+    ; 二、只登记 1 号源，并把它绑给操作员 1。2 号故意两样都没有 —— 它就是下一半的被拒者。
     mov rdi, 1
     call register_source
+    mov rdi, 1
+    mov rsi, 1
+    call bind_source
 
     ; 三、源 1、焦点窗口 2，与上一格同一组全局。这一次走仲裁，所以它同时也验了
     ;    「登记过的源照旧放行」—— 少了这一半，一个永远拒绝的实现也能过。
@@ -6602,6 +6652,52 @@ run_event_reject_test:
     mov [global_vals + 26 * 8], rax
 
     mov rsi, line_reject_again
+    call puts64
+    call wait_arrow
+    mov r15, rax
+    jmp arbitrate
+
+; ======================================================================
+; 未绑定被拒：一个说得出名字、却说不出主人是谁的源
+; ======================================================================
+;
+; 判据取自 design/INPUT.txt 第十二节第三条：拒绝行说的是「未绑定」，而它与「未登记」那一行
+; 不是同一行。两种拒绝的修法不同 —— 一种是材料里缺了一项（去补绑定），一种是这个源根本
+; 不该在这里（去问它是谁放进来的）—— 而串口上分不开就等于没分。
+;
+; 这一格用同一个源 id 做两次拒绝：上一格那次源 2 没登记，这一次源 2 登记了却没有主人。
+; 同一个身份、两种状态、两行字只差理由那一格 —— 这比换一个源结实得多，因为它把「谁被拒」
+; 那一格固定住了，剩下能变的只有理由。
+;
+; 次序也在这里被钉住：先问存在，再问主人。反过来做的话，一个没登记的源会先撞上绑定表的
+; 空位、报出「未绑定」，于是查错的人会去翻登记表，而问题在绑定表里。
+run_event_unbound_test:
+    ; 一、两张表都清空。绑定表上一格还没有，清它不只是整洁 —— 不清的话源 1 可能带着上一次
+    ;    运行留下的主人，而那种「有主人」与被真的绑过一模一样。
+    mov qword [src_registry + 0 * 8], 0
+    mov qword [src_registry + 1 * 8], 0
+    mov qword [src_registry + 2 * 8], 0
+    mov qword [src_registry + 3 * 8], 0
+    mov qword [src_bind + 0 * 8], 0
+    mov qword [src_bind + 1 * 8], 0
+    mov qword [src_bind + 2 * 8], 0
+    mov qword [src_bind + 3 * 8], 0
+
+    ; 二、登记 1 与 2 两个源，只把 1 号绑给操作员 1。2 号是这一格的主角：有名字，没有主人。
+    mov rdi, 1
+    call register_source
+    mov rdi, 2
+    call register_source
+    mov rdi, 1
+    mov rsi, 1
+    call bind_source
+
+    ; 三、源 2 送一次按键 —— 它登记过，所以不该报「未登记」；它没有主人，所以该报「未绑定」。
+    mov qword [global_kinds + 26 * 8], 1
+    mov rax, 0x4000000000000000      ; 2.0
+    mov [global_vals + 26 * 8], rax
+
+    mov rsi, line_unbound_ready
     call puts64
     call wait_arrow
     mov r15, rax
@@ -16171,6 +16267,12 @@ global_vals:  times 32 dq 0
 ; 不是一个设计数字 —— 这一格只登记一个源、送两个源。0 当空位是安全的：源 id 从 1 数起，
 ; 而 0 在事件行里会让判据读不出源。
 src_registry: times 4 dq 0
+; 绑定表：与登记表同下标，0 是空位，非零是那个源绑着的操作员 id。
+;
+; 分开放而不是合成一张，是因为它们回答两个不同的问题：登记回答「这个源存在吗」，绑定回答
+; 「它属于谁」。合成一张表也跑得动，但那样「登记过」与「有主人」就再也分不开了，而这一层
+; 的第三条判据问的正是这两件事之间的那个差。
+src_bind: times 4 dq 0
 bi_name_slurp: dw 0x0073, 0x006C, 0x0075, 0x0072, 0x0070
 bi_name_save: dw 0x0073, 0x0061, 0x0076, 0x0065
 bi_name_list: dw 0x006C, 0x0069, 0x0073, 0x0074
@@ -16351,6 +16453,8 @@ line_event_head: db "Yunooka: event src=", 0
 line_input_head: db "Yunooka: input src=", 0
 line_input_reason: db " rejected=", 0
 line_input_unregistered: db "unregistered", 13, 10, 0
+line_input_unbound: db "unbound", 13, 10, 0
+line_unbound_ready: db "Yunooka: unbound ready", 13, 10, 0
 line_reject_ready: db "Yunooka: reject ready", 13, 10, 0
 line_reject_again: db "Yunooka: reject again", 13, 10, 0
 line_event_kind: db " kind=key payload=", 0
