@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 157
+stage2_sectors equ 158
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -840,6 +840,8 @@ long_entry:
     call run_prog_draw_test
     ; 尺寸：宽与高也来自全局，窗口能变大变小。
     call run_prog_size_test
+    ; 高位：全局区扩到三十二格，编号 20 可用。
+    call run_prog_high_test
     ; 窗口那一层到现在只有线与框。这一条让它能写字。
     call run_glyph_test
     ; 一个字母到一行字：字模成表，字距由判据量出来。
@@ -1457,8 +1459,12 @@ exec:
     ; 它与「取」的差别只有一处，而那一处就是全部：槽在帧里，函数一返回就没了；全局在
     ; 帧外，所以它能跨调用活下来。拖动要用它，而它是包里第一样「比一次调用更长寿」的东西。
     ;
-    ; 编号从 0 数到 15。上限不做检查：越界读到的会是自己那两张表后面的内存，而那不是
+    ; 编号从 0 数到 31。上限不做检查：越界读到的会是自己那两张表后面的内存，而那不是
     ; 「安全的错」，是「读到别人的东西」。这一版不出界就够了 —— 包是我们自己写的。
+    ;
+    ; 「不做检查」这四个字付过一次代价：窗口尺寸第一次放在 16 与 17（那时只有十六格），
+    ; 越界写到 global_vals 后面，save 判据红成「save docs/inner.txt lost」，与窗口毫无
+    ; 关系。扩到三十二格之后，20 号编号才真的可用 —— 而这条注释的上界也跟着改了。
     movzx ecx, word [rsi]
     mov rax, [global_kinds + rcx * 8]
     mov rdx, [global_vals + rcx * 8]
@@ -5999,6 +6005,63 @@ run_prog_size_test:
     jmp exec
 .missing:
     mov rsi, line_progsize_bad
+    call puts64
+    ret
+
+; ======================================================================
+; 全局区扩到三十二格
+; ======================================================================
+;
+; 十六格的时候这一层够用；而「两个窗口」要两组位置加两组尺寸，立刻见底。这一格把两张表各
+; 扩到三十二格，判据用编号 20 —— 它在旧的十六格之外、在新的三十二格之内。
+;
+; 判据只有一个读数 5，但它排除的东西比看起来多：若表还是十六格，编号 20 会落到 global_vals
+; 里别的格子上（那是一组旧值），读数不会是 5，而是一个说不清来处的数。上一格验红时读到 1，
+; 走的正是这条越界的路。
+run_prog_high_test:
+    mov rdi, 1024
+    call fs_load
+    mov [fs_buf], rsi
+    mov rax, [fs_buf]
+    mov r14d, [rax + 12]
+    mov r8, fs_prog_name
+    mov r9, 9
+    mov rsi, r14
+    call fs_lookup
+    test rax, rax
+    jz .missing
+    mov rdi, r15
+    call fs_load
+    mov r14, rsi
+    mov [pkg_base], r14
+
+    mov rsi, line_proghigh
+    call puts64
+
+    ; 编号 20 写一个 5，再让包读回来
+    mov qword [global_kinds + 20 * 8], 1
+    mov rax, 0x4014000000000000      ; 5.0
+    mov [global_vals + 20 * 8], rax
+    mov rdi, name_highslot
+    mov r8, 8
+    xor r15, r15
+    call find_fn_by_name
+    test rax, rax
+    jz .missing
+    mov r12, rsi
+    mov qword [stack_top], 32
+    mov qword [frame_sp], 0
+    xor rbx, rbx
+    call exec
+    mov r15, rax
+    mov r14, rdx
+    mov qword [pkg_base], 0x70000
+    mov rax, r15
+    mov rdx, r14
+    call print_value
+    jmp put_nl64
+.missing:
+    mov rsi, line_proghigh_bad
     call puts64
     ret
 
@@ -15554,9 +15617,12 @@ clip_x0: dq 0
 clip_y0: dq 0
 clip_x1: dq 0
 clip_y1: dq 0
-; 全域区：十六格，帧外的名字。它与值栈上的槽是两回事 —— 槽随帧生死，这几格不随。
-global_kinds: times 16 dq 0
-global_vals:  times 16 dq 0
+; 全域区：三十二格，帧外的名字。它与值栈上的槽是两回事 —— 槽随帧生死，这几格不随。
+;
+; 十六格的时候这一层够用：位置、尺寸、选择子、标志，用掉大半。而「两个窗口」要两组位置加
+; 两组尺寸，十六格立刻见底。扩到三十二不是留余量 —— 是下一件事需要它。
+global_kinds: times 32 dq 0
+global_vals:  times 32 dq 0
 bi_name_slurp: dw 0x0073, 0x006C, 0x0075, 0x0072, 0x0070
 bi_name_save: dw 0x0073, 0x0061, 0x0076, 0x0065
 bi_name_list: dw 0x006C, 0x0069, 0x0073, 0x0074
@@ -15719,6 +15785,9 @@ line_progdraw: db "Yunooka: progdraw ", 0
 line_progdraw_bad: db "Yunooka: progdraw missing", 0
 line_progsize: db "Yunooka: progsize ", 0
 line_progsize_bad: db "Yunooka: progsize missing", 0
+name_highslot: dw 0x0068, 0x0069, 0x0067, 0x0068, 0x0073, 0x006C, 0x006F, 0x0074
+line_proghigh: db "Yunooka: proghigh ", 0
+line_proghigh_bad: db "Yunooka: proghigh missing", 0
 line_progdrag: db "Yunooka: progdrg ", 0
 line_progdrag_bad: db "Yunooka: progdrg missing", 0
 line_progglobal: db "Yunooka: progglobal ", 0
