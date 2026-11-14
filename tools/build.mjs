@@ -2299,6 +2299,14 @@ const 转 = spawnSync(VBox, ["convertfromraw", 盘像, 盘, "--format", "VDI", "
 if (转.status !== 0) 失败("convertfromraw 失败：" + String(转.stderr || "").slice(0, 300));
 console.log("vdi      " + 盘 + "（" + Math.round(fs.statSync(盘).size / 1024) + " KiB）");
 
+// 造完之后把它交出去。
+//
+// convertfromraw 把这块盘挂进了 VBox 的登记表，而它一直挂到有人关掉为止 —— 于是紧接着
+// 跑的 run 在 storageattach 时说「另一个程序正在使用此文件」，而那句话出现在 build 成功
+// 之后，最容易让人以为 build 坏了。这里只关不删：带 --delete 会把刚造出来的盘一起删掉，
+// 那是一个更难发现的错（下一次 run 会说「还没有 disk.vdi」）。
+spawnSync(VBox, ["closemedium", "disk", 盘], { encoding: "utf8" });
+
 // ---- 四·五、盖一个「这盘是新的」戳 ----
 //
 // 为什么光有修改时间不够：run 会写盘，所以跑过一次之后 vdi 仍然是新的，而它已经不是
