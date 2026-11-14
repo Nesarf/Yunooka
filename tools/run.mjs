@@ -608,15 +608,23 @@ for (let i = 0; i < 400; i++) {
       送过信 = true;
     }
     // 同级那一格的第一趟要键盘的键，第二趟要盘上的键（它自己换队头）。所以这里只送一次。
+    //
+    // 这一支现在是挂起的（固件里那条测试不调用），但它留着，因为下一格要用它：它把
+    // 「宿主什么时候送、花了多久、返回什么」写进日志 —— 实测四十五毫秒加一百七十五
+    // 毫秒，两次都返回 0、没有错误。挂起时最缺的正是这一类数，删掉这一支等于把那几个数
+    // 重新变成要用的时候才去测。
     if (送过信 && !送过同级 && 读到.includes("Yunooka: same ready")) {
-      console.log("[宿主] 看到 same ready，现在送键盘的右键");
-      // 一次送完整的一段，不拆开：keyboardputscancode 收的是一串扫描码，分成两次调用
-      // 等于送了两个残段 —— e0 单独一个前缀不成键，而 4d 单独一个会被当成一个完整的键。
-      // 拆开的理由原本是「8042 缓冲只有一个字节」，那是真的，但解法不在这里：VBox 自己
-      // 按顺序投递这一串，客人机读走一个再读下一个就行。拆开反而把一串变成了两串。
-      vbox(["controlvm", 机名, "keyboardputscancode", "e0", "4d"]);
+      const 起 = Date.now();
+      const r1 = vbox(["controlvm", 机名, "keyboardputscancode", "e0", "4d"]);
+      const 中 = Date.now();
       睡(120);
-      vbox(["controlvm", 机名, "keyboardputscancode", "e0", "cd"]);
+      const r2 = vbox(["controlvm", 机名, "keyboardputscancode", "e0", "cd"]);
+      const 末 = Date.now();
+      console.log("[宿主] same 送回程 " + (中 - 起) + " + " + (末 - 中) + " ms"
+        + " status=" + r1.status + "/" + r2.status
+        + " err=" + (r1.error ? r1.error.message : "none")
+        + " say=" + String(r1.stdout || "").trim().slice(0, 80)
+        + "|" + String(r1.stderr || "").trim().slice(0, 80));
       送过同级 = true;
     }
     const 步数 = (读到.match(/Yunooka: op /g) || []).length;
