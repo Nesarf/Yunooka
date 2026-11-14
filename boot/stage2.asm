@@ -3791,6 +3791,7 @@ wait_arrow:
 .wait_second:
     mov dx, 0x64
     in al, dx
+    mov [last_status], al          ; 这一段的读数也要留：它决定超时那句话说的是谁
     test al, 0x01
     jnz .second
     dec r8
