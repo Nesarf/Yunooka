@@ -348,6 +348,9 @@ const 绘图文件 = Buffer.from("x*x/1000", "utf16le");
 let 绘图起 = 0;     // 由数据区清单赋值
 let 假样本起 = 0;   // 由数据区清单赋值
 const 示例文件 = Buffer.from("Yunooka filesystem ok\n", "utf8");
+// 字库：四个字形，由 tools/hexfont.mjs 打包。上盘之后客人机要能读回它的魔数，
+// 那是一条判据 —— 一份数据"在盘上"与"读得回来"是两件事。
+const 字库文件 = Buffer.from("59554e4f464f4e54010000000400000041000000000808080808ffff08080808080808084200000000007e81818181ff81818181818100004300000000007e81818181ff818181817e0000004400000000007e8181818181818181817e000000", "hex");
 const 子文件 = Buffer.from("Yunooka subdirectory ok\n", "utf8");
 const 深层文件 = Buffer.from("Yunooka three levels ok\n", "utf8");
 // 签名匹配的两个样本。EICAR 是一段公开的、专为测杀毒软件而造的字符串 —— 它不是恶意代码，
@@ -2063,6 +2066,7 @@ const 数据区清单 = [
   { 名: "sign.bin", 内容: 签名清单, 扇区: 1 },
   { 名: "auth.bin", 内容: 第三环签名, 扇区: 1 },
   { 名: "myon.hmtn", 内容: 回声字节, 扇区: 1 },
+  { 名: "font.hmft", 内容: 字库文件 }, // 96 字节，一个扇区
   ...外五件.map(([名, 内容]) => ({ 名, 内容, 扇区: 1 })),
 ];
 let 游 = 数据起;
@@ -2131,7 +2135,8 @@ const 根目录 = Buffer.alloc(根目录扇区数 * 512);
 // 就写在同一个位置，症状是某个文件凭空消失（prog.hmtn 被 eicar.txt 吃掉过）。现在只剩
 // 一份名字表，加一个文件是加一个名字。
 const 根序 = ["hello.txt", "docs", "cmd.txt", "repl.txt", "math.txt", "prog.hmtn",
-  "eicar.txt", "clean.txt", "rules.txt", "plot.txt", "fake.txt"];
+  "eicar.txt", "clean.txt", "rules.txt", "plot.txt", "fake.txt",
+  "font.hmft"];
 let 根位 = 0;
 for (const 名 of 根序) {
   if (名 === "docs") {

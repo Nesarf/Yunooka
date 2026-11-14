@@ -217,7 +217,7 @@ stage2:
     mov dword [dap_lba], 1024
     mov word [dap_off], 0x0000
     mov word [dap_seg], 0x4000
-    mov word [dap_count], 40       ; preread-sectors: 预读几个扇区，这个数由 build 核对
+    mov word [dap_count], 41       ; preread-sectors: 预读几个扇区，这个数由 build 核对
     call read_batch
     jnc .fs_ready
     mov si, line_fs_preread
@@ -9703,6 +9703,19 @@ fs_write_file:
     jae .fail                     ; 写到目录自己的页之外了：不再往后挤
     jmp .find_free
 .have_slot:
+    ; 这一条放得下吗。
+    ;
+    ; 上面那一句 cmp r9, r11 检查的是「下一个条目的起点还没到边界」，而一条条目有长度 ——
+    ; 起点在边界之内、尾巴在边界之外，那一半仍然会被写出去，落在紧跟着的那个目录的条目区
+    ; 上。症状不是「写不进去」，是另一个目录里的文件凭空消失（这一条以前抓过 docs 的 sub
+    ; 被 new.txt 压掉）。
+    ;
+    ; 一条条目的长度是 11 + 名字长 * 2：长度两字节、类型一字节、扇区四字节、字节数四字节。
+    ; 所以判据是「起点加这一条的长度不超过边界」，而不是「起点不超过边界」。
+    movzx eax, word [r12]           ; 输入名字的长度
+    lea rdx, [r9 + 11 + rax * 2]
+    cmp rdx, r11
+    ja .fail
     mov r10, r9
     xor rcx, rcx
 .count_name:
