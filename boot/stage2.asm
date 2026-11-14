@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 176
+stage2_sectors equ 177
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -980,6 +980,8 @@ long_entry:
     call run_claim_due_test
     ; 绝对时间：读一次、走两秒、再读一次，差必须是二。声明的截止要用它。
     call run_rtc_test
+    ; 区块：给一个码点，说出它在哪一块 —— 字库分档要按区块切，这是那个前提。
+    call run_block_test
     ; 未绑定被拒：同一个源 id，这次它登记了却没有主人 —— 拒绝的理由换一格。
     call run_event_unbound_test
     ; 工程失活：同一个工程的四条判决 —— 没名字、失活、被信任、接受。
@@ -1067,6 +1069,89 @@ tsc_now:
     rdtsc                          ; edx:eax，高 32 位在 edx
     shl rdx, 32
     or rax, rdx
+    ret
+
+; 码点落在哪个区块。
+;
+; 这一格是「完整 Unicode」在这台机器上第一次真的被用上。HMYR 的 data/ucd/Blocks.txt 有
+; 三百多个区块的完整划分，而这里只抄了四条 —— 抄的不是数据，是接口的形状：给定一个码点，
+; 回来一个名字。数据从哪来是构建那一侧的事，函数不该知道。
+;
+; 为什么值得先做：字库分档要按区块切（加载一页文字只会碰到两三个区块），而「按区块切」
+; 的前提是能回答「这个码点属于哪一块」。这一条判据就是那个前提。
+;
+; rdi = 码点，回来 rax = 名字指针（0 表示不在表里）。
+block_of_codepoint:
+    xor r8, r8
+.scan:
+    mov r9, [block_table + r8 * 8]       ; 起点
+    mov r10, [block_table + r8 * 8 + 8]  ; 终点
+    ; 结束标记是「起点与终点都为零」。只看起点不行 —— 起点为零是一条合法区间（基本拉丁
+    ; 就从零开始），所以第一版拿「起点为零」当结束，第一次循环就跳走了。
+    test r9, r9
+    jnz .check
+    test r10, r10
+    jz .none
+.check:
+    cmp rdi, r9
+    jb .next
+    cmp rdi, r10
+    ja .next
+    mov rax, [block_table + r8 * 8 + 16]
+    ret
+.next:
+    add r8, 3
+    jmp .scan
+.none:
+    xor eax, eax
+    ret
+
+; 判据：三个码点各报出它所在的区块，其中一个是 BMP 之外的。
+;
+; 三个而不是一个：一个「永远返回同一个名字」的实现能过第一条、过不了后两条。而第三个
+; 在 BMP 之外 —— 它同时证明表里的起点与终点用的是完整的三十二位，不是截断过的那一截。
+run_block_test:
+    mov rdi, 0x0041                ; A
+    call block_of_codepoint
+    mov rsi, line_block_head
+    call puts64
+    mov rax, 0x0041
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 0x0041
+    call block_of_codepoint
+    mov rsi, rax
+    call puts64
+    call put_nl64
+
+    mov rdi, 0x3042                ; あ
+    call block_of_codepoint
+    mov rsi, line_block_head
+    call puts64
+    mov rax, 0x3042
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 0x3042
+    call block_of_codepoint
+    mov rsi, rax
+    call puts64
+    call put_nl64
+
+    mov rdi, 0x1D100               ; 单小节线
+    call block_of_codepoint
+    mov rsi, line_block_head
+    call puts64
+    mov rax, 0x1D100
+    call put_hex64
+    mov rsi, line_space
+    call puts64
+    mov rdi, 0x1D100
+    call block_of_codepoint
+    mov rsi, rax
+    call puts64
+    call put_nl64
     ret
 
 ; 读一个 CMOS 寄存器：al 是索引，回来 al 是那个字节。
@@ -17933,6 +18018,19 @@ line_claim_released: db "Yunooka: claim released who=", 0
 line_rtc_head: db "Yunooka: rtc start=", 0
 line_rtc_delta: db " delta=", 0
 rtc_a: dq 0
+; 区块表：每条三格 —— 起点、终点、名字指针。起点为 0 是结束标记。
+;
+; 四条，抄自 data/ucd/Blocks.txt。抄的用意见 block_of_codepoint 上面那段：这一格验的是
+; 接口的形状，而完整的划分要由构建那一侧从 UCD 生成。
+block_table:
+    dq 0x0000, 0x007F, name_block_latin
+    dq 0x3040, 0x309F, name_block_hira
+    dq 0x1D100, 0x1D1FF, name_block_music
+    dq 0, 0, 0
+name_block_latin: db "Basic_Latin", 0
+name_block_hira: db "Hiragana", 0
+name_block_music: db "Musical_Symbols", 0
+line_block_head: db "Yunooka: block ", 0
 rtc_n: dq 0
 rtc_d: dq 0
 line_shell_ready: db "Yunooka: shell ready", 13, 10, 0
