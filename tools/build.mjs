@@ -2107,14 +2107,14 @@ const 超级块 = Buffer.alloc(512);
 超级块.writeUInt32LE(0x594B4E52, 28);
 
 const 根目录 = Buffer.alloc(根目录扇区数 * 512);
-let 根位 = 条目(根目录, 0, "hello.txt", 0, 数据起, 示例文件.length);
+let 根位 = 条目(根目录, 0, "hello.txt", 0, 取起("hello.txt"), 示例文件.length);
 根位 = 条目(根目录, 根位, "docs", 1, 子目录号, 0);       // 目录的字节长度没有意义，写 0
-根位 = 条目(根目录, 根位, "cmd.txt", 0, 数据起 + 2, 命令文件.length);
-根位 = 条目(根目录, 根位, "repl.txt", 0, 数据起 + 3, 求值输入.length);
-根位 = 条目(根目录, 根位, "math.txt", 0, 数据起 + 4, 数学输入.length);
+根位 = 条目(根目录, 根位, "cmd.txt", 0, 取起("cmd.txt"), 命令文件.length);
+根位 = 条目(根目录, 根位, "repl.txt", 0, 取起("repl.txt"), 求值输入.length);
+根位 = 条目(根目录, 根位, "math.txt", 0, 取起("math.txt"), 数学输入.length);
 // 每一行都要把根位接过去。漏一次，下一个条目就会写在同一个位置、把那一条覆盖掉 ——
 // 而症状是「某个文件凭空消失」，不是「布局错了」。这一处漏过一次：prog.hmtn 被 eicar.txt 吃掉。
-根位 = 条目(根目录, 根位, "prog.hmtn", 0, 数据起 + 5, 程序字节.length);
+根位 = 条目(根目录, 根位, "prog.hmtn", 0, 取起("prog.hmtn"), 程序字节.length);
 根位 = 条目(根目录, 根位, "eicar.txt", 0, 毒样本起, 含毒样本.length);
 根位 = 条目(根目录, 根位, "clean.txt", 0, 干净样本起, 干净样本.length);
 根位 = 条目(根目录, 根位, "rules.txt", 0, 规则起, 规则文件.length);
