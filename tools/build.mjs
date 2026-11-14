@@ -2276,6 +2276,19 @@ const 清登记 = () => {
     }
   }
 };
+// 删旧盘之前先把跑着的机器停掉。
+//
+// 这一句补的是顺序上的一个洞：run.mjs 自己有收残逻辑，而跑的顺序是先 build —— 于是上一次
+// run 中途失败留下的 VM 会握着这块盘的写锁，而下面那条 unlink 会以「另一个程序正在使用
+// 此文件」失败。那句话与真正的原因无关，读的人会去查文件系统，而该查的是还在跑的那台
+// 虚拟机。杀进程不算收尾，controlvm poweroff 才算。
+{
+  const 在跑 = spawnSync(VBox, ["list", "runningvms"], { encoding: "utf8" });
+  if (String(在跑.stdout || "").includes("Yunooka")) {
+    spawnSync(VBox, ["controlvm", "Yunooka", "poweroff"], { encoding: "utf8" });
+    spawnSync("node", ["-e", "0"], { timeout: 3000 });
+  }
+}
 清登记();
 for (const 旧 of [盘, 盘 + ".vbox"]) if (fs.existsSync(旧)) fs.unlinkSync(旧);
 // 固定的盘 UUID。每趟重建都换一个 UUID 会让虚拟机配置里记着的那个过期，startvm 就会
