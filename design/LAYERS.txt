@@ -2972,3 +2972,26 @@ VBox 日志里 /PDM/Queue/Keyboard/Insert 是 0 calls，而同一趟运行里「
 要拿到可信的 Insert 计数，只有两条路：让虚拟机正常结束，或者在它还活着的时候从宿主那边
 查。后者是 VBoxManage debugvm <vm> info pdm —— 下一轮做，因为它能在等待发生之后立刻
 问一次，而不必等虚拟机死。
+
+=== ps2c 给出硬事实：字节到了控制器，而没人取走 ===
+
+debugvm info 的 help 自己列出了两个名字，而它们正是这一格需要的：ps2k 与 ps2c。趁虚拟机
+还活着的时候问一次，拿到的是运行时的真实状态，而不是关机时来不及写完的统计：
+
+  PS/2 Keyboard: scan set 2, scanning enabled, serial line enabled
+  Input queue  : 17 items (64 max)
+
+  Keyboard controller: Active command 00, DBB out E0, translation on
+  Status: 1D ( OBF SELFTEST CMD UNLOCKED  )
+
+DBB out E0 与 OBF 一起说明：8042 的输出缓冲里停着一个 E0，而「有数据待取」那一位是亮的。
+这一份是在整趟跑完之后问的 —— 也就是那一个 E0 从注入的那一刻起就在那里，一直没人取走。
+
+所以方向反了。这一层查了七轮的「注入有没有到」，答案是到了；真正的问题是这一侧没有把它
+读走。而这一侧的确在等（超时打印了四乘十的九次方个计数），于是只有三种可能：它读的状态位
+不是它以为的那一位；它在等待开始之前就把字节读掉了（drain_keys）然后等一个再也不来的；
+或者它读走的是别的东西。
+
+translation on 那一行也值得记：8042 开着扫描码翻译，所以它期待的是 set 2 的字节，而
+keyboardputscancode 送的是 set 1。E0 在翻译模式下是一个要等后续字节的前缀 —— 这足以解释
+为什么缓冲里恰好停着一个 E0：它在等第二个字节，而第二个字节被翻译器处理成了别的东西。

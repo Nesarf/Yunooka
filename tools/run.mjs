@@ -2840,6 +2840,21 @@ if (!成了) {
 }
 
 if (!留机) {
+  // 在关掉之前问一次虚拟机的内部计数。
+  //
+  // 日志里的那一份是关机时写的，而这一套用 controlvm poweroff 硬断电 —— 实测统计停在
+  // 启动后一分零五秒，而整趟跑了三分多钟。所以「Insert 0 calls」不是事实，是没写完。
+  // debugvm info pdm 是趁它还活着的时候问，给的是这一趟真实累计。
+  try {
+    // info pdm 这个名字不存在（VERR_FILE_NOT_FOUND），所以两个候选都试一遍并把结果都
+    // 留下 —— 试错的那一份也是记录：下一次不必再猜哪个名字对。
+    fs.writeFileSync(path.join(建, "pdm.txt"), "", "utf8");
+    for (const 项 of ["ps2k", "ps2c"]) {
+      const 计数 = vbox(["debugvm", 机名, "info", 项], 60000);
+      fs.appendFileSync(path.join(建, "pdm.txt"),
+        "=== " + 项 + " ===\n" + String(计数.stdout || "") + String(计数.stderr || "") + "\n", "utf8");
+    }
+  } catch { }
   vbox(["controlvm", 机名, "poweroff"]);
   // 关机之后要等它真的停、盘真的交出去，第二趟才起得来。
   //
