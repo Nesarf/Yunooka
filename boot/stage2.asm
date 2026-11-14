@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 174
+stage2_sectors equ 175
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -976,6 +976,8 @@ long_entry:
     ; 声明：一段内容被某个主体占着，别人写同一段就被挡。这一格只有区间与冲突，
     ; 签名与截止留给下一格 —— 它们要宿主签名与真实时间，都比两个数比大小贵。
     call run_claim_test
+    ; 绝对时间：读一次、走两秒、再读一次，差必须是二。声明的截止要用它。
+    call run_rtc_test
     ; 未绑定被拒：同一个源 id，这次它登记了却没有主人 —— 拒绝的理由换一格。
     call run_event_unbound_test
     ; 工程失活：同一个工程的四条判决 —— 没名字、失活、被信任、接受。
@@ -1063,6 +1065,101 @@ tsc_now:
     rdtsc                          ; edx:eax，高 32 位在 edx
     shl rdx, 32
     or rax, rdx
+    ret
+
+; 读一个 CMOS 寄存器：al 是索引，回来 al 是那个字节。
+rtc_reg:
+    out 0x70, al
+    in al, 0x71
+    ret
+
+; BCD 换二进制：al 进，eax 出。
+;
+; RTC 默认给的是 BCD —— 0x23 意思是二十三，不是三十五。这一个换算不写下来，之后所有
+; 关于时间的判据都会静默地错，而且错得像一个好数字。
+bcd_to_bin:
+    movzx eax, al
+    mov ecx, eax
+    shr ecx, 4                    ; 高位数字
+    and eax, 0x0F                 ; 低位数字
+    imul ecx, ecx, 10
+    add eax, ecx
+    ret
+
+; 一天之内的绝对秒数：回来 rax = 时 * 3600 + 分 * 60 + 秒。
+;
+; 为什么要有它：校准那一格只需要「秒变了没有」，而声明要的是「到什么时候为止」——
+; 那需要一个能相减、能比较、能存下来的数。ticks 做不到这件事（每次启动都不一样），
+; 所以这一层第一次真的需要一个时间，而不只是拿它当诊断量。
+;
+; 读之前等 UIP 清：那是「正在更新」位，置着的时候寄存器里的六个字节不是同一个时刻的。
+; 不等它，会读到「分已经跳了而秒还没跳」这种组合 —— 那种错一年只出现一秒，最难查。
+;
+; 只管一天之内。跨日要日期，那要多读三个寄存器并处理月末；现在没有东西需要它。
+rtc_seconds:
+    mov cx, 0xFFFF
+.quiet:
+    mov al, 0x0A
+    call rtc_reg
+    test al, 0x80                 ; UIP
+    jz .stable
+    loop .quiet
+.stable:
+    mov al, 0x00
+    call rtc_reg
+    mov r8b, al                   ; 秒
+    mov al, 0x02
+    call rtc_reg
+    mov r9b, al                   ; 分
+    mov al, 0x04
+    call rtc_reg
+    mov r10b, al                  ; 时
+
+    mov al, r8b
+    call bcd_to_bin
+    mov r11, rax                  ; 秒
+    mov al, r9b
+    call bcd_to_bin
+    imul rax, rax, 60
+    add r11, rax                  ; + 分
+    mov al, r10b
+    call bcd_to_bin
+    imul rax, rax, 3600
+    add rax, r11
+    ret
+
+; 判据：读一次、等它自己走两秒、再读一次，差必须是二。
+;
+; 用 RTC 等 RTC，不用 ticks —— 这样这一条验的正是「这个数会随时间走两格」，而不是
+; 「ticks 会走」。等最多二十次轮询，免得 RTC 不跳的时候卡死在这里。
+run_rtc_test:
+    call rtc_seconds
+    mov [rtc_a], rax
+    mov qword [rtc_n], 300000      ; 一次 CMOS 读在虚拟机上要几微秒，而秒只在整秒跳 ——
+                                   ; 二十次轮询连百分之一秒都不到，所以差值读成 0。
+                                   ; 三十万轮是上限（几秒），正常两秒就跳出去；两百万轮
+                                   ; 试过一次，它把整趟拖到宿主的窗口之外，串口上什么也没有。
+.again:
+    call rtc_seconds
+    sub rax, [rtc_a]
+    cmp rax, 2
+    jae .done
+    dec qword [rtc_n]
+    jnz .again
+.done:
+    ; 起点与计数都放内存：rtc_seconds 自己用 r8 到 r11 装时、分、秒与累加值，
+    ; 第一次跑的时候起点就存在 r8 里，于是差值读成 66 —— 那是秒的 BCD 值被减掉了。
+    ; 一个函数用了哪些寄存器，是调用者要付的责任，而这条判据就是它的代价。
+    mov [rtc_d], rax
+    mov rsi, line_rtc_head
+    call puts64
+    mov rax, [rtc_a]
+    call put_num64
+    mov rsi, line_rtc_delta
+    call puts64
+    mov rax, [rtc_d]
+    call put_num64
+    call put_nl64
     ret
 
 ; 读 RTC 的秒字段，回来 al 是那一个字节。
@@ -17699,6 +17796,11 @@ line_claim_at: db " at ", 0
 line_claim_comma: db ",", 0
 line_claim_by: db " by=", 0
 line_claim_released: db "Yunooka: claim released who=", 0
+line_rtc_head: db "Yunooka: rtc start=", 0
+line_rtc_delta: db " delta=", 0
+rtc_a: dq 0
+rtc_n: dq 0
+rtc_d: dq 0
 line_shell_ready: db "Yunooka: shell ready", 13, 10, 0
 line_shell_timeout: db "Yunooka: no line", 13, 10, 0
 line_repl_ready: db "Yunooka: repl ready", 13, 10, 0
