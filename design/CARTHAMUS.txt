@@ -204,3 +204,14 @@ Carthamus 因此现在知道自己要认什么：.hmnkk 与 .hmbnso 两个，前
 
 十二个要落到 HMYR 的 SPEC.txt 2.11 与 design/FILETYPE.txt 才算完整，而 himeyuri 的
 test/readme.test.mjs 数着九种。这是这一轮留下的最大一笔跨仓库账。
+
+二十、那笔跨仓库的账清了
+
+himeyuri 那边改了四处：SPEC.txt 2.11 从「九个扩展名」变成「十二个」、README 的扩展名那
+一段、design/FILETYPE.txt 的扩展名表、以及 test/readme.test.mjs 里数着的那个数。
+
+四个套件跑完一百四十项全过：readme 19、package 14、distro 15、file-kind 92。
+
+所以十九节末尾那句「这是这一轮留下的最大一笔跨仓库账」现在已经不成立了 —— 写在这里，
+免得下一个读的人以为它还挂着。十二个扩展名在两个仓库里是同一份说法，而那正是这一节开头
+担心的事。
