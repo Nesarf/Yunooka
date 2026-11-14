@@ -123,6 +123,17 @@ const VBox = 找VBox();
 if (!VBox) 做不了("没有 VirtualBox");
 const vbox = (参数, 超时 = 120000) => spawnSync(VBox, 参数, { encoding: "utf8", timeout: 超时 });
 
+// 让虚拟机把日志写到仓库里来。
+//
+// 默认它写在 VM 自己的目录里，而那个目录不在仓库下 —— 跑完就找不到了，于是「问虚拟机
+// 那一侧」这条路一直是空的。同级那一条要问的正是那一侧：一次 keyboardputscancode 在
+// 虚拟机内部被当成了什么。
+//
+// 这两个环境变量在当前这份 VBox 上没有生效 —— 跑完 build/ 里没有 vbox.log。留在这里
+// 是因为它们是这条路的标准做法，下一次换版本或者换成 setextradata 时，这里就是起点。
+process.env.VBOX_LOG_DEST = path.join(建, "vbox.log");
+process.env.VBOX_LOG = "+kbd.e.l+dev_kbd.e.l+dev.e.l";
+
 if (!fs.existsSync(盘)) 做不了("还没有 build/disk.vdi，先跑 node tools/build.mjs");
 
 // disk.vdi 必须比 disk.img 新 —— 否则说明 build 没有成功，而这一趟跑的是上一趟的盘。
