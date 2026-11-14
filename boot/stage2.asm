@@ -1097,6 +1097,19 @@ bcd_to_bin:
 ;
 ; 只管一天之内。跨日要日期，那要多读三个寄存器并处理月末；现在没有东西需要它。
 rtc_seconds:
+    ; 保存调用者的寄存器。
+    ;
+    ; 这一个函数原本只被校准与判据调用，而它们不介意 r8 到 r11 被用掉 —— 直到声明的到期
+    ; 需要它，才发现在一个拿 r8 当循环下标的函数里调它，那个下标会变成秒的 BCD 值。第一次
+    ; 试的时候差值读成 66，就是这个。
+    ;
+    ; 一个函数碰了哪些寄存器是它自己的责任，不该让每个调用者去记。五个 push 换掉一个
+    ; 「谁调用谁当心」的约定，值得。
+    push rcx
+    push r8
+    push r9
+    push r10
+    push r11
     mov cx, 0xFFFF
 .quiet:
     mov al, 0x0A
@@ -1126,6 +1139,11 @@ rtc_seconds:
     call bcd_to_bin
     imul rax, rax, 3600
     add rax, r11
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rcx
     ret
 
 ; 判据：读一次、等它自己走两秒、再读一次，差必须是二。
