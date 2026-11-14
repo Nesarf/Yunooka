@@ -2054,6 +2054,20 @@ const 锁成 = 锁行.length === 3
   && 锁行[0] === "Yunooka: nolock denied"
   && 锁行[1] === "Yunooka: nolock denied"
   && 锁行[2] === "Yunooka: nolock ok";
+// 声明：一段内容被一个主体占着，别人写同一段就被挡。
+//
+// 五行的顺序就是那个故事：占住 [0,8)、撞上它的 [4,12) 被挡、紧贴着的 [8,12) 放行、
+// 释放、于是 [0,4) 也放行。逐字节比，不是「都以 claim 开头」—— 坐标必须对。
+//
+// 中间那两行合起来才是判据的灵魂：一个「谁声明过就全锁」的实现能过第二行、过不了第三行；
+// 一个「什么都不锁」的实现能过第三行、过不了第二行。只留一行的话，两种错都能混过去。
+const 声行 = [...读到.matchAll(/Yunooka: claim [^\r\n]*/g)].map((m) => m[0].trim());
+const 声成 = 声行.length === 5
+  && 声行[0] === "Yunooka: claim ok who=2 at 0,8"
+  && 声行[1] === "Yunooka: claim denied who=3 at 4,12 by=2"
+  && 声行[2] === "Yunooka: claim ok who=3 at 8,12"
+  && 声行[3] === "Yunooka: claim released who=2"
+  && 声行[4] === "Yunooka: claim ok who=3 at 0,4";
 // 信箱：运行时的第二条输入路。它要紧的地方在于这一条不是键盘送来的 —— 这一趟没有人按键，
 // 宿主改的是第二块盘的序列号，而客人机在空转里读到了它。源 5 是信箱这一路的约定编号，
 // 与键盘的 1 只差一格；键码走的是同一个 wait_arrow 与同一个 arbitrate，所以这一行与键盘
@@ -2344,6 +2358,9 @@ console.log("注册      " + (注行.length ? 注行.map((s) => s.replace("Yunoo
 console.log("不锁定    " + (锁行.length ? 锁行.map((s) => s.replace("Yunooka: nolock ", "")).join(" / ") : "(没跑到)")
   + (锁成 ? "  —— 只给剩下的那一位不成功（没记住），而完整的一份在两次失败之后仍然成功（没锁死）"
     : "  —— 不对：应当是 denied、denied、ok 三行"));
+console.log("声明      " + (声行.length ? 声行.length + " 行" : "(没跑到)")
+  + (声成 ? "  —— 重叠被挡、紧贴的放行、释放之后打开：三条合起来才是这一条"
+    : "  —— 不对：要么行数不是五，要么某一行与它该有的一字不差的不同"));
 console.log("信箱实时  " + (信活行 ? "src=5 payload=" + 信活行[1].slice(-4) + " target=2" : "(没跑到)")
   + (信活成 ? "  —— 没有人按键：那一个键从第二块盘的第一个扇区上来，走的是同一个仲裁"
     : "  —— 不对：应当是 event src=5 kind=key payload=004D target=2"));
@@ -2631,6 +2648,7 @@ const 其余成 = 有种子
   ? ata成
     && 钟成
     && 率成
+    && 声成
     && 信成
     && 源成
     && 陷成

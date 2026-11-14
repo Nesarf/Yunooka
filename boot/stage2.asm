@@ -29,7 +29,7 @@
 ; 这个是「真的占了多少」（build 那条检查要求它与实际一致），而「能长到多大」
 ; 是 build.mjs 里的 第二段上限扇区。两个数不是一回事：上限管 loader 读几批与种子从哪
 ; 起，而这个数管盘上第二段占到哪里。
-stage2_sectors equ 172
+stage2_sectors equ 174
 loader_sectors equ 8                   ; 加载器占几个扇区，由 build 核对
 seed_lba       equ 1 + loader_sectors + stage2_sectors   ; 引导 1 + 加载器 + 主体
 
@@ -973,6 +973,9 @@ long_entry:
     call run_event_line_test
     ; 未登记被拒：同一个键，源在清单里就放行、不在就留一行拒绝。
     call run_event_reject_test
+    ; 声明：一段内容被某个主体占着，别人写同一段就被挡。这一格只有区间与冲突，
+    ; 签名与截止留给下一格 —— 它们要宿主签名与真实时间，都比两个数比大小贵。
+    call run_claim_test
     ; 未绑定被拒：同一个源 id，这次它登记了却没有主人 —— 拒绝的理由换一格。
     call run_event_unbound_test
     ; 工程失活：同一个工程的四条判决 —— 没名字、失活、被信任、接受。
@@ -3613,6 +3616,188 @@ run_serial_echo:
 ; 扫描码集用集 1，与主机那一侧一致（理由写在 keymap 的注释里）。所以主机送 0x2D
 ; 表示按下 X，送来 0xAD 表示放开。这一版不翻译，只把收到的码打出来 —— 翻译表可以后加，
 ; 而「究竟收到了什么」是一张表替代不了的事实。
+; ======================================================================
+; 声明：一段内容被某个主体占着
+; ======================================================================
+;
+; 这一格只做两件最便宜的事：一张内存里的声明表，与一次相交判定。签名与截止留给下一格 ——
+; 它们要的是宿主签名与真实时间，而这两样都比「两个数比大小」贵。
+;
+; 为什么不是分区表：一份文档被一个用户与两个 agent 同时编辑时，要防的是「同时改同一段」，
+; 而不是「越过了某条线」。所以系统里没有预先切好的格子，只有活着的声明 —— 每一条说：
+; 这个主体、对这份文件的这一段字节、别人不许写。
+;
+; 冲突判定只有一句：两个区间相交当且仅当 a < d 且 c < b。自己的声明不算冲突（可以扩），
+; 共建模式的不挡（那是要写下来的例外，不是漏判）。
+claim_check:
+    ; rdi = 请求者，rsi = 文件号，rdx = 起，rcx = 止
+    ; 回来 rax = 与之相交的独占声明的所有者（0 表示没有）
+    xor r8, r8
+.scan:
+    cmp r8, 4
+    jae .none
+    mov r9, [claim_owner + r8 * 8]
+    test r9, r9
+    jz .next                       ; 空位
+    cmp r9, rdi
+    je .next                       ; 自己的声明
+    mov r10, [claim_mode + r8 * 8]
+    cmp r10, 1
+    jne .next                      ; 共建的不挡
+    mov r10, [claim_file + r8 * 8]
+    cmp r10, rsi
+    jne .next                      ; 不同的文件不相关
+    mov r10, [claim_start + r8 * 8]
+    cmp r10, rcx
+    jae .next                      ; a >= d：在右边，不交
+    mov r10, [claim_end + r8 * 8]
+    cmp rdx, r10
+    jae .next                      ; c >= b：在左边，不交
+    mov rax, r9
+    ret
+.next:
+    inc r8
+    jmp .scan
+.none:
+    xor eax, eax
+    ret
+
+; 往表里放一条。回来 rax = 1 成功、0 表满。
+claim_add:
+    xor r8, r8
+.find:
+    cmp r8, 4
+    jae .full
+    mov r9, [claim_owner + r8 * 8]
+    test r9, r9
+    jz .slot
+    inc r8
+    jmp .find
+.slot:
+    mov [claim_owner + r8 * 8], rdi
+    mov [claim_file + r8 * 8], rsi
+    mov [claim_start + r8 * 8], rdx
+    mov [claim_end + r8 * 8], rcx
+    mov qword [claim_mode + r8 * 8], 1
+    mov rax, 1
+    ret
+.full:
+    xor eax, eax
+    ret
+
+; 把某一个主体名下的声明全部清掉。回来 rax = 清了几条。
+claim_release:
+    xor r8, r8
+    xor r9, r9
+.scan:
+    cmp r8, 4
+    jae .done
+    mov r10, [claim_owner + r8 * 8]
+    cmp r10, rdi
+    jne .next
+    mov qword [claim_owner + r8 * 8], 0
+    inc r9
+.next:
+    inc r8
+    jmp .scan
+.done:
+    mov rax, r9
+    ret
+
+; 试一条声明：不冲突就入表并打 ok，冲突就打拒绝并把挡路的那个人点出来。
+claim_try:
+    mov [claim_tmp + 0], rdi
+    mov [claim_tmp + 8], rsi
+    mov [claim_tmp + 16], rdx
+    mov [claim_tmp + 24], rcx
+    call claim_check
+    mov [claim_tmp + 32], rax
+    test rax, rax
+    jnz .blocked
+    mov rdi, [claim_tmp + 0]
+    mov rsi, [claim_tmp + 8]
+    mov rdx, [claim_tmp + 16]
+    mov rcx, [claim_tmp + 24]
+    call claim_add
+    mov rsi, line_claim_ok
+    call puts64
+    call claim_print_body
+    ret
+.blocked:
+    mov rsi, line_claim_denied
+    call puts64
+    call claim_print_head          ; 不换行：后面还要接 by=
+    mov rsi, line_claim_by
+    call puts64
+    mov rax, [claim_tmp + 32]
+    call put_num64
+    call put_nl64
+    ret
+
+; 打印「谁、在哪一段」：who 与 [起,止)。四个数从 claim_tmp 里取，因为 put_num64 会
+; 把它们所在的寄存器打散，而这一段要连着打四个数。
+claim_print_body:
+    call claim_print_head
+    jmp put_nl64
+; 只打前半段、不换行 —— 拒绝那一行要在后面接「被谁挡下的」。
+claim_print_head:
+    mov rax, [claim_tmp + 0]
+    call put_num64
+    mov rsi, line_claim_at
+    call puts64
+    mov rax, [claim_tmp + 16]
+    call put_num64
+    mov rsi, line_claim_comma
+    call puts64
+    mov rax, [claim_tmp + 24]
+    call put_num64
+    ret
+
+; 五步：挡住的重叠、放行的不重叠、以及释放之后那条路打开。
+run_claim_test:
+    mov qword [claim_owner + 0 * 8], 0
+    mov qword [claim_owner + 8], 0
+    mov qword [claim_owner + 16], 0
+    mov qword [claim_owner + 24], 0
+
+    ; 一、主体 2 声明文件 1 的 [0,8)
+    mov rdi, 2
+    mov rsi, 1
+    xor rdx, rdx
+    mov rcx, 8
+    call claim_try
+
+    ; 二、主体 3 要 [4,12)：与上面那段相交，该被挡
+    mov rdi, 3
+    mov rsi, 1
+    mov rdx, 4
+    mov rcx, 12
+    call claim_try
+
+    ; 三、主体 3 要 [8,12)：紧贴着，但不相交，该放行 —— 这一条与上一条合起来才是判据的灵魂
+    mov rdi, 3
+    mov rsi, 1
+    mov rdx, 8
+    mov rcx, 12
+    call claim_try
+
+    ; 四、主体 2 释放
+    mov rdi, 2
+    call claim_release
+    mov rsi, line_claim_released
+    call puts64
+    mov rax, 2
+    call put_num64
+    call put_nl64
+
+    ; 五、主体 3 再要 [0,4)：此时没人占左边，该放行
+    mov rdi, 3
+    mov rsi, 1
+    xor rdx, rdx
+    mov rcx, 4
+    call claim_try
+    ret
+
 run_key_poll:
     ; 先报一声「我在等」，宿主听到才送键。
     ;
@@ -17500,6 +17685,20 @@ line_serial_none: db "Yunooka: no input", 13, 10, 0
 line_key: db "Yunooka: key ", 0
 line_key_none: db "Yunooka: no key", 13, 10, 0
 line_key_ready: db "Yunooka: key ready", 13, 10, 0
+; 声明表：四条够用。owner 为 0 是空位，其余四列跟着它走 —— 与源登记表同一种做法。
+claim_owner: times 4 dq 0
+claim_file:  times 4 dq 0
+claim_start: times 4 dq 0
+claim_end:   times 4 dq 0
+claim_mode:  times 4 dq 0
+; 打印时把四个数先落到这里：put_num64 会把寄存器打散，而一段话要连着打四个数。
+claim_tmp:   times 5 dq 0
+line_claim_ok: db "Yunooka: claim ok who=", 0
+line_claim_denied: db "Yunooka: claim denied who=", 0
+line_claim_at: db " at ", 0
+line_claim_comma: db ",", 0
+line_claim_by: db " by=", 0
+line_claim_released: db "Yunooka: claim released who=", 0
 line_shell_ready: db "Yunooka: shell ready", 13, 10, 0
 line_shell_timeout: db "Yunooka: no line", 13, 10, 0
 line_repl_ready: db "Yunooka: repl ready", 13, 10, 0
