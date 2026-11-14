@@ -190,7 +190,22 @@ if (有这台) {
   const 描述 = String(vbox(["showvminfo", 机名, "--machinereadable"]).stdout || "");
   if (!/^storagecontrollername0="IDE"$/m.test(描述)) {
     console.log("控制器不是 IDE，删了重建：" + 机名);
-    vbox(["unregistervm", 机名, "--delete"]);
+    // 先把它自己的日志捞出来，再删。
+//
+// 这是「问虚拟机那一侧」一直问不到的原因：VM 建在默认机器目录里（不是 build/），而下面
+// 那一句 --delete 会把整个目录连 VBox.log 一起删掉。日志每一趟都写了，只是从来没被留下。
+// CfgFile 指着那块 .vbox，日志就住在它旁边。
+const 机器信息 = vbox(["showvminfo", 机名, "--machinereadable"]);
+const 配文件 = /CfgFile="([^"]+)"/.exec(String(机器信息.stdout || ""));
+const 候选 = [];
+if (配文件) 候选.push(path.dirname(配文件[1]));
+// 默认机器目录是 VBoxManage list systemproperties 里那一行给出来的；第一版只试了 CfgFile，
+// 而它没匹配上（输出里那一段的转义与想象的不同），于是日志仍然没留下。
+候选.push(path.join(process.env.USERPROFILE || "", "VirtualBox VMs", 机名, "Logs"));
+for (const 目 of 候选) {
+  try { fs.copyFileSync(path.join(目, "VBox.log"), path.join(建, "vbox.log")); break; } catch { }
+}
+vbox(["unregistervm", 机名, "--delete"]);
     有这台 = false;
   }
 }
