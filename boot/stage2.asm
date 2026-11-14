@@ -712,6 +712,14 @@ long_entry:
     call put_num64
     call put_nl64
 
+    ; 第二件：这个计数每秒走多少。第一件只说「它在走」，这一件给出换算率 ——
+    ; 有了它，超时打印的那个数才是一段时间，而不是一个只有自己看得懂的量。
+    call clock_calibrate
+    mov rsi, line_clock_rate
+    call puts64
+    call put_num64
+    call put_nl64
+
     ; 没有种子就不读它的头。否则从零里会读出一个「版本 0、0 个函数」，而第一条指令
     ; 那个 0 还会被翻成「加」—— 垃圾被翻译成漂亮数字，看起来像真读懂了。
     ; 判据要的是「读得懂」，不是「读得出数」。
@@ -995,6 +1003,51 @@ tsc_now:
     rdtsc                          ; edx:eax，高 32 位在 edx
     shl rdx, 32
     or rax, rdx
+    ret
+
+; 读 RTC 的秒字段，回来 al 是那一个字节。
+;
+; 不解析 BCD、不检查 UIP 位、不管它是 12 小时还是 24 小时制 —— 这一层只用它做一件事：
+; 等它变。变一次是一秒，这个判断不需要知道现在是几点，也不需要知道那个字节怎么读。
+rtc_second:
+    mov al, 0x00                   ; CMOS 里的秒
+    out 0x70, al
+    in al, 0x71
+    ret
+
+; 把 ticks 换成秒。回来 rax = 每秒多少个 TSC 计数。
+;
+; 为什么需要它：上一格知道了宿主四十五毫秒送完、客人机三乘十的十次方个计数等满，
+; 而这两个数没法比 —— 一个是毫秒，一个是没有单位的计数。没有换算率的时候，所有
+; 「等得太久」与「键没到」的判断都只能靠假定频率，而假定就是猜。
+;
+; 为什么是「等秒变三次」而不是「等一次」：一次变化之间的跨度是「不到一秒到一秒」，
+; 误差等于真值本身；三次变化之间恰好是两秒（每一次间隔都精确是一秒，读的延迟在微秒
+; 量级），误差千分之几。两秒换一个能用的常数，是这一层少有的划算买卖 ——
+; 而这两秒不是白花的：它把整趟测试的总时长改了，而这一套判据对时序很敏感。第一次
+; 试的是五次（四秒），四秒就把「算数」那一条推红了 —— 不是算错，是先前送出去、没被
+; 当场读走的键盘字节积在输入流里，忽然挤进了 shell 的输入。所以这里取两秒，够准，
+; 也够短。
+;
+; 而它仍然不是「绝对时间」：RTC 的两秒里，虚拟机可能被暂停过。所以这个数只用来
+; 事后换算，不用来等待 —— 等待仍然用 ticks 比，那一条是单调的，不受暂停影响。
+clock_calibrate:
+    call rtc_second
+    mov r9b, al                    ; 记住现在这一秒
+    xor r10, r10                   ; 数它变了几次
+    call tsc_now
+    mov [clock_cal_t0], rax
+.moved:
+    call rtc_second
+    cmp al, r9b
+    je .moved
+    mov r9b, al
+    inc r10
+    cmp r10, 3                     ; 三次变化之间恰好两秒
+    jb .moved
+    call tsc_now
+    sub rax, [clock_cal_t0]
+    shr rax, 1                     ; 除以二：回来就是每秒钟的计数
     ret
 
 ; 打印 rax 的十进制值。与 16 位那一份同一个算法，换 64 位寄存器。
@@ -3504,14 +3557,32 @@ run_serial_echo:
 ; 表示按下 X，送来 0xAD 表示放开。这一版不翻译，只把收到的码打出来 —— 翻译表可以后加，
 ; 而「究竟收到了什么」是一张表替代不了的事实。
 run_key_poll:
-    mov r10, 5000000               ; 大约几秒：够主机在这段窗口里送一个键
+    ; 先报一声「我在等」，宿主听到才送键。
+    ;
+    ; 这一句是补上的握手，而它补得很晚：此前这一段不打招呼，宿主只能猜着送 —— 猜的结果
+    ; 是它在几十毫秒里连送十五次，客人机只读走一个，剩下的顺着输入流进了 shell，于是
+    ; 「1+1」变成「xxxxx1+1」，算出 0。移窗、事件行、未登记那几处都有握手，所以它们一直
+    ; 是干净的；只有这一处没有，而它坏起来的样子是「算数那一条偶尔不对」。
+    mov rsi, line_key_ready
+    call puts64
+    ; 半秒，用时钟量。这里原先数的是轮次，而那是个陷阱：in 是一条要退出虚拟化的指令，
+    ; 一千万轮在真实机器上是几十毫秒，在虚拟机上能是几分钟。八亿轮试过一次 —— 第二趟
+    ; 没有人送键，于是它停在这一条上直到宿主的窗口用完，串口停在 key ready 就再没下文。
+    ; 这正是这一格的主题：能等多久要用时钟说，不能用轮次说。
+    mov rax, 2000000000
+    mov [wait_budget], rax
+    call tsc_now
+    add rax, [wait_budget]
+    mov [clock_deadline], rax               ; 大约几秒：够主机在这段窗口里送一个键
 .wait:
     mov dx, 0x64
     in al, dx
     test al, 0x01                  ; bit 0：输出缓冲有数据
     jnz .got
-    dec r10
-    jnz .wait
+    call tsc_now
+    cmp rax, [clock_deadline]
+    jb .wait
+    mov qword [wait_budget], wait_ticks
     mov rsi, line_key_none
     call puts64
     ret
@@ -16966,6 +17037,8 @@ line_alloc: db "Yunooka: alloc ", 0
 line_heap_ok: db "Yunooka: heap ok", 13, 10, 0
 line_heap_bad: db "Yunooka: heap bad", 13, 10, 0
 line_clock_head: db "Yunooka: clock ticks=", 0
+line_clock_rate: db "Yunooka: clock rate=", 0
+clock_cal_t0: dq 0
 clock_a: dq 0
 clock_start: dq 0
 line_wait_timeout: db "Yunooka: wait timeout ", 0
@@ -17319,6 +17392,7 @@ line_serial_got: db "Yunooka: echo ", 0
 line_serial_none: db "Yunooka: no input", 13, 10, 0
 line_key: db "Yunooka: key ", 0
 line_key_none: db "Yunooka: no key", 13, 10, 0
+line_key_ready: db "Yunooka: key ready", 13, 10, 0
 line_shell_ready: db "Yunooka: shell ready", 13, 10, 0
 line_shell_timeout: db "Yunooka: no line", 13, 10, 0
 line_repl_ready: db "Yunooka: repl ready", 13, 10, 0
