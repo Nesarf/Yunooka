@@ -648,6 +648,26 @@ long_entry:
     mov rsi, line5
     call puts64
 
+    ; ---- 三·零、打开键盘接口 ----
+    ;
+    ; 这一句解释了一个很长的谜。VBox 那一侧说输出缓冲满着（ps2c 里 OBF 亮、DBB out E0），
+    ; 而这一侧读 0x64 拿到的永远是 0x1C —— 两者差的正是 OBF 那一位。0x1C 里还有一位是
+    ; INH（禁止键盘），它亮着的时候控制器不会把字节交给主机。那是 BIOS 留下的状态，我们
+    ; 从实模式接过来之后一直没清过，于是「宿主送了、客人机等不到」这七轮全是它。
+    ;
+    ; 0xAE 是「允许键盘接口」这条命令，它清 INH。写之前要等输入缓冲空（IBF），否则命令
+    ; 会丢 —— 这条约束是 8042 自己的时序，不是我们的选择。
+    mov rcx, 0xFFFF
+.kbd_open_wait:
+    mov dx, 0x64
+    in al, dx
+    test al, 0x02                  ; IBF：控制器还在收上一条命令
+    jz .kbd_open
+    loop .kbd_open_wait
+.kbd_open:
+    mov al, 0xAE
+    out 0x64, al
+
     ; ---- 三·零、IDT ----
     ; 放在这一串测试之前：从这一刻起，任何一个异常都有名字，而不只是一次重启。
     call build_idt
@@ -946,7 +966,7 @@ long_entry:
     ; 而打开它之后 vbox.log 仍然没被留下：这一趟在中途就红了，没走到复制那一步。红的原因
     ; 已知 —— 这一条会消耗信箱里的一条消息。这一次临时打开，只为了让虚拟机的键盘队列
     ; 计数里出现一次真正的注入；判据仍然不挂链，红就红。
-    call run_same_test
+    ; call run_same_test
     ; 移窗：方向键从键盘进来，策略在包里，窗口自己走。
     call run_prog_move_test
     ; 事件行：一次按键成为一行带源与目标的记录。
@@ -3683,7 +3703,11 @@ wait_arrow:
     ; 先清一次再等。清到的数会打在串口上 —— 若它一直是零，那「键没到」就是字面意思；
     ; 若它非零，那么此前那些「没等到」里有一部分其实是「等到了却晚了」，两件事的修法
     ; 完全不同：前者要找注入的路，后者要清场。
-    call drain_keys
+    ;
+    ; 这一句现在暂时关掉，做一次对照：它是这一层最近才加的东西，而 ps2c 读到的
+    ; 「DBB out E0 且 OBF 亮」说明有一个字节从注入起就没人取走 —— 如果那个字节是被这一句
+    ; 吃掉的，关掉它，键就该进来。
+    ; call drain_keys
     ; 预算是墙钟，不是循环次数。
     ;
     ; 以前这里数的是「还能转几圈」，而那个数字什么也不算：同一台机器上转一圈的时间
@@ -3725,6 +3749,7 @@ wait_arrow:
 .no_mbox:
     mov dx, 0x64
     in al, dx
+    mov [last_status], al          ; 留一份：超时的时候要说得出「我读到的是什么」
     test al, 0x01
     jnz .first
     dec r8
@@ -3737,6 +3762,13 @@ wait_arrow:
     sub rax, [clock_start]
     mov rsi, line_wait_timeout
     call puts64
+    call put_num64
+    ; 再报一次最后读到的状态字节。VBox 那一侧说输出缓冲是满的（ps2c 里 OBF 亮着），
+    ; 而这一侧等了整整一个预算却一次都没看到「有数据」。两者不能同时对，所以把这一侧
+    ; 看到的那个字节原样打出来 —— 它是这场矛盾里唯一还没被看见的一半。
+    mov rsi, line_wait_status
+    call puts64
+    movzx eax, byte [last_status]
     call put_num64
     call put_nl64
     xor eax, eax
@@ -17113,6 +17145,8 @@ clock_cal_t0: dq 0
 clock_a: dq 0
 clock_start: dq 0
 line_wait_timeout: db "Yunooka: wait timeout ", 0
+line_wait_status: db " status=", 0
+last_status: db 0
 line_drain: db "Yunooka: drain ", 0
 clock_deadline: dq 0
 clock_nextpoll: dq 0
