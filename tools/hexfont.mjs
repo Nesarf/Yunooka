@@ -91,3 +91,15 @@ if (process.argv[1] && process.argv[1].endsWith("hexfont.mjs")) {
   console.log("通过  两条字形走完解析、打包、解包，位图逐字节相同（" + 包.length + " 字节）");
   console.log("通过  改掉一个字节之后比较能看出来 —— 否则上面那条什么也没验");
 }
+
+// 从一份 .hex 生成盘上格式：node tools/hexfont.mjs <输出> <输入.hex>
+//
+// 这一步先于「接真的 Unifont」—— 它验的是管道而不是数据。先有两条假字形能一路走成
+// 一个盘上的文件，再接十二兆的真数据；反过来做的话，一个格式错误会藏在几万条里。
+if (process.argv[2] && process.argv[3] && !process.argv[2].endsWith("hexfont.mjs")) {
+  const 入 = fs.readFileSync(process.argv[3], "utf8");
+  const 条 = 解析(入);
+  const 包 = 打包(条);
+  fs.writeFileSync(process.argv[2], 包);
+  console.log("写出 " + process.argv[2] + "：" + 条.length + " 个字形，" + 包.length + " 字节");
+}
