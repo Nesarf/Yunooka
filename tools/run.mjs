@@ -13,6 +13,16 @@ import net from "node:net";
 import path from "node:path";
 import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
+
+// 未捕获的异常必须留下它的出处。
+//
+// 这一句是补一个教训：某几趟跑完，lуn 日志停在「五行都在」，后面连「落盘」那一行都没有，
+// 而终端上只有一句「另一个程序正在使用此文件」。那一句不说是**哪一个**文件、也不说是
+// 哪一行在读它 —— 于是每一次都只能猜。堆栈会把这三件事一起说出来。
+process.on("uncaughtException", (e) => {
+  console.log("[未捕获] " + (e && e.stack ? e.stack : String(e)));
+  process.exit(1);
+});
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -2831,6 +2841,14 @@ if (!成了) {
 
 if (!留机) {
   vbox(["controlvm", 机名, "poweroff"]);
+  // 关机之后要等它真的停、盘真的交出去，第二趟才起得来。
+  //
+  // 不等的话，下一次 startvm 会说「另一个程序正在使用此文件」—— 而那句话出现在第一趟跑完
+  // 之后，读起来像「第一趟把盘弄坏了」。它其实是「上一台还没死透」。build 之前那一处、
+  // 开工之前那一处、以及这里，三处用同一条规则：poweroff，然后等状态真的变成 poweroff。
+  for (let i = 0; i < 20 && 态() !== "poweroff"; i++) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
+  }
 }
 
 // ---- 四、第二趟：同一块盘，再启动一次 ----
@@ -2843,7 +2861,14 @@ if (!留机) {
 // 第一趟的字，那时 survived 与 same 就分不开了。
 const 存活成 = (() => {
   if (留机) return true;                  // 留机模式下第二趟没有意义，不当失败
-  fs.writeFileSync(串口, "", "utf8");
+  // 清空串口文件。这一步会撞锁，而且是这一套里最容易被误读的一处：VBox 的 uartmode1
+  // file 后端在机器关掉之后还会短暂持有这个文件，于是 writeFileSync 抛 EBUSY，而未捕获的
+  // 异常会让整趟在第二趟之前就退出 —— 日志停在「五行都在」,连「落盘」那一行都不打，
+  // 读起来像第一趟把盘弄坏了。一次 EBUSY 不该有这种后果，所以重试几次。
+  for (let i = 0; i < 10; i++) {
+    try { fs.writeFileSync(串口, "", "utf8"); break; }
+    catch { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300); }
+  }
   const 又起 = vbox(["startvm", 机名, "--type", "headless"]);
   if (又起.status !== 0) return false;
   let 又读到 = "";
