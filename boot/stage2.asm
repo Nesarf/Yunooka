@@ -938,6 +938,12 @@ long_entry:
     ; 于是虚拟机根本没起来，日志自然也没有。下一次先 list runningvms 确认端口与盘都干净，
     ; 再动这一行 —— 杀 VBoxHeadless 不等于盘锁放了，而锁着的盘会让 build 与 run 都以
     ; 一句与真正原因无关的话失败。
+    ; 而实测的证据比这句话更狠：VM 仍挂在 runningvms 里、四块盘全是 locked write，
+    ; 直到 controlvm poweroff 才真的放行。正确的收法就是它。
+    ;
+    ; 而盘锁还有第二个持有者：VBoxSDS。杀掉之后 build 立刻过 —— 但它会自己回来，于是
+    ; 同一句话在下一次 run 上重现。这一格因此没能在一次干净的窗口里跑到「读计数器」
+    ; 那一步，下面这一行仍然挂着。
     ; call run_same_test
     ; 移窗：方向键从键盘进来，策略在包里，窗口自己走。
     call run_prog_move_test
