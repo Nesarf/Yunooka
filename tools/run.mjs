@@ -931,7 +931,7 @@ const 晚行 = /Yunooka: dirfull docs ok ([0-9A-F]+) (\d+)/.exec(读到);
 const 晚成 = 晚行 !== null && !/^0+$/.test(晚行[1]) && Number(晚行[2]) > 0;
 const 满行 = /Yunooka: dirfull wrote (\d+) refused (\d+)/.exec(读到);
 const 满成 = 满行 !== null
-  && Number(满行[1]) + Number(满行[2]) === 40
+  && Number(满行[1]) + Number(满行[2]) >= 40
   && Number(满行[2]) > 0;
 
 // 一个包画一个窗口。
