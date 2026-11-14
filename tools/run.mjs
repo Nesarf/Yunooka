@@ -2062,12 +2062,23 @@ const 锁成 = 锁行.length === 3
 // 中间那两行合起来才是判据的灵魂：一个「谁声明过就全锁」的实现能过第二行、过不了第三行；
 // 一个「什么都不锁」的实现能过第三行、过不了第二行。只留一行的话，两种错都能混过去。
 const 声行 = [...读到.matchAll(/Yunooka: claim [^\r\n]*/g)].map((m) => m[0].trim());
-const 声成 = 声行.length === 5
+const 声成 = 声行.length >= 5
   && 声行[0] === "Yunooka: claim ok who=2 at 0,8"
   && 声行[1] === "Yunooka: claim denied who=3 at 4,12 by=2"
   && 声行[2] === "Yunooka: claim ok who=3 at 8,12"
   && 声行[3] === "Yunooka: claim released who=2"
   && 声行[4] === "Yunooka: claim ok who=3 at 0,4";
+// 到期：同一条声明，截止之前挡人，过了截止不挡。
+//
+// 第三行是第一行的复述 —— 同一对所有者与区间又 ok 了一次，只是这次截止在过去。如果实现把
+// 「有声明就挡」写死，第四行会变成 denied 而第三行仍然 ok；如果它把「过期」做成「从来没
+// 写进去」，第三行会变 denied。两处都要对才行。
+const 期行 = 声行.slice(5);
+const 期成 = 期行.length === 4
+  && 期行[0] === "Yunooka: claim ok who=2 at 0,8"
+  && 期行[1] === "Yunooka: claim denied who=3 at 4,12 by=2"
+  && 期行[2] === "Yunooka: claim ok who=2 at 0,8"
+  && 期行[3] === "Yunooka: claim ok who=3 at 4,12";
 // 绝对时间：读一次、走两秒、再读一次，差必须是二。
 //
 // 钉两件事：起点落在一个合理的一天之内（0 到 86399），以及差正好是二。第二件事才是判据
@@ -2663,6 +2674,7 @@ const 其余成 = 有种子
     && 钟成
     && 率成
     && 声成
+    && 期成
     && 时成
     && 信成
     && 源成

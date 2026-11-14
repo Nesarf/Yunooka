@@ -976,6 +976,8 @@ long_entry:
     ; 声明：一段内容被某个主体占着，别人写同一段就被挡。这一格只有区间与冲突，
     ; 签名与截止留给下一格 —— 它们要宿主签名与真实时间，都比两个数比大小贵。
     call run_claim_test
+    ; 到期：同一条声明，截止之前挡人，过了截止不挡。
+    call run_claim_due_test
     ; 绝对时间：读一次、走两秒、再读一次，差必须是二。声明的截止要用它。
     call run_rtc_test
     ; 未绑定被拒：同一个源 id，这次它登记了却没有主人 —— 拒绝的理由换一格。
@@ -3759,6 +3761,16 @@ claim_check:
     mov r10, [claim_mode + r8 * 8]
     cmp r10, 1
     jne .next                      ; 共建的不挡
+    ; 到期了就不挡。0 表示永不过期 —— 一条既定声明不该因为时间过去而失效。
+    ; rtc_seconds 现在自己保存 r8 到 r11 与 rcx，所以在这里调它不会把下标改掉；
+    ; 而 rdi、rsi、rdx 那三个它一个都不碰。
+    mov r11, [claim_due + r8 * 8]
+    test r11, r11
+    jz .alive
+    call rtc_seconds
+    cmp rax, r11
+    jae .next
+.alive:
     mov r10, [claim_file + r8 * 8]
     cmp r10, rsi
     jne .next                      ; 不同的文件不相关
@@ -3790,6 +3802,8 @@ claim_add:
     jmp .find
 .slot:
     mov [claim_owner + r8 * 8], rdi
+    mov r11, [claim_tmp + 40]      ; 截止从暂存格里来：入表这条路只有它一个来源
+    mov [claim_due + r8 * 8], r11
     mov [claim_file + r8 * 8], rsi
     mov [claim_start + r8 * 8], rdx
     mov [claim_end + r8 * 8], rcx
@@ -3870,6 +3884,7 @@ claim_print_head:
 
 ; 五步：挡住的重叠、放行的不重叠、以及释放之后那条路打开。
 run_claim_test:
+    mov qword [claim_tmp + 40], 0  ; 永不过期：这一格测区间，不测时间
     mov qword [claim_owner + 0 * 8], 0
     mov qword [claim_owner + 8], 0
     mov qword [claim_owner + 16], 0
@@ -3910,6 +3925,56 @@ run_claim_test:
     mov rsi, 1
     xor rdx, rdx
     mov rcx, 4
+    call claim_try
+    ret
+
+; 到期：一条声明在截止之前挡人，过了截止就不挡。
+;
+; 这一条测的是那个殿里唯一还没验过的一件事 —— 临时分区的寿命。前一条测区间，而区间与寿命
+; 正交：一个把「有声明就挡」写死的实现能过前一条，过不了这一条。
+;
+; 不等真实时间：第三段把截止设成「一秒之前」，等价于「已经到期」。等三秒钟也能测，但那会
+; 把这一格的总时长推上去，而它要证明的事与「等」无关。
+run_claim_due_test:
+    mov qword [claim_owner + 0 * 8], 0
+    mov qword [claim_owner + 8], 0
+    mov qword [claim_owner + 16], 0
+    mov qword [claim_owner + 24], 0
+
+    ; 一、A 占住 [0,8)，截止在一小时之后
+    call rtc_seconds
+    add rax, 3600
+    mov [claim_tmp + 40], rax
+    mov rdi, 2
+    mov rsi, 1
+    xor rdx, rdx
+    mov rcx, 8
+    call claim_try
+
+    ; 二、B 要 [4,12)：还没到期，挡住
+    mov rdi, 3
+    mov rsi, 1
+    mov rdx, 4
+    mov rcx, 12
+    call claim_try
+
+    ; 三、A 放手，再占一次，而这次截止在过去
+    mov rdi, 2
+    call claim_release
+    call rtc_seconds
+    dec rax
+    mov [claim_tmp + 40], rax
+    mov rdi, 2
+    mov rsi, 1
+    xor rdx, rdx
+    mov rcx, 8
+    call claim_try
+
+    ; 四、B 再要 [4,12)：已经过期，放行
+    mov rdi, 3
+    mov rsi, 1
+    mov rdx, 4
+    mov rcx, 12
     call claim_try
     ret
 
@@ -17806,8 +17871,15 @@ claim_file:  times 4 dq 0
 claim_start: times 4 dq 0
 claim_end:   times 4 dq 0
 claim_mode:  times 4 dq 0
+; 截止：绝对秒数，0 表示永不过期。既定的声明是 0，临时的有一个短的 —— 两者只差这一格。
+; 过期不需要有人去删：查表的时候顺手跳过就行。跳过比删除便宜，而且不会漏掉「一方崩掉
+; 之后留在表里的那一条」—— 那种条目恰恰需要靠时间自己失效。
+claim_due:   times 4 dq 0
 ; 打印时把四个数先落到这里：put_num64 会把寄存器打散，而一段话要连着打四个数。
-claim_tmp:   times 5 dq 0
+; 六个而不是五个：截止用 +40 那一格，而五个 dq 只有四十个字节 —— 写到 +40 就是越界，
+; 它后面紧跟着的是 line_claim_ok 那几个字符串，于是「claim ok」那几行凭空消失了。
+; 越界写不会报错，它只会让某处的字符串悄悄变形。
+claim_tmp:   times 8 dq 0
 line_claim_ok: db "Yunooka: claim ok who=", 0
 line_claim_denied: db "Yunooka: claim denied who=", 0
 line_claim_at: db " at ", 0
