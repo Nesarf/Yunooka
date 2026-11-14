@@ -982,6 +982,8 @@ long_entry:
     call run_rtc_test
     ; 区块：给一个码点，说出它在哪一块 —— 字库分档要按区块切，这是那个前提。
     call run_block_test
+    ; 字库：盘上那份字节读回来，前八个字节必须是 YUNOFONT。
+    call run_font_test
     ; 未绑定被拒：同一个源 id，这次它登记了却没有主人 —— 拒绝的理由换一格。
     call run_event_unbound_test
     ; 工程失活：同一个工程的四条判决 —— 没名字、失活、被信任、接受。
@@ -15933,6 +15935,50 @@ index_find:
     ret
 
 ; 三条判据：条目数、按名字查到扇区、查不存在的名字返回空。
+; 字库在盘上之后，读回它的魔数与字节数。
+;
+; 「在盘上」与「读得回来」是两件事：一条目录条目指向正确的扇区、而那个扇区里是另一份
+; 文件的字节，这种情况在盘上完全看不出来 —— 只有读回来、比前八个字节，才分得开。
+;
+; 这一条也是「表驱动」那件事的收尾判据：表里加一条、根序里加一个名字，而这里能把它
+; 读回来，那才叫那份数据真的上了盘。
+run_font_test:
+    mov rdi, fs_font_path
+    call fs_open_path
+    test rax, rax
+    jz .miss
+    mov [font_len], r14
+    mov rdi, r15
+    call fs_load
+    mov rdi, rsi
+    mov rsi, font_magic
+    mov rcx, 8
+    call bytes_eq
+    jz .ok
+    mov rsi, line_font_bad
+    call puts64
+    ret
+.ok:
+    mov rsi, line_font_ok
+    call puts64
+    mov rax, [font_len]
+    call put_num64
+    call put_nl64
+    ret
+.miss:
+    mov rsi, line_font_miss
+    call puts64
+    ret
+
+font_magic: db "YUNOFONT"
+line_font_ok: db "Yunooka: font magic ok len=", 0
+line_font_bad: db "Yunooka: font magic bad", 13, 10, 0
+line_font_miss: db "Yunooka: font missing", 13, 10, 0
+font_len: dq 0
+; α:/font.hmft —— 与 fs_hello_path 同一种形状，路径是 UTF-16 的码元序列。
+fs_font_path: dw 0x03B1, 0x003A, 0x002F, 0x0066, 0x006F, 0x006E, 0x0074, 0x002E
+              dw 0x0068, 0x006D, 0x0066, 0x0074, 0
+
 run_index_test:
     call index_build
     mov rsi, line_index_count
