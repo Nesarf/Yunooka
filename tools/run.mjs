@@ -668,6 +668,9 @@ for (let i = 0; i < 400; i++) {
     // 重新变成要用的时候才去测。
     if (送过信 && !送过同级 && 读到.includes("Yunooka: same ready")) {
       const 起 = Date.now();
+      // 这里试过 E0 74（set 2 的右方向键）：ps2c 里那一行 translation on 让人怀疑
+      // keyboardputscancode 收的是 set 2。读数没有变，所以那条怀疑否掉了 —— 它收的是
+      // set 1，而翻译那一层不是这个症状的原因。
       const r1 = vbox(["controlvm", 机名, "keyboardputscancode", "e0", "4d"]);
       const 中 = Date.now();
       睡(120);
