@@ -2195,10 +2195,6 @@ try {
   fs.writeSync(fd, 程序字节, 0, 程序字节.length, (数据起 + 5) * 512);
   fs.writeSync(fd, 子目录2, 0, 512, 子目录2号 * 512);
   fs.writeSync(fd, 深层文件, 0, 深层文件.length, 深层文件起 * 512);
-  // 字库：这一行是「加一个文件」的第四处 —— 前面三处（表、根序、预读）都好了之后，
-  // 内容还要有人真的写到它的扇区上。没有这一句，那一格是全零，而读回来的前八个字节
-  // 当然不是 YUNOFONT。
-  fs.writeSync(fd, 字库文件, 0, 字库文件.length, 取起("font.hmft") * 512);
   fs.writeSync(fd, 含毒样本, 0, 含毒样本.length, 毒样本起 * 512);
   fs.writeSync(fd, 干净样本, 0, 干净样本.length, 干净样本起 * 512);
   fs.writeSync(fd, 规则文件, 0, 规则文件.length, 规则起 * 512);
